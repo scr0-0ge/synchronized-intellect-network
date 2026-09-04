@@ -53,6 +53,10 @@ import {
   type AffordanceReading,
   type AffordanceTone,
 } from "../harness/rendered-surface/disabled-affordance.ts";
+import {
+  measureReducedMotionToneFlip,
+  type ReducedMotionToneFlip,
+} from "../harness/rendered-surface/reduced-motion-tone-flip.ts";
 
 /**
  * The probe builds the product's own class lists, disabled and not, so a
@@ -139,6 +143,7 @@ const AFFORDANCE_SURFACES = Object.freeze({
 type AffordancePair = Readonly<{
   project: AffordanceMeasurement;
   mounted: AffordanceMeasurement;
+  reducedMotion: ReducedMotionToneFlip;
 }>;
 
 let measurement: Promise<AffordancePair> | undefined;
@@ -157,7 +162,14 @@ function measureAffordance(): Promise<AffordancePair> {
         tones: TONES,
         controls: PROBE_CONTROLS,
       });
-      return { project, mounted };
+      /* Third drive, same server, no captures: it costs an Electron start and
+         a page load, not a measurement pass. See the F225 test for why the
+         question it answers cannot be asked of the two above. */
+      const reducedMotion = await measureReducedMotionToneFlip(server, {
+        ...AFFORDANCE_SURFACES.mounted,
+        probe: { classes: "btn primary", label: "New Agent Session" },
+      });
+      return { project, mounted, reducedMotion };
     } finally {
       await server.close();
     }
@@ -513,5 +525,123 @@ test("F215 the correction reaches every primary button and leaves the acrylic le
         `${tone.tone}: the probe's primary button does not resolve to what the mounted one resolves to`,
       );
     }
+  }
+});
+
+/*
+ * F225 — a reader who asks for LESS motion must not be given more of it.
+ *
+ * The test above is the one that found this, and it found it the hard way: on
+ * a hosted runner it goes red because the mounted `.btn.primary` reports the
+ * PREVIOUS tone's colours in `oklab()` while the probe, built after the flip,
+ * reports the new tone's. Both readings are correct. What is wrong is that a
+ * transition was running at all.
+ *
+ * `styles.css` carried the widely copied reduced-motion snippet:
+ *
+ *     @media (prefers-reduced-motion: reduce) {
+ *       *, *::before, *::after { transition-duration: 0.01ms !important; }
+ *     }
+ *
+ * `animation-duration` in that same block is harmless, because
+ * `animation-name` is `none` until an author names one — shortening a
+ * duration can only shorten an animation that already exists.
+ * `transition-duration` does not have that shape: `transition-property` is
+ * `all` by default, so a universal `transition-duration` does not shorten
+ * declared transitions, it CREATES one for every animatable property of every
+ * element. This product declares exactly one transition; under reduced motion
+ * it was running hundreds.
+ *
+ * They are 0.01ms long, so nothing is visible and no capture-based guard in
+ * this repository could ever see them. But a transition still begins at
+ * progress 0 and still advances only when the animation timeline ticks, and
+ * `getComputedStyle` forces a style recalculation without ticking it. So in
+ * the window between an attribute flip on `:root` and the next frame, every
+ * already-mounted element reports its OLD value, serialized in the
+ * interpolation space. Whether a frame lands in that window is a race, which
+ * is why the same commit passed twice and failed once.
+ *
+ * This guard removes the race instead of inheriting it. The driver pins
+ * `prefers-reduced-motion: reduce` rather than hoping the host has it, reports
+ * whether the media feature actually matched so a broken switch cannot turn
+ * the guard into a no-op, and performs the flip and the reads in ONE
+ * synchronous task so no frame can tick between them. A transition that is
+ * started is therefore always caught here, on every machine.
+ */
+test("F225 under reduced motion a tone flip starts no transition, and the mounted primary is not left reporting the previous tone", async () => {
+  const { reducedMotion } = await measureAffordance();
+
+  const startedProperties = [
+    ...new Set(reducedMotion.startedByFlip.map((transition) => transition.property)),
+  ].sort();
+
+  process.stdout.write(
+    `F225_TONE_FLIP ${JSON.stringify({
+      reducedMotionMatches: reducedMotion.reducedMotionMatches,
+      baselineAnimations: reducedMotion.baselineAnimations.length,
+      startedByFlip: reducedMotion.startedByFlip.length,
+      startedProperties,
+      onMountedPrimary: reducedMotion.onMountedPrimary.map(
+        (transition) => transition.property,
+      ),
+      mounted: reducedMotion.mounted,
+      probe: reducedMotion.probe,
+    })}\n`,
+  );
+
+  /* Without this the whole test is a no-op that always passes: the defect only
+     exists while the media feature matches. */
+  assert.equal(
+    reducedMotion.reducedMotionMatches,
+    true,
+    "the driver did not actually put the renderer into reduced motion, so this guard proves nothing",
+  );
+  assert.equal(
+    reducedMotion.rootDataset.skin,
+    "acrylic",
+    "the shipped skin is not the one under measurement",
+  );
+
+  /* What the flip started, by object identity against a baseline taken in the
+     same synchronous task. The fixture's own declared animations and anything
+     it still had in flight are therefore not this assertion's business, and a
+     busy surface can neither hide a finding nor manufacture one. */
+  assert.deepEqual(
+    startedProperties,
+    [],
+    "changing the tone started transitions under reduced motion; a reader who asked for less " +
+      "motion is being given a document where every animatable property interpolates",
+  );
+  /* And the control this defect is about carries none, whether the flip
+     started it or retargeted one that was already running. */
+  assert.deepEqual(
+    reducedMotion.onMountedPrimary,
+    [],
+    "a transition is running on the mounted primary after the tone flip, so what " +
+      "getComputedStyle reports for it is an interpolation and not the tone it is in",
+  );
+
+  /* The symptom the transitions produce, stated as the thing a reader would
+     see: the control the product mounted must resolve to what the same class
+     list resolves to when it is built fresh in the same tone. */
+  assert.ok(
+    reducedMotion.mounted.length > 0,
+    "the mounted surface rendered no .btn.primary, so the probe has nothing to be checked against",
+  );
+  for (const mounted of reducedMotion.mounted) {
+    assert.deepEqual(
+      {
+        color: mounted.color,
+        backgroundColor: mounted.backgroundColor,
+        borderTopColor: mounted.borderTopColor,
+      },
+      {
+        color: reducedMotion.probe.color,
+        backgroundColor: reducedMotion.probe.backgroundColor,
+        borderTopColor: reducedMotion.probe.borderTopColor,
+      },
+      "under reduced motion the mounted primary is still reporting the tone it was in before " +
+        "the flip, because a transition it should never have had is holding it at progress 0",
+    );
   }
 });

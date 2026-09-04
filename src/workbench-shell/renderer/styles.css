@@ -2266,11 +2266,45 @@ kbd {
   .sb-item.sb-hide-narrow { display: none; }
 }
 
+/* A reader who asked for LESS motion must not be given more of it (F225).
+ *
+ * The two halves of the widely copied snippet below do not have the same
+ * shape, and only one of them is safe:
+ *
+ *   `animation-duration` is safe because `animation-name` is `none` until an
+ *   author names one. Shortening the duration can only shorten an animation
+ *   that already exists.
+ *
+ *   `transition-duration` is NOT. `transition-property` is `all` by default,
+ *   so a universal `transition-duration: 0.01ms !important` does not shorten
+ *   declared transitions — it CREATES one for every animatable property of
+ *   every element in the document. This product declares exactly ONE
+ *   transition (`.proj-caret`, transform). Under reduced motion it was
+ *   running 281, on colour, background, all four borders, box-shadow and
+ *   text-shadow.
+ *
+ * They are 0.01ms long, so nothing is visible and no screenshot could show
+ * them. What they cost is correctness of the resolved style: a transition
+ * begins at progress 0 and advances only when the animation timeline ticks,
+ * while `getComputedStyle` forces a style recalculation WITHOUT ticking it. So
+ * between an appearance change on `:root` and the next frame, every mounted
+ * element reports its PREVIOUS value, serialized in the interpolation space
+ * (`oklab(…)`). That is what turned the first public CI run red: after the
+ * tone flipped to light the mounted `.btn.primary` was still reporting the
+ * dark tone's colours, while a probe built after the flip — which has no
+ * before-change style and so starts no transition — reported the light ones.
+ * Whether a frame lands inside that window is a race, which is why the same
+ * commit passed twice and failed once.
+ *
+ * `transition-property: none` is the declaration this block always meant. It
+ * makes `transition-duration` moot, so the shortened duration is gone rather
+ * than kept as decoration. Nothing in this renderer listens for
+ * `transitionend`, so removing the transitions removes no behaviour. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    transition-property: none !important;
   }
   .caret { animation: none; opacity: 1; }
 }
