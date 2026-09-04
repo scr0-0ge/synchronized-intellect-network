@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -1042,34 +1049,109 @@ function fakeChild(): EventEmitter & {
   return child;
 }
 
-test("the desktop app's managed Claude Code is discovered, newest version first", async (t) => {
-  if (process.platform !== "win32") return;
+// discoverClaudeExecutable consults PATH, then homedir()\.local\bin, before it
+// ever reaches the managed root. Both have to be pointed somewhere empty, or
+// these tests answer according to what the machine running them happens to have
+// installed. ~/.local/bin/claude.exe in particular is exactly where the native
+// installer puts Claude Code -- that is, on the box of the contributor most
+// likely to be editing this file.
+function isolateDiscovery(
+  register: (teardown: () => void) => void,
+  home: string,
+  appData: string,
+): void {
+  const previous = new Map<string, string | undefined>([
+    ["APPDATA", process.env.APPDATA],
+    ["USERPROFILE", process.env.USERPROFILE],
+    ["PATH", process.env.PATH],
+  ]);
+  register(() => {
+    for (const [key, value] of previous) {
+      // Assigning a captured undefined back would set the literal string
+      // "undefined" and poison every later test in this process.
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  process.env.USERPROFILE = home;
+  process.env.APPDATA = appData;
+  // System32 stays on PATH so where.exe still runs; it just finds no claude.exe.
+  process.env.PATH = join(
+    process.env.SystemRoot ?? String.raw`C:\Windows`,
+    "System32",
+  );
+}
 
+async function managedFixture(
+  register: (teardown: () => void) => void,
+  versions: readonly string[],
+): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "claude-managed-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-
+  register(() => {
+    void rm(root, { recursive: true, force: true });
+  });
   const managed = join(root, "Claude", "claude-code");
-  // 2.0.10 is NEWER than 2.0.9 and sorts BEFORE it as a string. A discovery that
-  // orders these lexicographically hands back the older runtime and nobody sees
-  // why. "brand-new" is not a version directory and must be ignored outright.
-  for (const version of ["2.0.9", "2.0.10", "brand-new"]) {
+  for (const version of versions) {
     await mkdir(join(managed, version), { recursive: true });
     await writeFile(join(managed, version, "claude.exe"), "");
   }
+  isolateDiscovery(register, join(root, "home"), root);
+  return managed;
+}
 
-  const previousAppData = process.env.APPDATA;
-  const previousPath = process.env.PATH;
-  t.after(() => {
-    process.env.APPDATA = previousAppData;
-    process.env.PATH = previousPath;
-  });
-  process.env.APPDATA = root;
-  // System32 stays on PATH so where.exe still runs; it just finds no claude.exe.
-  process.env.PATH = join(process.env.SystemRoot ?? String.raw`C:\Windows`, "System32");
+test("the desktop app's managed Claude Code is discovered, newest version first", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // Two wrong answers are named here on purpose. 2.10.0 is the newest, but it is
+  // NOT what a directory read hands back first -- NTFS enumerates these as
+  // 2.0.10, 2.0.9, 2.10.0 -- and it is not what a string comparison picks
+  // either. Without 2.10.0 in this list the correct answer is already the first
+  // entry, and the whole version ordering can be deleted with this test still
+  // green. "brand-new" parses as no version at all: it must rank last, not
+  // vanish, so it cannot win here and cannot be dropped in the test below.
+  const managed = await managedFixture((teardown) => t.after(teardown), [
+    "2.0.9",
+    "2.0.10",
+    "2.10.0",
+    "brand-new",
+  ]);
 
   assert.equal(
     await discoverClaudeExecutable(),
-    await realpath(join(managed, "2.0.10", "claude.exe")),
+    await realpath(join(managed, "2.10.0", "claude.exe")),
+  );
+});
+
+test("a managed version directory this scan cannot parse is still driven, not discarded", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // A prerelease is the whole install. Dropping names that do not parse would
+  // tell this user their working, signed-in Claude Code does not exist -- the
+  // exact failure the managed scan was added to remove, moved one naming
+  // convention over.
+  const managed = await managedFixture((teardown) => t.after(teardown), [
+    "2.1.0-rc.1",
+  ]);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "2.1.0-rc.1", "claude.exe")),
+  );
+});
+
+test("a managed root past the entry bound still yields its newest runtime", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // An upgrade leaves the previous version behind, so this directory only grows.
+  // A bound that abandons the scan instead of trimming it would make the fix
+  // expire on exactly the machines that have run Claude Code the longest.
+  const versions: string[] = [];
+  for (let minor = 0; minor < 300; minor += 1) versions.push(`1.${minor}.0`);
+  const managed = await managedFixture((teardown) => t.after(teardown), versions);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "1.299.0", "claude.exe")),
   );
 });
 
@@ -1077,24 +1159,67 @@ test("a managed root holding no runtime is not located rather than half-answered
   if (process.platform !== "win32") return;
 
   const root = await mkdtemp(join(tmpdir(), "claude-managed-empty-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, "Claude", "claude-code", "not-a-version"), {
+  t.after(() => {
+    void rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(root, "Claude", "claude-code", "2.0.10"), {
     recursive: true,
   });
-
-  const previousAppData = process.env.APPDATA;
-  const previousPath = process.env.PATH;
-  t.after(() => {
-    process.env.APPDATA = previousAppData;
-    process.env.PATH = previousPath;
-  });
-  process.env.APPDATA = root;
-  process.env.PATH = join(process.env.SystemRoot ?? String.raw`C:\Windows`, "System32");
+  isolateDiscovery((teardown) => t.after(teardown), join(root, "home"), root);
 
   await assert.rejects(
     () => discoverClaudeExecutable(),
     (error: unknown) =>
       error instanceof RuntimeAdapterError &&
       error.category === "runtime-not-located",
+  );
+});
+
+test("a managed root reached through a junction is resolved, not refused", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // Relocating AppData to another drive leaves a junction at exactly this path.
+  // Node reports a junction as a link, so refusing links here would hide a
+  // perfectly good install behind one.
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-junction-"));
+  t.after(() => {
+    void rm(root, { recursive: true, force: true });
+  });
+  const real = join(root, "elsewhere");
+  await mkdir(join(real, "2.0.10"), { recursive: true });
+  await writeFile(join(real, "2.0.10", "claude.exe"), "");
+  await mkdir(join(root, "Claude"), { recursive: true });
+  await symlink(real, join(root, "Claude", "claude-code"), "junction");
+  isolateDiscovery((teardown) => t.after(teardown), join(root, "home"), root);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(real, "2.0.10", "claude.exe")),
+  );
+});
+
+test("a version directory that junctions out of the managed root is skipped, not spawned", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // The path discovery returns is spawned. Allowing a junctioned ROOT must not
+  // also allow a junction INSIDE the root to nominate a binary from anywhere on
+  // the disk -- so the newest-looking entry here points outside and must lose to
+  // the older one that really lives in the tree.
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-escape-"));
+  t.after(() => {
+    void rm(root, { recursive: true, force: true });
+  });
+  const managed = join(root, "Claude", "claude-code");
+  await mkdir(join(managed, "2.0.9"), { recursive: true });
+  await writeFile(join(managed, "2.0.9", "claude.exe"), "");
+  const outside = join(root, "outside");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "claude.exe"), "");
+  await symlink(outside, join(managed, "2.0.10"), "junction");
+  isolateDiscovery((teardown) => t.after(teardown), join(root, "home"), root);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "2.0.9", "claude.exe")),
   );
 });

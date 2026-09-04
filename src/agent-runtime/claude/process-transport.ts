@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, readdir, realpath } from "node:fs/promises";
+import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -315,6 +315,19 @@ async function discoverManagedClaudeExecutable(): Promise<string | undefined> {
 
 // Newest first, so a half-written upgrade that fails validation falls through to
 // the version that was working before it.
+//
+// Two rules here exist so that this scan cannot reintroduce the not-located
+// failure it was written to remove:
+//
+//   - A name this scan cannot parse is RANKED LAST, not dropped. A directory
+//     named for a prerelease, or with four parts, or two, is still a place a
+//     runtime can be; dropping it means a user whose only install is named that
+//     way is told their working Claude Code does not exist.
+//
+//   - The bound is a SLICE, not a cliff. An upgrade leaves the previous version
+//     behind, so this directory only ever grows. Abandoning the scan once it
+//     holds too many entries would mean the fix expires on exactly the machines
+//     that have been running Claude Code the longest.
 async function readManagedVersionDirectories(
   root: string,
 ): Promise<readonly string[]> {
@@ -324,15 +337,25 @@ async function readManagedVersionDirectories(
   } catch {
     return Object.freeze([]);
   }
-  if (names.length > maximumManagedVersionEntries) return Object.freeze([]);
-  const ordered: { readonly name: string; readonly order: readonly number[] }[] =
-    [];
-  for (const name of names) {
-    const order = parseManagedVersion(name);
-    if (order !== undefined) ordered.push({ name, order });
+  const ordered = names
+    .map((name) => ({ name, order: parseManagedVersion(name) }))
+    .sort(compareManagedEntries)
+    .slice(0, maximumManagedVersionEntries)
+    .map((entry) => entry.name);
+  return Object.freeze(ordered);
+}
+
+function compareManagedEntries(
+  left: { readonly name: string; readonly order: readonly number[] | undefined },
+  right: { readonly name: string; readonly order: readonly number[] | undefined },
+): number {
+  if (left.order !== undefined && right.order !== undefined) {
+    return compareManagedVersions(right.order, left.order);
   }
-  ordered.sort((left, right) => compareManagedVersions(right.order, left.order));
-  return Object.freeze(ordered.map((entry) => entry.name));
+  if (left.order !== undefined) return -1;
+  if (right.order !== undefined) return 1;
+  if (left.name === right.name) return 0;
+  return left.name < right.name ? 1 : -1;
 }
 
 function parseManagedVersion(name: string): readonly number[] | undefined {
@@ -356,17 +379,21 @@ function compareManagedVersions(
   return 0;
 }
 
+// Resolved first, then required to be a directory -- rather than refused for
+// being a link. Relocating AppData to another drive leaves a junction at this
+// exact path, and refusing it would hide a perfectly good install behind it.
+// Nothing is given up by allowing it: containment below is checked against the
+// RESOLVED root, so a junction inside a version directory that points out of
+// the tree is still rejected.
 async function resolveExistingDirectory(
   candidate: string,
 ): Promise<string | undefined> {
   if (!isAbsolute(candidate)) return undefined;
   try {
-    const information = await lstat(candidate);
-    if (!information.isDirectory() || information.isSymbolicLink()) {
-      return undefined;
-    }
     const resolved = await realpath(candidate);
-    return isAbsolute(resolved) ? resolved : undefined;
+    if (!isAbsolute(resolved)) return undefined;
+    const information = await stat(resolved);
+    return information.isDirectory() ? resolved : undefined;
   } catch {
     return undefined;
   }
