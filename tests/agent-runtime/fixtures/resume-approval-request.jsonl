@@ -1,0 +1,6 @@
+{"jsonrpc":"2.0","id":1,"result":{"server":"synthetic"}}
+{"jsonrpc":"2.0","id":2,"result":{"account":{"type":"chatgpt"}}}
+{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-fixed"},"model":"gpt-5.6-sol","reasoningEffort":"ultra","approvalPolicy":"never","sandbox":{"type":"dangerFullAccess"}}}
+{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-fixed"}}}
+{"jsonrpc":"2.0","id":4,"result":{"turn":{"id":"turn-resumed","status":"inProgress"}}}
+{"jsonrpc":"2.0","id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-fixed","turnId":"turn-resumed"}}

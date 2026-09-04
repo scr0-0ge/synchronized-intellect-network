@@ -1,0 +1,493 @@
+/* ==========================================================================
+   Skin — Acrylic / vibrancy
+   Additive layer. Load AFTER workbench.css. Activates on:
+       <html data-skin="acrylic">              dark glass  (default)
+       <html data-skin="acrylic" data-tone="light">   light glass
+
+   It only redefines surface tokens and adds the depth cues that make glass
+   read as glass. No layout, no markup, no component rules are changed, so the
+   base design stays intact and the skin can be switched off at runtime.
+
+   The product sets data-glass="full". Under the owner's uniform-acrylic ruling
+   the app owns one thin material: titlebar, Workbench and statusbar reveal that
+   same ancestor instead of painting three independently composited plates.
+   The older data-glass="chrome" selector remains a non-product compatibility
+   path, but it is not an alternative material in the shipped window.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Let the OS material through
+   -------------------------------------------------------------------------- */
+
+:root[data-skin~="acrylic"],
+:root[data-skin~="acrylic"] body {
+  background: transparent;
+}
+
+/* Fallback when there is no OS material behind the window (Windows 10, or
+   backgroundMaterial not applied). Without this the window would be black. */
+:root[data-skin~="acrylic"]:not([data-material="on"]) body::before {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  background:
+    radial-gradient(120% 90% at 50% -20%, #2a3350 0%, transparent 60%),
+    linear-gradient(160deg, #11131b, #0a0a0d 60%);
+  content: "";
+}
+
+:root[data-skin~="acrylic"][data-tone="light"]:not([data-material="on"]) body::before {
+  background:
+    radial-gradient(120% 90% at 50% -20%, #cfd9f0 0%, transparent 60%),
+    linear-gradient(160deg, #eef0f6, #e2e5ee 60%);
+}
+
+/* --------------------------------------------------------------------------
+   2. Dark glass tokens
+   -------------------------------------------------------------------------- */
+
+:root[data-skin~="acrylic"] {
+  /* Raised chrome and controls — genuinely translucent. */
+  --bg-1: rgb(22 22 27 / 58%);
+  --bg-2: rgb(32 32 39 / 62%);
+  --bg-3: rgb(48 48 57 / 58%);
+  --bg-4: rgb(62 62 73 / 62%);
+
+  /* One window ground. Full acrylic lowers this token to the accepted thin
+     60% plate; every first-level region reveals the same resolved material. */
+  --bg-0: rgb(11 11 14 / 88%);
+  --workbench-ground: var(--bg-0);
+
+  /* Base styles retain a chrome alias for other skins. Acrylic resolves it to
+     the one window ground; it never creates a second plate. Chrome uses one
+     crisp foreground colour rather than a thicker ground, outline or glow. */
+  --chrome-ground: var(--workbench-ground);
+  --acrylic-chrome-ink: #ffffff;
+
+  /* Hairlines carry alpha so they sit on glass instead of on top of it. */
+  --line-0: rgb(255 255 255 / 6%);
+  --line-1: rgb(255 255 255 / 11%);
+  --line-2: rgb(255 255 255 / 19%);
+
+  /* Text gains a little contrast; blur eats perceived weight. */
+  --fg-0: #f4f4f7;
+  --fg-1: #b6b6c0;
+  --fg-2: #a0a0aa;
+  --fg-3: #8a8a95;
+
+  /* Settings is a reading surface, not window chrome. Keep its ground opaque
+     so native material and the user's wallpaper cannot lower text contrast. */
+  --settings-reading-ground: #0b0b0e;
+
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 14px;
+
+  --glass-hi: rgb(255 255 255 / 8%);
+  --glass-shadow: 0 22px 60px rgb(0 0 0 / 55%);
+  --blur: saturate(180%) blur(26px);
+}
+
+/* --------------------------------------------------------------------------
+   3. Light glass tokens
+   -------------------------------------------------------------------------- */
+
+/* The elevation ladder darkens, because the ground is already near-white.
+   It used to change direction halfway: --bg-1 and --bg-2 raised a surface by
+   painting WHITE over a #f5f6fc ground, which separated it by 1.043:1 and
+   1.053:1 — nothing an eye can see — and then --bg-3 raised it further by going
+   DARKER, so a surface one level up was invisible and a surface two levels up
+   read as a recessed well. Measured against the dark ladder, which moves one
+   way throughout at 1.047 / 1.112 / 1.220 / 1.393, light now moves one way too. */
+:root[data-skin~="acrylic"][data-tone="light"] {
+  color-scheme: light;
+
+  --bg-1: rgb(0 0 0 / 2.5%);
+  --bg-2: rgb(0 0 0 / 4%);
+  --bg-3: rgb(0 0 0 / 6%);
+  --bg-4: rgb(0 0 0 / 10%);
+  --bg-0: rgb(252 252 254 / 90%);
+  --acrylic-chrome-ink: #000000;
+
+  --line-0: rgb(0 0 0 / 7%);
+  --line-1: rgb(0 0 0 / 12%);
+  --line-2: rgb(0 0 0 / 20%);
+
+  /* Four weights, not three. --fg-2 and --fg-3 used to be #5c5c67 and #60606b —
+     twelve units apart across all three channels, 1.063:1 between them, so the
+     product's most-used text token and the one above it were the same colour to
+     the eye. These reproduce the dark ladder's own ratios against the light
+     ground: 16.7 / 9.8 / 7.6 / 5.8 against dark's 17.9 / 9.8 / 7.6 / 5.8. Both
+     values move AWAY from the ground, so no reading gets worse. */
+  --fg-0: #16161a;
+  --fg-1: #3e3e47;
+  --fg-2: #4e4e58;
+  --fg-3: #60606b;
+  --modal-ink-strong: #ffffff;
+  --modal-ink-regular: #f4f4f7;
+  --modal-ink-muted: #e6e6ec;
+  --settings-reading-ground: #fcfcfe;
+
+  --accent: #2b5cb4;
+  --accent-dim: rgb(43 92 180 / 14%);
+
+  --ok: #276f47;
+  --warn: #805208;
+  --err: #a23a32;
+
+  /* Identity outranks semantics in chroma, the way it does in dark. These carry
+     the LOCKED hues exactly — 192 for Codex, 29 for Claude, read off #22d3ff and
+     #ff9a3c — where the previous values had drifted to 202 and 39 and dropped to
+     0.38 and 0.42 chroma, below light's own --warn and --err. A Runtime badge
+     that is less saturated than a warning is no longer reading as identity. */
+  --rt-codex: #00647d;
+  --rt-codex-bg: rgb(0 100 125 / 12%);
+  --rt-claude: #904500;
+  --rt-claude-bg: rgb(144 69 0 / 12%);
+  --rt-3: #5f4f99;
+  --rt-3-bg: rgb(95 79 153 / 12%);
+  --rt-4: #306a50;
+  --rt-4-bg: rgb(48 106 80 / 12%);
+
+  --glass-hi: rgb(255 255 255 / 65%);
+  --glass-shadow: 0 22px 60px rgb(40 44 60 / 22%);
+}
+
+:root[data-skin~="acrylic"][data-tone="light"] .mark { color: #fff; }
+
+/* The histories panel floats inside a fixed black scrim. In light tone its
+   translucent `--bg-1` plate still resolves to dark grey, so document ink is
+   the wrong polarity even though the light palette itself is correct. Keep the
+   thin plate unchanged and move legibility into crisp, surface-local colour. */
+:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog {
+  color: var(--modal-ink-strong);
+}
+:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog h2,
+:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog .btn {
+  color: var(--modal-ink-strong);
+}
+:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog > p:not(.system-kicker) {
+  color: var(--modal-ink-regular);
+}
+:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog .system-kicker {
+  color: var(--modal-ink-muted);
+}
+
+:root[data-skin~="acrylic"][data-tone="light"] .btn.primary,
+:root[data-skin~="acrylic"][data-tone="light"] .send {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: #12305e;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+:root[data-skin~="acrylic"][data-tone="light"] .btn.primary:hover:not([disabled]),
+:root[data-skin~="acrylic"][data-tone="light"] .send:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+:root[data-skin~="acrylic"][data-tone="light"] .failure-block {
+  border-color: rgb(162 58 50 / 28%);
+  background: rgb(162 58 50 / 7%);
+}
+
+:root[data-skin~="acrylic"][data-tone="light"] .turn-state.is-failed { background: rgb(162 58 50 / 12%); }
+:root[data-skin~="acrylic"][data-tone="light"] .turn-state.is-recovery { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+:root[data-skin~="acrylic"][data-tone="light"] .rule.rule-fail::before,
+:root[data-skin~="acrylic"][data-tone="light"] .rule.rule-fail::after { background: color-mix(in srgb, var(--err) 28%, transparent); }
+:root[data-skin~="acrylic"][data-tone="light"] .state-glyph.is-warn { border-color: rgb(128 82 8 / 30%); background: rgb(128 82 8 / 10%); }
+:root[data-skin~="acrylic"][data-tone="light"] .badge.ok { border-color: rgb(39 111 71 / 30%); background: rgb(39 111 71 / 10%); }
+:root[data-skin~="acrylic"][data-tone="light"] .badge.warn { border-color: rgb(128 82 8 / 30%); background: rgb(128 82 8 / 10%); }
+:root[data-skin~="acrylic"][data-tone="light"] .pr-state.is-missing { background: rgb(128 82 8 / 12%); }
+:root[data-skin~="acrylic"][data-tone="light"] .target-bar.is-new { border-color: rgb(43 92 180 / 30%); background: rgb(43 92 180 / 8%); }
+:root[data-skin~="acrylic"][data-tone="light"] .target-bar.is-blocked { border-color: rgb(128 82 8 / 30%); background: rgb(128 82 8 / 7%); }
+:root[data-skin~="acrylic"][data-tone="light"] .send kbd { background: rgb(0 0 0 / 7%); }
+:root[data-skin~="acrylic"][data-tone="light"] ::-webkit-scrollbar-thumb { background: rgb(0 0 0 / 18%); background-clip: content-box; }
+
+/* --------------------------------------------------------------------------
+   3b. Full-window glass
+   The whole window goes translucent, including the transcript — the Windows
+   Terminal useAcrylic + opacity look.
+
+   The shared ground carries the old reading-column centre's effective opacity
+   across the whole window. Windows owns the one acrylic blur already, so CSS
+   adds only this tint and never re-blurs the native material. The old stacked
+   alphas were
+   1 - (1 - .46) * (1 - .26) = .6004 in dark and
+   1 - (1 - .52) * (1 - .42) = .7216 in light; 60% / 72% preserve that
+   readability guard without giving the transcript a private surface.
+   -------------------------------------------------------------------------- */
+
+:root[data-skin~="acrylic"][data-glass="full"] {
+  --bg-0: rgb(11 11 14 / 60%);
+  --workbench-ground: var(--bg-0);
+  --blur: saturate(190%) blur(40px);
+}
+
+:root[data-skin~="acrylic"][data-glass="full"][data-tone="light"] {
+  --bg-0: rgb(252 252 254 / 72%);
+}
+
+:root[data-skin~="acrylic"][data-glass="full"] .app {
+  background: var(--workbench-ground);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+:root[data-skin~="acrylic"][data-glass="full"] .titlebar,
+:root[data-skin~="acrylic"][data-glass="full"] .body-grid,
+:root[data-skin~="acrylic"][data-glass="full"] .statusbar {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+:root[data-skin~="acrylic"][data-glass="full"] .titlebar {
+  box-shadow: none;
+}
+
+/* The plate remains thin. The owner rejected a keyline after seeing its blur at
+   these small sizes, so every real chrome string uses one crisp neutral fill.
+   Provider/status dots keep their identity colour because they are backgrounds,
+   not text. The close glyph deliberately falls back to white over its red
+   hover/active plate. */
+:root[data-skin~="acrylic"][data-glass="full"] .titlebar :where(
+  .project-menu,
+  .pm-index,
+  .pm-caret,
+  .tb-btn,
+  .caption-btn:not(.close),
+  .caption-btn.close:not(:hover):not(:active)
+),
+:root[data-skin~="acrylic"][data-glass="full"] .statusbar,
+:root[data-skin~="acrylic"][data-glass="full"] .statusbar :where(.k, .v, .st) {
+  color: var(--acrylic-chrome-ink);
+  text-shadow: none;
+}
+
+/* CRT loads after acrylic. This exact selector deliberately outranks its
+   optional phosphor rule so small status text stays crisp under the owner's
+   colour-only chrome decision; machine text elsewhere keeps its CRT styling. */
+:root[data-skin~="acrylic"][data-glass="full"] .statusbar .sb-item.mono .v {
+  color: var(--acrylic-chrome-ink);
+  text-shadow: none;
+}
+
+/* The old rake was a second sheet painted above both material and glyphs. Full
+   acrylic has one uninterrupted material and keeps every decorative wash below
+   the legibility layer by omitting that overlay entirely. */
+:root[data-skin~="acrylic"][data-glass="full"] .app::before {
+  display: none;
+}
+
+/* ONE OS MATERIAL, NO SECOND CSS MATERIAL.
+   Alpha multiplies down a stack: a 34% input on a 58% composer plate on a 60%
+   ground is ~89% solid, which is why the input still reads as an opaque panel
+   even though every layer in it was nominally translucent. Nested
+   backdrop-filters make it worse, not better — they re-blur already-blurred
+   pixels and the result reads as a different, muddier substance.
+
+   So under full glass Windows carries the blur once, the app carries the tint
+   once, and everything inside it delineates with EDGES and a whisper of tint
+   instead of its own fill. */
+
+/* The specular top edge is the signature of a pane that FLOATS. In full glass
+   the composer is not a floating pane, it is a region of the one surface — so
+   the highlight has to go with the fill and the blur. It stays on the things
+   that really do float: popovers and settings cards.
+
+   This line was the loudest remaining "separate layer" cue: an 8% white rule
+   running the full width of the window, right where the composer meets the
+   transcript.
+
+   `.transcript` is here for the same reason and was missed twice (`F102`). CRT
+   screen mode fills it with `--crt-well`, and that fill is the LAST private
+   ground left inside the body grid: with the composer transparent and the rail
+   and inspector transparent, the conversation alone still painted itself a
+   surface, which is exactly the "smaller sheet pasted onto the window" the
+   owner reported. Measured before this line existed, the rail, composer and
+   inspector all composited to rgb(11 11 14) and the transcript to rgb(8 8 12).
+
+   The readability guard is not weakened by removing it. The guard is the body
+   grid's own `--bg-0`, which is MORE opaque than the well that sat on it
+   (60% against 30% under full glass), so the conversation keeps the stronger of
+   the two surfaces rather than the weaker one. */
+:root[data-skin~="acrylic"][data-glass="full"] .composer,
+:root[data-skin~="acrylic"][data-glass="full"] .transcript {
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* The CRT tube's own shading, under full glass only.
+
+   `theme-crt.css` draws one overlay across transcript + composer carrying a
+   sheen, an inner vignette and a 2px inner rim. Under CHROME glass that is the
+   tube and it stays. Under FULL glass it is a third private surface on a ground
+   that is already tinted and already blurred — the same stack the wells were
+   taken off for, in the same file, with the same reason written above them.
+
+   The rim is the literal edge: `inset 0 0 2px` traces a rectangle around the
+   conversation, which is the outline the owner reported seeing. The sheen is
+   the rest of it — measured before this rule, the stage read rgb(239 241 246)
+   against a rail of rgb(246 248 253) at the same height in light tone, a step
+   of 21 across a vertical boundary, where the eye is most sensitive to one.
+
+   The tube is not lost. Scanlines, phosphor bloom, phosphor tint, flicker, the
+   terminal face and the well edges are all drawn elsewhere and all survive;
+   only the depth shading goes, exactly as it did for the code blocks. */
+:root[data-skin~="acrylic"][data-glass="full"][data-crt="screen"] .stage::before {
+  background: none;
+  box-shadow: none;
+}
+
+/* Same reasoning, same highlight, smaller elements. */
+:root[data-skin~="acrylic"][data-glass="full"] .chip:not(.locked) {
+  box-shadow: none;
+}
+
+/* No fill at all. Even 5% white was enough to read as a card sitting ON the
+   glass rather than as part of it, because the tint stacks on top of a surface
+   that is already tinted. A hairline is the whole delineation — and for a code
+   block the monospace face is already doing most of that work.
+
+   Passive content gets the faintest hairline the design has. An 11% outline
+   traced a complete rounded rectangle, and a complete rounded rectangle reads
+   as a card no matter how empty it is. */
+:root[data-skin~="acrylic"][data-glass="full"] .codeblock,
+:root[data-skin~="acrylic"][data-glass="full"] .event-log,
+:root[data-skin~="acrylic"][data-glass="full"] .target-bar {
+  border-color: var(--line-0);
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* The input keeps the stronger edge: it is the one thing here you are meant to
+   click into, and an affordance that dissolves is a worse bug than a visible
+   seam. Fill and highlight still go. */
+:root[data-skin~="acrylic"][data-glass="full"] .input-shell {
+  border-color: var(--line-1);
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Chips stay a touch more present than the panels: they are controls, and a
+   control that dissolves into its background stops looking pressable. */
+:root[data-skin~="acrylic"][data-glass="full"] .chip:not(.locked) {
+  background: rgb(255 255 255 / 9%);
+}
+
+:root[data-skin~="acrylic"][data-glass="full"][data-tone="light"] .chip:not(.locked) {
+  background: rgb(255 255 255 / 52%);
+}
+
+/* --------------------------------------------------------------------------
+   4. Depth. The parts that actually sell it.
+   -------------------------------------------------------------------------- */
+
+/* In-app blur on the layers that float. Kept to a handful of elements —
+   backdrop-filter is the expensive property here, not the translucency. */
+:root[data-skin~="acrylic"] .popover,
+:root[data-skin~="acrylic"] .composer {
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+}
+
+/* A single specular edge along the top of each surface. This one line does
+   more for "glass" than any amount of extra transparency. */
+:root[data-skin~="acrylic"] .composer,
+:root[data-skin~="acrylic"] .popover,
+:root[data-skin~="acrylic"] .provider,
+:root[data-skin~="acrylic"] .input-shell,
+:root[data-skin~="acrylic"] .guard {
+  box-shadow: inset 0 1px 0 var(--glass-hi);
+}
+
+:root[data-skin~="acrylic"] .popover {
+  box-shadow: inset 0 1px 0 var(--glass-hi), var(--glass-shadow);
+}
+
+/* Light rakes across the window from the top. */
+:root[data-skin~="acrylic"] .app::before {
+  position: fixed;
+  z-index: 1;
+  inset: 0 0 auto;
+  height: 240px;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgb(255 255 255 / 5%), transparent);
+  content: "";
+}
+
+/* Rail and inspector are regions of the same ground. Their borders remain a
+   quiet structural edge, not a change of material. */
+:root[data-skin~="acrylic"] .rail { border-right-color: transparent; box-shadow: inset -1px 0 0 var(--line-0); }
+:root[data-skin~="acrylic"] .inspector { border-left-color: transparent; box-shadow: inset 1px 0 0 var(--line-0); }
+
+/* Selection reads as a lit pane rather than a filled rectangle. */
+:root[data-skin~="acrylic"] .session-row[aria-current="true"] {
+  background: var(--bg-3);
+  box-shadow: inset 0 1px 0 var(--glass-hi);
+}
+
+/* Chips are small glass tiles. */
+:root[data-skin~="acrylic"] .chip:not(.locked) {
+  box-shadow: inset 0 1px 0 var(--glass-hi);
+}
+
+/* Windows 11 rounds the window itself; matching the inner corners keeps the
+   frameless window from looking like a rectangle inside a rounded one. */
+:root[data-skin~="acrylic"] .app { border-radius: 8px; overflow: hidden; }
+
+/* --------------------------------------------------------------------------
+   5. Guards
+   -------------------------------------------------------------------------- */
+
+/* Acrylic on Windows drops to an opaque fallback when the window is inactive.
+   Main can reflect that with data-window="blurred" so the skin degrades on
+   purpose instead of appearing to break. */
+:root[data-skin~="acrylic"][data-window="blurred"] .app,
+:root[data-skin~="acrylic"][data-window="blurred"] .popover,
+:root[data-skin~="acrylic"][data-window="blurred"] .composer {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Some users turn transparency off at the OS level. Honour it: the skin
+   collapses to the solid base design rather than half-applying. */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-skin~="acrylic"] {
+    --bg-0: #0b0b0e;
+    --bg-1: #141418;
+    --bg-2: #1d1d23;
+    --bg-3: #2b2b33;
+    --bg-4: #3a3a44;
+    --line-0: #232328;
+    --line-1: #2f2f36;
+    --line-2: #43434c;
+  }
+
+  :root[data-skin~="acrylic"][data-tone="light"] {
+    --bg-0: #fcfcfe;
+    --bg-1: #f3f3f7;
+    --bg-2: #ffffff;
+    --bg-3: #e9e9ef;
+    --bg-4: #dedee6;
+  }
+
+  :root[data-skin~="acrylic"] .app,
+  :root[data-skin~="acrylic"] .titlebar,
+  :root[data-skin~="acrylic"] .body-grid,
+  :root[data-skin~="acrylic"] .statusbar,
+  :root[data-skin~="acrylic"] .popover,
+  :root[data-skin~="acrylic"] .composer {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  :root[data-skin~="acrylic"] .app::before,
+  :root[data-skin~="acrylic"] body::before { display: none; }
+}

@@ -1,0 +1,651 @@
+/* ==========================================================================
+   Skin — Retro terminal (CRT)
+   Additive layer. Load AFTER workbench.css and theme-acrylic.css.
+
+       <html data-crt="screen">  the whole MIDDLE PANE is the screen ← default
+       <html data-crt="blocks">  only code blocks, event log and the composer
+                                 input
+       <html data-crt="full">    the whole window, chrome included
+
+       data-phosphor="neutral"   no tint                            (default)
+       data-phosphor="green"     P1 green
+       data-phosphor="amber"     P3 amber
+       data-crt-extras="curve"   vignette + tube bulge. Opt-in.
+       data-crt-flicker="on"     flicker + roll band. Opt-in.
+       data-crt-font="bitmap"    swap wells to a bundled bitmap DOS font,
+                                 IF one is installed. Silent no-op otherwise.
+
+   Reproduces what Windows Terminal's experimental.retroTerminalEffect does —
+   scanlines and phosphor bloom on the text. It stacks with the acrylic skin
+   the same way useAcrylic and the retro effect stack in Windows Terminal.
+
+   --------------------------------------------------------------------------
+   BOUNDARIES (owner-adjudicated 2026-08-10)
+   --------------------------------------------------------------------------
+     "screen"  = the middle pane BELOW ITS HEADER: transcript plus the whole
+                 composer (target bar, profile chips, input, footer). The
+                 stage header (session title / Interrupt) is part of the
+                 case, like the rail, inspector, titlebar and STATUS BAR —
+                 all of those stay untouched.
+     "blocks"  = only the machine wells: code blocks, event log, input.
+     "full"    = everything, status bar included.
+
+   The status bar is chrome. It is CRT-styled in "full" mode ONLY — it spans
+   the window under all three panes, so painting it in "screen" mode leaked
+   the effect outside the tube (owner bug report #1).
+
+   Within the screen, the two halves of the effect still have different
+   reach: the WELL, tint and bloom cover the whole pane; SCANLINES fall only
+   on machine output (code, event log, the input). Prose never takes
+   scanlines — that line is what keeps paragraphs readable.
+
+   --------------------------------------------------------------------------
+   PHOSPHOR IS INDEPENDENT OF THE CRT MODE
+   --------------------------------------------------------------------------
+   §2 tints machine output whether or not any CRT mode is on, so green/amber
+   work as a plain accent on the clean skin.
+
+   --------------------------------------------------------------------------
+   THE TUBE FOLLOWS THE TONE
+   --------------------------------------------------------------------------
+   In light tone the well is a light phosphor screen showing a positive
+   image: pale ground, saturated dark glyphs, and a chromatic halo — the
+   "positive image" mode monochrome monitors really shipped.
+   ========================================================================== */
+
+:root {
+  /* Dark tube. */
+  --crt-line-color: rgb(0 0 0 / 22%);
+  --crt-line-step: 3px;
+  --crt-bloom: 6px;
+  --crt-bloom-prose: 3px;
+  --crt-bloom-tint: 2px;          /* phosphor tint with no CRT mode on */
+  --crt-fg-1-alpha: 88%;
+  --crt-fg-2-alpha: 72%;
+  --crt-fg-3-alpha: 60%;
+  --crt-phosphor: currentcolor;
+  /* Neutral glow reads the colour-scheme hook (theme-schemes.css) so the
+     glow follows the accent; green/amber below override it outright. */
+  --crt-glow: var(--scheme-glow, rgb(180 210 255 / 42%));
+  --crt-well: rgb(6 8 11 / 76%);
+  --crt-well-edge: rgb(255 255 255 / 5%);
+  --crt-inner: rgb(0 0 0 / 62%);
+  --crt-roll: rgb(255 255 255 / 7%);
+  --crt-vignette: rgb(0 0 0 / 45%);
+
+  /* Composed overlay layers. Both default to none so one pseudo-element can
+     carry either, both, or neither — which is what stops this theme from
+     fighting theme-acrylic.css over body::before. */
+  --crt-scan-layer: none;
+  --crt-vignette-layer: none;
+
+  /* Terminal face for the wells. Cascadia Mono IS Windows Terminal's default
+     face — Code's ligatures off is the period-correct terminal cut. */
+  --crt-mono: "Cascadia Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
+}
+
+/* Opt-in bitmap tier. Names resolve only if the owner later bundles a
+   licensed bitmap font (e.g. the Ultimate Oldschool PC Font Pack, CC BY-SA);
+   until then every name misses and the stack falls back to Cascadia Mono.
+   Nothing external is fetched and no font file ships with this design. */
+:root[data-crt-font="bitmap"] {
+  --crt-mono: "Px437 IBM VGA8", "Perfect DOS VGA 437", "Cascadia Mono",
+    ui-monospace, Consolas, monospace;
+}
+
+/* Light tube — positive image. */
+:root[data-tone="light"] {
+  --crt-line-color: rgb(0 0 0 / 13%);
+  --crt-fg-1-alpha: 100%;
+  --crt-fg-2-alpha: 98%;
+  --crt-fg-3-alpha: 96%;
+  --crt-glow: rgb(0 0 0 / 20%);
+  --crt-well: rgb(250 249 245 / 84%);
+  --crt-well-edge: rgb(0 0 0 / 9%);
+  --crt-inner: rgb(90 84 70 / 16%);
+  --crt-roll: rgb(0 0 0 / 5%);
+  --crt-vignette: rgb(90 84 70 / 26%);
+}
+
+/* The owner-selectable light-tube ladder. Missing/legacy tier data deliberately
+   falls through to B above; only C raises the two dimmer text levels. */
+:root[data-tone="light"][data-phosphor-tier="c"] {
+  --crt-fg-1-alpha: 100%;
+  --crt-fg-2-alpha: 100%;
+  --crt-fg-3-alpha: 98%;
+}
+
+:root[data-phosphor="green"] {
+  --crt-phosphor: #8dffb4;
+  --crt-glow: rgb(80 255 150 / 55%);
+}
+
+:root[data-phosphor="amber"] {
+  --crt-phosphor: #ffc46b;
+  --crt-glow: rgb(255 176 60 / 55%);
+}
+
+/* On a light tube saturated ink and a chromatic halo carry the glow; keep the
+   positive-image well, but never mute Green/Amber into grey or earth-yellow. */
+:root[data-tone="light"][data-phosphor="green"] {
+  --crt-phosphor: #007236;
+  --crt-glow: rgb(0 255 105 / 52%);
+  --crt-well: rgb(243 249 244 / 84%);
+}
+
+:root[data-tone="light"][data-phosphor="amber"] {
+  --crt-phosphor: #b23a00;
+  --crt-glow: rgb(255 104 24 / 50%);
+  --crt-well: rgb(252 247 237 / 84%);
+}
+
+/* A is restrained, B is the unqualified compatibility default above, and C
+   is hottest. Tier selectors always include the light tone so changing this
+   setting cannot alter the praised dark Phosphor rendering. */
+:root[data-tone="light"][data-phosphor-tier="a"][data-phosphor="green"] {
+  --crt-phosphor: #08713f;
+  --crt-glow: rgb(0 190 82 / 40%);
+}
+
+:root[data-tone="light"][data-phosphor-tier="a"][data-phosphor="amber"] {
+  --crt-phosphor: #a34600;
+  --crt-glow: rgb(235 90 12 / 38%);
+}
+
+:root[data-tone="light"][data-phosphor-tier="c"][data-phosphor="green"] {
+  --crt-phosphor: #006f35;
+  --crt-glow: rgb(0 255 105 / 68%);
+}
+
+:root[data-tone="light"][data-phosphor-tier="c"][data-phosphor="amber"] {
+  --crt-phosphor: #b43b00;
+  --crt-glow: rgb(255 92 12 / 64%);
+}
+
+/* --------------------------------------------------------------------------
+   0b. Full-window glass wins over the tube
+   The tube's own opacity (76% / 84% above) and data-glass="full" were two
+   rules pulling opposite ways, and the tube was winning: code blocks and the
+   composer input stayed solid slabs inside an otherwise translucent window.
+
+   Under data-glass="full" the wells drop to a tint and pick up the SAME
+   acrylic signature as the chrome, so every surface in the window is one
+   material. The tube then reads as depth — darker, vignetted, scanlined —
+   rather than as a different substance stuck on top of the glass.
+
+   The inner shadow drops with it: at 62% black it was doing the work the
+   opacity used to do, and left the wells looking solid even once they were
+   not.
+   -------------------------------------------------------------------------- */
+
+:root[data-glass="full"] {
+  --crt-well: rgb(6 8 11 / 30%);
+  --crt-inner: rgb(0 0 0 / 34%);
+}
+
+:root[data-glass="full"][data-tone="light"] {
+  --crt-well: rgb(250 249 245 / 34%);
+  --crt-inner: rgb(90 84 70 / 10%);
+}
+
+:root[data-glass="full"][data-tone="light"][data-phosphor="green"] {
+  --crt-well: rgb(243 249 244 / 34%);
+}
+
+:root[data-glass="full"][data-tone="light"][data-phosphor="amber"] {
+  --crt-well: rgb(252 247 237 / 34%);
+}
+
+/* Under full glass the wells keep NO surface of their own — no fill, no inset
+   vignette, no second blur. All three were stacking on a tube that is already
+   tinted and already blurred, which is exactly what made a code block read as
+   a separate slab pasted onto the glass instead of a region of it.
+
+   Nothing legible is lost: the scanlines in §3 already mark these surfaces as
+   machine output, and the monospace face marks the code. A hairline is the
+   only edge they need. */
+:root[data-glass="full"][data-crt] .codeblock,
+:root[data-glass="full"][data-crt] .event-log,
+:root[data-glass="full"][data-crt] .input-shell {
+  border-color: var(--crt-well-edge);
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Focus still has to be unmistakable — but it is a ring, not a slab. */
+:root[data-glass="full"][data-crt] .input-shell:focus-within {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--crt-glow) 20%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   1. Terminal face on the wells — any CRT mode
+   The typeface itself was already right (Cascadia is the Windows Terminal
+   font); what CRT modes add is the terminal CUT of it: Mono instead of Code,
+   ligatures off, a whisper of tracking so glyphs sit like grid cells.
+   Prose keeps the sans face — a monospaced paragraph is a readability tax,
+   not a period detail.
+   -------------------------------------------------------------------------- */
+
+:root[data-crt] .codeblock,
+:root[data-crt] .event-log,
+:root[data-crt] .input-shell textarea {
+  font-family: var(--crt-mono);
+  font-variant-ligatures: none;
+  letter-spacing: 0.02em;
+}
+
+/* --------------------------------------------------------------------------
+   2. Phosphor tint — works with every CRT mode, including none
+   -------------------------------------------------------------------------- */
+
+.crt-text,
+:root[data-phosphor="green"] .codeblock,
+:root[data-phosphor="green"] .event-log li,
+:root[data-phosphor="green"] .statusbar .sb-item.mono .v,
+:root[data-phosphor="green"] .input-shell textarea,
+:root[data-phosphor="green"] .sr-model,
+:root[data-phosphor="green"] .turn-model,
+:root[data-phosphor="green"] .rule-label .mono,
+:root[data-phosphor="green"] .kv-row dd.mono,
+:root[data-phosphor="green"] .pos,
+:root[data-phosphor="green"] .opt-sub,
+:root[data-phosphor="green"] .count,
+:root[data-phosphor="green"] .pm-index,
+:root[data-phosphor="green"] .pr-ord,
+:root[data-phosphor="green"] kbd,
+:root[data-phosphor="amber"] .codeblock,
+:root[data-phosphor="amber"] .event-log li,
+:root[data-phosphor="amber"] .statusbar .sb-item.mono .v,
+:root[data-phosphor="amber"] .input-shell textarea,
+:root[data-phosphor="amber"] .sr-model,
+:root[data-phosphor="amber"] .turn-model,
+:root[data-phosphor="amber"] .rule-label .mono,
+:root[data-phosphor="amber"] .kv-row dd.mono,
+:root[data-phosphor="amber"] .pos,
+:root[data-phosphor="amber"] .opt-sub,
+:root[data-phosphor="amber"] .count,
+:root[data-phosphor="amber"] .pm-index,
+:root[data-phosphor="amber"] .pr-ord,
+:root[data-phosphor="amber"] kbd {
+  color: var(--crt-phosphor);
+  text-shadow: 0 0 var(--crt-bloom-tint) var(--crt-glow);
+}
+
+:root[data-phosphor="green"] .input-shell textarea,
+:root[data-phosphor="amber"] .input-shell textarea { caret-color: var(--crt-phosphor); }
+
+/* --------------------------------------------------------------------------
+   3. Scanlines — machine wells only, in every CRT mode
+   -------------------------------------------------------------------------- */
+
+.crt-surface,
+:root[data-crt] .codeblock,
+:root[data-crt] .event-log,
+:root[data-crt] .input-shell {
+  position: relative;
+}
+
+.crt-surface::after,
+:root[data-crt] .codeblock::after,
+:root[data-crt] .event-log::after,
+:root[data-crt] .input-shell::after {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--crt-line-color) 0 1px,
+    transparent 1px var(--crt-line-step)
+  );
+  content: "";
+}
+
+/* Controls stay above the glass. A scanline grid over a button reads as a
+   rendering fault, not as a CRT. */
+:root[data-crt] .input-shell .send { position: relative; z-index: 2; }
+
+/* --------------------------------------------------------------------------
+   4. Wells and bloom
+   -------------------------------------------------------------------------- */
+
+:root[data-crt] .codeblock,
+:root[data-crt] .event-log,
+:root[data-crt] .input-shell {
+  border-color: var(--crt-well-edge);
+  background: var(--crt-well);
+  box-shadow:
+    inset 0 0 38px var(--crt-inner),
+    inset 0 0 3px var(--crt-well-edge);
+}
+
+/* Two different boundaries here, both owner-adjudicated (2026-08-10):
+
+   SURFACES (wells, scanlines, backgrounds) obey the pane boundary — tube
+   and wells only; the status bar gets them in "full" mode alone.
+
+   IDENTIFIER GLOW — the phosphor bloom on machine names (rail model names,
+   turn models, kbd hints, picker ordinals) — is app-wide in every CRT mode.
+   The owner explicitly kept the rail glow: the names of machines glowing
+   everywhere reads as intentional; panels being CRT outside the tube reads
+   as a bug. The status bar stays out of even this list (its own ruling). */
+
+/* Wells — every CRT mode. */
+:root[data-crt] .codeblock,
+:root[data-crt] .event-log li,
+:root[data-crt] .input-shell textarea {
+  color: var(--crt-phosphor);
+  text-shadow: 0 0 1px var(--crt-glow), 0 0 var(--crt-bloom) var(--crt-glow);
+}
+
+/* Machine identifiers — app-wide, every CRT mode. Not the status bar.
+
+   BLOOM ONLY, no colour. Under neutral phosphor --crt-phosphor resolves to
+   `currentcolor`, and `color: currentcolor` is effectively `color: inherit` —
+   it would have wiped the locked provider hue off every model name. Colour for
+   green/amber is set in §2, which is scoped to those two values.
+
+   So a model name glows in its provider's own colour, and only a deliberate
+   green/amber choice makes the window monochrome. Provider dots survive even
+   that, because they paint on `background`. */
+:root[data-crt] .sr-model,
+:root[data-crt] .turn-model,
+:root[data-crt] .rule-label .mono,
+:root[data-crt] .kv-row dd.mono,
+:root[data-crt] .pos,
+:root[data-crt] .opt-sub,
+:root[data-crt] .count,
+:root[data-crt] .pm-index,
+:root[data-crt] .pr-ord,
+:root[data-crt] kbd {
+  text-shadow: 0 0 1px var(--crt-glow), 0 0 var(--crt-bloom) var(--crt-glow);
+}
+
+/* The composer input is the most terminal-like element in the app: it is where
+   you type at the machine. Live phosphor caret and a glowing placeholder. */
+:root[data-crt] .input-shell textarea { caret-color: var(--crt-phosphor); }
+
+:root[data-crt] .input-shell textarea::placeholder {
+  color: var(--crt-phosphor);
+  opacity: 0.4;
+  text-shadow: 0 0 4px var(--crt-glow);
+}
+
+:root[data-crt] .input-shell:focus-within {
+  border-color: color-mix(in srgb, var(--crt-glow) 60%, transparent);
+  box-shadow:
+    inset 0 0 38px var(--crt-inner),
+    0 0 0 3px color-mix(in srgb, var(--crt-glow) 20%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   5. "screen" — the tube is the middle pane below its header
+   Transcript + the whole composer read as ONE continuous glass surface.
+   The stage header stays on the case, so it gets no override at all; its
+   existing border-bottom is the seam where case meets glass.
+   -------------------------------------------------------------------------- */
+
+:root[data-crt="screen"] .stage { position: relative; }
+
+:root[data-crt="screen"] .transcript,
+:root[data-crt="screen"] .composer {
+  background: var(--crt-well);
+}
+
+/* The composer is part of the tube, not a chrome slab in front of it: its
+   backdrop plate and glass highlight come off so the well is continuous. */
+:root[data-crt="screen"] .composer {
+  border-top-color: var(--crt-well-edge);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+/* One glass overlay spanning transcript + composer: the sheen near the top
+   and the inner vignette, drawn once so no seam appears where the two
+   elements meet. The 38px offset is .stage-head's fixed height in
+   workbench.css — update together if that ever changes. */
+:root[data-crt="screen"] .stage::before {
+  position: absolute;
+  z-index: 4;
+  inset: 38px 0 0;
+  pointer-events: none;
+  /* Both the sheen and the vignette are gradients in PERCENTAGES, so the tube
+     shading scales with the pane instead of being a fixed 90–140px band.
+
+     That fixed band was the actual cause of the two dark strips down the
+     sides: at a 1072px pane the gutter beside the content came to 64–74px and
+     the vignette reached 90px, so the shading ended exactly where the content
+     began and the two edges fused into a visible line. A percentage vignette
+     cannot line up with the content edge at any particular width, which is
+     what makes a max-width safe to reintroduce on .column. */
+  background:
+    radial-gradient(125% 85% at 50% 18%, var(--crt-well-edge) 0%, transparent 60%),
+    radial-gradient(118% 132% at 50% 50%, transparent 52%, var(--crt-inner) 100%);
+  box-shadow: inset 0 0 2px var(--crt-well-edge);
+  content: "";
+}
+
+/* Everything painted on the glass takes the soft bloom — prose, turn heads,
+   the target bar, the profile chips, the footer line. Never scanlines. The
+   header is not on the glass, so it is absent from this list. */
+:root[data-crt="screen"] .transcript .prose,
+:root[data-crt="screen"] .transcript .rule,
+:root[data-crt="screen"] .transcript .turn-head,
+:root[data-crt="screen"] .composer .target-bar,
+:root[data-crt="screen"] .composer .chip,
+:root[data-crt="screen"] .composer .composer-foot,
+:root[data-crt="screen"] .composer .control-note {
+  text-shadow: 0 0 var(--crt-bloom-prose) var(--crt-glow);
+}
+
+/* Green/amber turn the glass monochrome. Two mechanisms because both exist
+   in the base sheet: direct color for inherited text, scoped fg-vars for the
+   elements (chips, footers) that declare their own. */
+:root[data-crt="screen"][data-phosphor="green"] .transcript,
+:root[data-crt="screen"][data-phosphor="green"] .composer,
+:root[data-crt="screen"][data-phosphor="amber"] .transcript,
+:root[data-crt="screen"][data-phosphor="amber"] .composer {
+  --fg-0: var(--crt-phosphor);
+  --fg-1: color-mix(in srgb, var(--crt-phosphor) var(--crt-fg-1-alpha), transparent);
+  --fg-2: color-mix(in srgb, var(--crt-phosphor) var(--crt-fg-2-alpha), transparent);
+  --fg-3: color-mix(in srgb, var(--crt-phosphor) var(--crt-fg-3-alpha), transparent);
+
+  color: var(--crt-phosphor);
+}
+
+:root[data-crt="screen"][data-phosphor="green"] .transcript .prose strong,
+:root[data-crt="screen"][data-phosphor="amber"] .transcript .prose strong {
+  color: var(--crt-phosphor);
+}
+
+/* --------------------------------------------------------------------------
+   6. "full" — the whole window, chrome included
+   The ONLY mode that touches the status bar.
+   -------------------------------------------------------------------------- */
+
+:root[data-crt="full"] {
+  --crt-scan-layer: repeating-linear-gradient(
+    to bottom,
+    var(--crt-line-color) 0 1px,
+    transparent 1px var(--crt-line-step)
+  );
+}
+
+:root[data-crt="full"] .statusbar {
+  position: relative;
+  background: var(--crt-well);
+}
+
+:root[data-crt="full"] .statusbar::after {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    var(--crt-line-color) 0 1px,
+    transparent 1px var(--crt-line-step)
+  );
+  content: "";
+}
+
+:root[data-crt="full"] .statusbar .sb-item { position: relative; z-index: 2; }
+
+:root[data-crt="full"] .statusbar .sb-item.mono .v {
+  color: var(--crt-phosphor);
+  text-shadow: 0 0 1px var(--crt-glow), 0 0 var(--crt-bloom) var(--crt-glow);
+}
+
+:root[data-crt="full"] .prose,
+:root[data-crt="full"] .sr-title,
+:root[data-crt="full"] .stage-title,
+:root[data-crt="full"] .state-card h1 {
+  text-shadow: 0 0 var(--crt-bloom-prose) var(--crt-glow);
+}
+
+:root[data-crt="full"][data-phosphor="green"],
+:root[data-crt="full"][data-phosphor="amber"] {
+  --fg-0: var(--crt-phosphor);
+  --fg-1: color-mix(in srgb, var(--crt-phosphor) var(--crt-fg-1-alpha), transparent);
+  --fg-2: color-mix(in srgb, var(--crt-phosphor) var(--crt-fg-2-alpha), transparent);
+  --fg-3: color-mix(in srgb, var(--crt-phosphor) var(--crt-fg-3-alpha), transparent);
+}
+
+/* --------------------------------------------------------------------------
+   7. Curve — vignette and tube bulge
+   Shares ONE pseudo-element with the full-mode scanlines via the two layer
+   variables. body::before belongs to theme-acrylic.css (its no-material
+   fallback); two themes on one pseudo was why curve used to do nothing.
+   -------------------------------------------------------------------------- */
+
+:root[data-crt][data-crt-extras~="curve"] {
+  --crt-vignette-layer:
+    radial-gradient(128% 104% at 50% 50%, transparent 46%, var(--crt-vignette) 100%);
+}
+
+:root[data-crt] body::after {
+  position: fixed;
+  z-index: 9998;
+  inset: 0;
+  pointer-events: none;
+  background: var(--crt-vignette-layer), var(--crt-scan-layer);
+  content: "";
+}
+
+/* In "screen" the curve belongs to the tube: it bows the glass region via
+   the shared overlay, so the header and chrome stay flat. */
+:root[data-crt="screen"][data-crt-extras~="curve"] .stage::before {
+  box-shadow:
+    inset 0 0 120px var(--crt-inner),
+    inset 0 0 44px var(--crt-inner),
+    inset 0 0 2px var(--crt-well-edge);
+}
+
+/* --------------------------------------------------------------------------
+   8. Flicker and roll band
+   The roll band hangs off .stage / .app — NOT off .transcript, which is a
+   scroll container: an absolutely positioned child there scrolls away with
+   the content, which is why the band used to be invisible.
+   -------------------------------------------------------------------------- */
+
+@keyframes crt-flicker {
+  0%, 100% { opacity: 1; }
+  8% { opacity: 0.86; }
+  9% { opacity: 1; }
+  41% { opacity: 0.93; }
+  42% { opacity: 0.99; }
+  43% { opacity: 0.88; }
+  44% { opacity: 1; }
+  77% { opacity: 0.91; }
+  78% { opacity: 1; }
+}
+
+@keyframes crt-roll {
+  0% { transform: translateY(-30%); }
+  100% { transform: translateY(760%); }
+}
+
+:root[data-crt] .app { position: relative; }
+
+/* Both glass elements flicker on the same clock — they start together when
+   the attribute lands, so they stay in phase. The header does not flicker:
+   it is not part of the tube. */
+:root[data-crt="screen"][data-crt-flicker="on"] .transcript,
+:root[data-crt="screen"][data-crt-flicker="on"] .composer,
+:root[data-crt="blocks"][data-crt-flicker="on"] .codeblock,
+:root[data-crt="blocks"][data-crt-flicker="on"] .event-log,
+:root[data-crt="blocks"][data-crt-flicker="on"] .input-shell,
+:root[data-crt="full"][data-crt-flicker="on"] .app {
+  animation: crt-flicker 5s linear infinite;
+}
+
+:root[data-crt="screen"][data-crt-flicker="on"] .stage::after,
+:root[data-crt="full"][data-crt-flicker="on"] .app::after {
+  position: absolute;
+  z-index: 9996;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 12%;
+  pointer-events: none;
+  background: linear-gradient(180deg, transparent, var(--crt-roll) 45%, transparent);
+  animation: crt-roll 6.5s linear infinite;
+  content: "";
+}
+
+/* In screen mode the band starts below the header, same offset as the
+   overlay. */
+:root[data-crt="screen"][data-crt-flicker="on"] .stage::after { top: 38px; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-crt][data-crt-flicker="on"] .transcript,
+  :root[data-crt][data-crt-flicker="on"] .composer,
+  :root[data-crt][data-crt-flicker="on"] .codeblock,
+  :root[data-crt][data-crt-flicker="on"] .event-log,
+  :root[data-crt][data-crt-flicker="on"] .input-shell,
+  :root[data-crt][data-crt-flicker="on"] .app { animation: none; }
+
+  :root[data-crt][data-crt-flicker="on"] .stage::after,
+  :root[data-crt][data-crt-flicker="on"] .app::after { display: none; }
+}
+
+/* --------------------------------------------------------------------------
+   9. Guards
+   -------------------------------------------------------------------------- */
+
+/* Reduced transparency usually means fewer decorative overlays too. Drop the
+   scanlines and the vignette; keep the phosphor colour, which is information
+   about which surfaces are machine output. */
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-crt] .codeblock::after,
+  :root[data-crt] .event-log::after,
+  :root[data-crt] .input-shell::after,
+  :root[data-crt="full"] .statusbar::after,
+  :root[data-crt] body::after,
+  :root[data-crt="screen"] .stage::before { display: none; }
+}
+
+/* High contrast wins outright. A CRT skin is decoration and must yield. */
+@media (forced-colors: active) {
+  :root[data-crt] *,
+  :root[data-phosphor] * { text-shadow: none !important; }
+
+  :root[data-crt] .codeblock::after,
+  :root[data-crt] .event-log::after,
+  :root[data-crt] .input-shell::after,
+  :root[data-crt="full"] .statusbar::after,
+  :root[data-crt] body::after,
+  :root[data-crt="screen"] .stage::before,
+  :root[data-crt] .stage::after,
+  :root[data-crt] .app::after { display: none !important; }
+
+  :root[data-crt="screen"] .transcript,
+  :root[data-crt="screen"] .composer,
+  :root[data-crt] .codeblock,
+  :root[data-crt] .event-log,
+  :root[data-crt] .input-shell { background: Canvas; box-shadow: none; }
+}

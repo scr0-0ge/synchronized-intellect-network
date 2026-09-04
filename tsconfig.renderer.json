@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node", "vite/client"]
+  },
+  "include": [
+    "src/workbench-shell/contract.ts",
+    "src/workbench-shell/renderer/**/*.ts",
+    "src/workbench-shell/renderer/**/*.tsx",
+    "tests/workbench-shell/visual-harness/**/*.ts",
+    "tests/workbench-shell/visual-harness/**/*.tsx",
+    "vite.*.config.ts"
+  ]
+}

@@ -1,0 +1,107 @@
+/* ==========================================================================
+   Legibility correction — product only
+   Load last. The owner-authorized semantic text floor now lives in the
+   mirrored acrylic token layer; this product-only layer retains component
+   corrections that do not change the design vocabulary.
+
+   This layer is deliberately product-only and has no counterpart in the design
+   specification, which is not amended to accommodate it.
+   Native material remains an orthogonal root state; this file never selects
+   or rewrites it, and it does not recolour primary transcript prose.
+   ========================================================================== */
+
+/* A glyph is content, not a hairline. */
+:root[data-skin~="acrylic"] .rail-empty .glyph { color: var(--fg-3); }
+
+/* Same defect, second site, found by rendering rather than by reading: the
+   Agent Session meta separator is also painted with a hairline token. Measured
+   on the real composited surface it reaches 1.85:1 in dark and 1.59:1 in light
+   against a required 4.5:1, which is not a dim separator but an absent one.
+   `aria-hidden` does not exempt it — the glyph above carries the same attribute
+   and was corrected anyway.
+
+   It moves to --fg-2 rather than to --fg-3, which would match its neighbours,
+   because --fg-3 measures 4.46:1 on this raised row surface and would land back
+   under the bar. That gap is the global --fg-3 question, which is a palette
+   decision and is not taken here. */
+:root[data-skin~="acrylic"] .sr-meta .sep { color: var(--fg-2); }
+
+/* The one disabled control the correction below never reached. `.removal-trigger`
+   uses `:disabled` where the others use `[disabled]`, so it kept whole-control
+   opacity 0.35 and its × renders at 1.72:1 dark and 1.66:1 light. Restoring full
+   strength brings it to 5.7:1 and 6.1:1 on the same surfaces.
+
+   `.session-action:disabled` carries opacity 0.4 and is the same class, but the
+   local fixture never renders it in a disabled state, so it is reported rather
+   than changed on an unmeasured assumption. */
+:root[data-skin~="acrylic"] .removal-trigger:disabled { opacity: 1; }
+
+/* CRT used to multiply an already-tertiary placeholder down to 40%. The
+   retained 88% still distinguishes placeholder copy without hiding it. */
+:root[data-crt] .input-shell textarea::placeholder { opacity: 0.88; }
+
+/* Disabled state is already conveyed by the native attribute, cursor, border,
+   and unavailable action. Whole-control opacity made useful explanations and
+   labels fail contrast, so keep their semantic colours at full strength. */
+:root[data-skin~="acrylic"] .project-row[disabled],
+:root[data-skin~="acrylic"] .rail-action[disabled],
+:root[data-skin~="acrylic"] .btn[disabled],
+:root[data-skin~="acrylic"] .chip[disabled],
+:root[data-skin~="acrylic"] .input-shell.is-disabled,
+:root[data-skin~="acrylic"] .proj-toggle[disabled],
+:root[data-skin~="acrylic"] .session-row[disabled],
+:root[data-skin~="acrylic"] .picker-list .opt:disabled,
+:root[data-skin~="acrylic"] .endpoint-status-option.is-disabled {
+  opacity: 1;
+}
+
+/* The one control that premise is FALSE for (F215). A `.btn.primary` paints
+   its own colour, background and border, and all three survive `[disabled]`:
+   `styles.css` `.btn[disabled]` and `.btn.primary` are both (0,2,0) so the
+   later `.btn.primary` takes the colour, the disabled rule names no border at
+   all, and the restoration above returns the opacity to 1. Measured in the
+   renderer, a disabled primary button was pixel-identical to a live one —
+   `cursor: not-allowed` was the entire difference, and a cursor does not exist
+   on a touch screen or in a screenshot. `New Agent Session` is the control it
+   hit, which is the control F207 was about.
+
+   Corrected here rather than by dropping `.btn[disabled]` from the list above,
+   because that would restore whole-control dimming — the exact trade this file
+   exists to refuse — for eight controls that never had F215.
+
+   The signal is carried by the CHROME instead: the accent fill and the accent
+   border are withdrawn, which is what makes the control read as unavailable,
+   while the label keeps a full-strength semantic ink. Withdrawing accent
+   chrome on disable is not a new idea here — `styles.css` `.send[disabled]`,
+   the composer's own accent control, already does exactly that, in the design
+   corpus too. `.btn.primary` was the accent control that never got one.
+
+   --line-1 and --bg-2 are not chosen values: they are the `.btn` base this
+   button would already have if `.btn.primary` stopped overriding it. Composited
+   on the stage panel that moves the control by 33 (fill), 91 (border) and 60
+   (glyph) per channel in dark, and 23, 72 and 44 in light — against the 3 the
+   rendered-surface guard already pins as the largest distance two points on
+   ONE painted surface may differ by.
+
+   The label lands on --fg-1 rather than the --fg-3 `.btn[disabled]` and
+   `.send[disabled]` use: --fg-3 measures 5.18:1 dark and 5.35:1 light on this
+   ground, and --fg-1 measures 8.60:1 and 8.97:1, which stays near the 9.81:1
+   and 9.56:1 the leaked enabled ink was reading. Muting a control costs
+   contrast; it need not cost that much of it, and this control's neighbours
+   are not evidence about what it can afford. Every one of those numbers is
+   re-measured on each run by
+   tests/workbench-shell/disabled-primary-affordance.test.ts, so none of them
+   is a claim this comment has to be trusted on.
+
+   Skin-scoped because the defect is: without this file `.btn[disabled]` still
+   applies opacity 0.65, so a disabled primary is already dim under every other
+   skin, and the design corpus — which carries the same specificity collision
+   and no acrylic restoration — renders it dim too. This moves the product back
+   towards the corpus rather than away from it. */
+:root[data-skin~="acrylic"] .btn.primary[disabled] {
+  border-color: var(--line-1);
+  color: var(--fg-1);
+  background: var(--bg-2);
+}
+
+:root[data-skin~="acrylic"] .send[disabled] kbd { opacity: 1; }

@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>uaw-placement-probe</title>
+<!--
+  The page tests/workbench-shell/offscreen-placement-renders.test.ts loads
+  through the real QA harness main process.
+
+  It exists so the guard measures ONE thing: whether the compositor is still
+  driving frames for a window in the harness's new placement. A fixed-colour
+  mark makes a capture verifiable by counting pixels, and the animated bar makes
+  a stalled requestAnimationFrame chain visible as a small tick count instead of
+  a hang.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #101820; }
+  #mark { position: absolute; left: 0; top: 0; width: 400px; height: 200px; background: #ff00aa; }
+  #bar { position: absolute; left: 0; top: 260px; width: 120px; height: 60px; background: #00ffcc; }
+</style>
+<div id="mark"></div>
+<div id="bar"></div>
+<script>
+  globalThis.__placementTicks = 0;
+  const bar = document.getElementById("bar");
+  function frame() {
+    globalThis.__placementTicks += 1;
+    bar.style.transform = "translateX(" + ((globalThis.__placementTicks * 7) % 900) + "px)";
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+</script>

@@ -1,0 +1,15 @@
+# This project's entire verification model rests on byte-exact files.
+#
+# state.json must round-trip exactly as JSON.stringify(obj, null, 2) + "\n",
+# and every issue, evidence and handover file is pinned by a recorded SHA-256
+# in the supervision ledger. Any line-ending translation on checkout would
+# break all of it at once — the round-trip precondition, every recorded
+# digest, and every frozen-tree aggregate — and would present as wholesale
+# corruption rather than as a line-ending problem.
+#
+# core.autocrlf is true at the system level on the machine where this
+# repository was created, so without this file a fresh clone would convert
+# 367 committed files to CRLF.
+#
+# Therefore: never translate line endings for anything, in either direction.
+* -text

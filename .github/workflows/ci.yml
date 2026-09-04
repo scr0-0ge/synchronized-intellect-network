@@ -1,0 +1,149 @@
+# Synchronized Intellect Network CI —— 项目仅面向 Windows，全部跑 windows-latest。
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  # 同一 ref（分支或同一 PR）只保留最新一次运行，旧的自动取消。
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: Typecheck
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # pnpm 版本固定依据（详见 PR 报告）：
+      # 1) pnpm-lock.yaml 为 lockfileVersion: '9.0'——该格式由 pnpm 9 引入，
+      #    pnpm 10/11 未做破坏性变更、沿用同一版本号（pnpm 维护者在
+      #    pnpm/pnpm#9054 确认；Vercel changelog 亦说明 9/10 共用 '9.0'），
+      #    因此仅凭 lockfileVersion 无法区分 9/10/11；
+      # 2) 开发机 corepack 缓存（%LOCALAPPDATA%\node\corepack\v1\pnpm）
+      #    中唯一缓存且实际使用的版本是 11.20.0；
+      # 3) 仓库 pnpm-workspace.yaml 使用的是 allowBuilds 键——这是 pnpm 11
+      #    才引入的配置项（v10 及以前为 onlyBuiltDependencies），说明本仓库
+      #    工具链已按 v11 配置。综上精确固定为开发机同款 11.20.0。
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.20.0
+
+      - uses: actions/setup-node@v7
+        with:
+          # 测试代码 import 了 node:sqlite（需 Node >= 22.5）；开发机实测
+          # v24.19.0 全部通过，故选 24 大版本线（setup-node 解析最新 24.x）。
+          # typecheck 仅依赖 devDependencies 的 @types/node 22.15.30，与运行时无关。
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 与 unit-test matrix 独立的固定入口：即使 tests/e2e glob 本身发生漂移，
+      # mirror 守卫仍会执行并把该漂移报红；matrix 保留第二条冗余执行路径。
+      - name: Run test-infrastructure guard independently
+        run: node --test --test-concurrency=1 tests/e2e/test-infrastructure.test.ts
+
+      # 两条命令与 package.json 的 "typecheck" 脚本完全一致；加 pnpm exec
+      # 只是让本地 node_modules/.bin/tsc 可被解析（Actions 不会把
+      # node_modules/.bin 加进 PATH），参数原样保留。
+      - name: Typecheck main
+        run: pnpm exec tsc --noEmit
+
+      - name: Typecheck renderer
+        run: pnpm exec tsc --noEmit --project tsconfig.renderer.json
+
+  unit-tests:
+    name: Unit tests / ${{ matrix.shard }}
+    runs-on: windows-latest
+    strategy:
+      # 某个分片失败不取消其余分片，保证一次运行能暴露所有失败面。
+      fail-fast: false
+      matrix:
+        include:
+          # 分片 glob 与 package.json "test" 脚本的文件列表逐字镜像。
+          - shard: agent-runtime+session-profile
+            globs: 'tests/agent-runtime/*.test.ts tests/session-profile/*.test.ts'
+          - shard: coordinator
+            globs: 'tests/coordinator/*.test.ts'
+          - shard: workbench-shell
+            globs: 'tests/workbench-shell/*.test.ts'
+          - shard: harness
+            globs: 'tests/harness/*.test.ts'
+          - shard: e2e-guard+launcher
+            globs: 'tests/e2e/*.test.ts tests/launcher/*.test.mjs'
+
+        # tests/e2e/*.test.ts 只匹配纯 headless 的基础设施守卫；真正启动
+        # Electron/GUI 的 E2E driver 使用普通 .ts 文件名，仍由手动 / 发布前
+        # 的 pnpm test:e2e 入口运行，不会被这个 matrix 启动。
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.20.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # provider-attempt-dist-marker.test.ts 校验构建产物中的 request-budget
+      # 标记，需要 dist/main/main.js 存在；仅 workbench-shell 分片包含它。
+      - name: Build main bundle
+        if: matrix.shard == 'workbench-shell'
+        run: pnpm exec vite build --config vite.main.config.ts
+
+      # theme-legibility 的 F66 封印用 rendered-surface harness 在钉死的
+      # 1440x1000 视口里数可见文字；runner 默认 1024x768 的虚拟屏装不下这个
+      # 窗口（Windows 建窗时钳到 1008x681，封印 44 处只剩 36 处可见）。仅
+      # workbench-shell 分片渲染，其余分片不动显示器。详见脚本内注释。
+      - name: Enlarge the virtual display for the pinned 1440x1000 viewport
+        if: matrix.shard == 'workbench-shell'
+        run: ./scripts/set-ci-display-mode.ps1
+
+      # Node >= 21 起 node --test 自行展开 glob 模式；Windows 上 PowerShell
+      # 将参数原样传给 node.exe，与开发机经 package.json script 运行的行为一致。
+      # --test-concurrency=1 与 package.json 保持一致，避免分片内并发互相干扰。
+      - name: Run tests (${{ matrix.shard }})
+        run: node --test --test-concurrency=1 ${{ matrix.globs }}
+
+  rendered-surface-tests:
+    name: Rendered surface tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.20.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 这些测试把测量视口钉死在 1440x1000（宽窗口面还要更宽才能让阅读上限
+      # 咬合）；runner 默认 1024x768 的虚拟屏会让 Windows 把隐藏测量窗钳成
+      # 1008x681，viewport 断言与依赖布局的探针全红。先把分辨率调到开发机
+      # 同款 1920x1200（或最接近的可用模式）。详见脚本内注释。
+      - name: Enlarge the virtual display for the pinned 1440x1000 viewport
+        run: ./scripts/set-ci-display-mode.ps1
+
+      # 独立命名让真实 Chromium 的几何/对比度失败不会混进普通单元测试；
+      # 驱动使用隐藏窗口、隔离 profile，并显式关闭硬件加速。
+      - name: Run rendered-surface tests
+        run: pnpm test:rendered-surfaces

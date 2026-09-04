@@ -1,0 +1,24 @@
+# Dependencies and generated output
+node_modules/
+dist/
+out/
+coverage/
+.vite/
+test-results/
+playwright-report/
+
+# The Electron E2E harness normally creates this isolated tree under the
+# operating-system temporary directory. Ignore it defensively if a caller
+# redirects the temporary directory into a clone.
+workbench-electron-e2e-*/
+
+# Local environment overrides must never become repository content.
+.env
+.env.*
+!.env.example
+run-app.log
+
+# Scratch space. The E2E drivers and the rendered-surface harness write their
+# evidence and their generated renderer profiles here at run time; none of it is
+# repository content.
+.scratch/

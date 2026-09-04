@@ -1,0 +1,17 @@
+---
+status: proposed
+---
+
+# Preserve historical stores as a branch-preserving recovery library
+
+Historical store recovery lives behind one Workbench-owned deep Module. It discovers the bounded private candidates before the mutation-capable Project Host starts, resolves physical duplicates with current classification winning, and makes stable owner-only copies into Recovery Intake. Preparation always reaches a terminal result before exactly one Project Host start; recovery failure does not block that start, and discovery never runs again after it.
+
+The Module never opens an original source with SQLite or another mutation-capable reader. A capture accepts regular files only, rejects links, checks file-handle identity and stable metadata before and after copying, verifies digests, observes fixed source/count/byte/deadline bounds, and retries drift no more than three times. Exact v1/v2 readers operate on disposable copies. WAL/SHM/journal combinations, schemas, relations, stored JSON, unknown files, replacement files, and backup artifacts are enumerated explicitly; anything not proved safe fails closed. A missing `project-ledgers` directory is compatible only with a verified registry whose `records` array is empty.
+
+Preservation is append-only. Content-addressed blobs, exact manifests, and receipt-committed generations are namespaced inside the owner-only Historical Recovery Library. The receipt is the commit point. Startup quarantines unpublished intake, invalid journals, and generations without an exact receipt; committed generations and blobs are revalidated before projection or export. A cleanup failure may produce a bounded partial result but cannot revoke a committed generation. No recovery operation writes, renames, removes, imports, merges, or otherwise changes a discovered source or any Project folder.
+
+The public boundary consists of four exact IPC/preload methods: snapshot, metadata browse, perform, and cancel. Closed request/result unions carry only bounded ordinal labels, counts, fixed categories, and opaque parent-scoped capabilities. Sender/document ownership, snapshot rotation, reload, cancellation, close, and late-result behavior are enforced in main. Extra keys, accessors, proxies, sparse arrays, invalid prototypes, stale or foreign capabilities, incoherent pagination, and oversized responses fail closed.
+
+The renderer adds one contained Data recovery card to the existing Settings surface. `WorkbenchSurface` remains exactly `project | settings`; existing Settings entrances, exit behavior, focus restoration, Selected Project, and provider/session metadata behavior remain unchanged. The card permits preserve, acknowledge, read-only `Library -> Generation -> Project -> Session -> Turn` metadata browsing, export-copy, and cancel. It does not display native paths, source filenames, content, native references, or private errors.
+
+Export is an intentional native-chooser copy. A private durable journal records registered, chooser-claimed, target-authorized, committed, chooser-cancelled, or outcome-unknown state. Restart never repeats a claimed chooser, target reconciliation never overwrites a pre-existing file, response loss replays a committed result, and another export requires another operation. Merge, import, adoption, resume, Runtime execution, a second active ledger, conflict selection, automatic semantic deduplication, owner-facing deletion, Project-registry relinking, and Project-folder mutation remain explicitly out of scope.

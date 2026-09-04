@@ -1,0 +1,86 @@
+/* ==========================================================================
+   Skin — colour schemes
+   Additive layer. Load AFTER workbench.css / theme-acrylic.css / theme-crt.css.
+   Activates on <html data-scheme="...">. No attribute = the default scheme.
+
+   What a scheme is allowed to change — and what it is not:
+
+     CHANGES   --accent (focus rings, selection ticks, running states, the
+               primary Send/Start buttons, live caret) and --scheme-glow
+               (the neutral CRT bloom colour, read by theme-crt.css).
+
+     NEVER     semantic colours (--ok / --warn / --err) and the runtime-slot
+               hues (--rt-1..4). Those carry information — "this endpoint",
+               "this failed" — and repainting information per scheme would
+               make the same fact look different under different skins.
+
+   This mirrors how Windows Terminal schemes work: the palette swaps, the
+   meaning of the entries does not. The retro equivalents (green / amber
+   phosphor) already live in theme-crt.css as data-phosphor.
+
+   The default scheme's accent (#7aa2f7) stays defined in workbench.css.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Campbell — the Windows Terminal / cmd default blue
+   -------------------------------------------------------------------------- */
+
+:root[data-scheme="campbell"] {
+  --accent: #3b78ff;
+  --accent-dim: rgb(59 120 255 / 15%);
+  --scheme-glow: rgb(59 120 255 / 46%);
+}
+
+:root[data-scheme="campbell"][data-tone="light"] {
+  --accent: #1f5adf;
+  --accent-dim: rgb(31 90 223 / 13%);
+  --scheme-glow: rgb(31 90 223 / 24%);
+}
+
+/* --------------------------------------------------------------------------
+   One Half Dark — the soft editor blue
+   -------------------------------------------------------------------------- */
+
+:root[data-scheme="one-half"] {
+  --accent: #61afef;
+  --accent-dim: rgb(97 175 239 / 15%);
+  --scheme-glow: rgb(97 175 239 / 44%);
+}
+
+:root[data-scheme="one-half"][data-tone="light"] {
+  --accent: #2a7ac0;
+  --accent-dim: rgb(42 122 192 / 13%);
+  --scheme-glow: rgb(42 122 192 / 24%);
+}
+
+/* --------------------------------------------------------------------------
+   Solarized — the low-contrast classic
+   -------------------------------------------------------------------------- */
+
+:root[data-scheme="solarized"] {
+  --accent: #268bd2;
+  --accent-dim: rgb(38 139 210 / 15%);
+  --scheme-glow: rgb(38 139 210 / 44%);
+}
+
+:root[data-scheme="solarized"][data-tone="light"] {
+  --accent: #1a6ba3;
+  --accent-dim: rgb(26 107 163 / 13%);
+  --scheme-glow: rgb(26 107 163 / 24%);
+}
+
+/* --------------------------------------------------------------------------
+   Nord — the cold one
+   -------------------------------------------------------------------------- */
+
+:root[data-scheme="nord"] {
+  --accent: #88c0d0;
+  --accent-dim: rgb(136 192 208 / 15%);
+  --scheme-glow: rgb(136 192 208 / 42%);
+}
+
+:root[data-scheme="nord"][data-tone="light"] {
+  --accent: #3a7f95;
+  --accent-dim: rgb(58 127 149 / 13%);
+  --scheme-glow: rgb(58 127 149 / 24%);
+}
