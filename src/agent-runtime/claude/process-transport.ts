@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -25,6 +25,8 @@ import type {
 
 const maximumPathLookupBytes = 16_384;
 const maximumPathCandidates = 16;
+const maximumManagedVersionEntries = 256;
+const managedVersionPattern = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/u;
 export const CLAUDE_CREDENTIAL_ENVIRONMENT_KEYS = Object.freeze([
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -267,7 +269,117 @@ export async function discoverClaudeExecutable(): Promise<string> {
     join(homedir(), ".local", "bin", "claude.exe"),
   );
   if (officialCandidate !== undefined) return officialCandidate;
+
+  const managedCandidate = await discoverManagedClaudeExecutable();
+  if (managedCandidate !== undefined) return managedCandidate;
+
   throw new RuntimeAdapterError("runtime-not-located");
+}
+
+// Claude Code installed by the Claude desktop app is not on PATH and is not in
+// ~/.local/bin. It lands in a per-version directory under the roaming profile,
+// and an upgrade leaves the previous version behind rather than deleting it. So
+// the rule here cannot be Codex's "more than one candidate means ambiguous":
+// more than one is the NORMAL state of this directory. The newest version that
+// validates is the one to drive.
+//
+// The desktop APPLICATION also ships a claude.exe, under
+// %LOCALAPPDATA%\AnthropicClaude. That one is the GUI, not the CLI, and driving
+// it would fail in a way no error message would explain. Only the roots below
+// are searched, and a resolved candidate must still land inside the root it was
+// found under -- a junction in a version directory cannot point discovery out.
+function claudeManagedRoots(): readonly string[] {
+  const roaming = process.env.APPDATA;
+  const base =
+    typeof roaming === "string" && roaming.length > 0 && isAbsolute(roaming)
+      ? roaming
+      : join(homedir(), "AppData", "Roaming");
+  return Object.freeze([join(base, "Claude", "claude-code")]);
+}
+
+async function discoverManagedClaudeExecutable(): Promise<string | undefined> {
+  for (const root of claudeManagedRoots()) {
+    const resolvedRoot = await resolveExistingDirectory(root);
+    if (resolvedRoot === undefined) continue;
+    for (const version of await readManagedVersionDirectories(root)) {
+      const validated = await validateNativeExecutable(
+        join(root, version, "claude.exe"),
+      );
+      if (validated !== undefined && isContainedIn(validated, resolvedRoot)) {
+        return validated;
+      }
+    }
+  }
+  return undefined;
+}
+
+// Newest first, so a half-written upgrade that fails validation falls through to
+// the version that was working before it.
+async function readManagedVersionDirectories(
+  root: string,
+): Promise<readonly string[]> {
+  let names: readonly string[];
+  try {
+    names = await readdir(root);
+  } catch {
+    return Object.freeze([]);
+  }
+  if (names.length > maximumManagedVersionEntries) return Object.freeze([]);
+  const ordered: { readonly name: string; readonly order: readonly number[] }[] =
+    [];
+  for (const name of names) {
+    const order = parseManagedVersion(name);
+    if (order !== undefined) ordered.push({ name, order });
+  }
+  ordered.sort((left, right) => compareManagedVersions(right.order, left.order));
+  return Object.freeze(ordered.map((entry) => entry.name));
+}
+
+function parseManagedVersion(name: string): readonly number[] | undefined {
+  const matched = managedVersionPattern.exec(name);
+  if (matched === null) return undefined;
+  return Object.freeze([
+    Number(matched[1]),
+    Number(matched[2]),
+    Number(matched[3]),
+  ]);
+}
+
+function compareManagedVersions(
+  left: readonly number[],
+  right: readonly number[],
+): number {
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (left[index] as number) - (right[index] as number);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+async function resolveExistingDirectory(
+  candidate: string,
+): Promise<string | undefined> {
+  if (!isAbsolute(candidate)) return undefined;
+  try {
+    const information = await lstat(candidate);
+    if (!information.isDirectory() || information.isSymbolicLink()) {
+      return undefined;
+    }
+    const resolved = await realpath(candidate);
+    return isAbsolute(resolved) ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isContainedIn(candidate: string, root: string): boolean {
+  const normalizedRoot = root
+    .toLocaleLowerCase("en-US")
+    .replace(/[\\/]+$/u, "");
+  if (normalizedRoot.length === 0) return false;
+  return candidate
+    .toLocaleLowerCase("en-US")
+    .startsWith(`${normalizedRoot}\\`);
 }
 
 async function lookupWindowsPath(): Promise<readonly string[]> {

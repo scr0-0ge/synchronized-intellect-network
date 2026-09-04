@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -20,6 +23,7 @@ import {
   createOfficialClaudeSessionTransport,
   createClaudeProcessEnvironment,
   createClaudeSessionArguments,
+  discoverClaudeExecutable,
   type ClaudeCatalogProcessDependencies,
 } from "../../src/agent-runtime/claude/process-transport.ts";
 
@@ -1037,3 +1041,60 @@ function fakeChild(): EventEmitter & {
   };
   return child;
 }
+
+test("the desktop app's managed Claude Code is discovered, newest version first", async (t) => {
+  if (process.platform !== "win32") return;
+
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const managed = join(root, "Claude", "claude-code");
+  // 2.0.10 is NEWER than 2.0.9 and sorts BEFORE it as a string. A discovery that
+  // orders these lexicographically hands back the older runtime and nobody sees
+  // why. "brand-new" is not a version directory and must be ignored outright.
+  for (const version of ["2.0.9", "2.0.10", "brand-new"]) {
+    await mkdir(join(managed, version), { recursive: true });
+    await writeFile(join(managed, version, "claude.exe"), "");
+  }
+
+  const previousAppData = process.env.APPDATA;
+  const previousPath = process.env.PATH;
+  t.after(() => {
+    process.env.APPDATA = previousAppData;
+    process.env.PATH = previousPath;
+  });
+  process.env.APPDATA = root;
+  // System32 stays on PATH so where.exe still runs; it just finds no claude.exe.
+  process.env.PATH = join(process.env.SystemRoot ?? String.raw`C:\Windows`, "System32");
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "2.0.10", "claude.exe")),
+  );
+});
+
+test("a managed root holding no runtime is not located rather than half-answered", async (t) => {
+  if (process.platform !== "win32") return;
+
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-empty-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "Claude", "claude-code", "not-a-version"), {
+    recursive: true,
+  });
+
+  const previousAppData = process.env.APPDATA;
+  const previousPath = process.env.PATH;
+  t.after(() => {
+    process.env.APPDATA = previousAppData;
+    process.env.PATH = previousPath;
+  });
+  process.env.APPDATA = root;
+  process.env.PATH = join(process.env.SystemRoot ?? String.raw`C:\Windows`, "System32");
+
+  await assert.rejects(
+    () => discoverClaudeExecutable(),
+    (error: unknown) =>
+      error instanceof RuntimeAdapterError &&
+      error.category === "runtime-not-located",
+  );
+});
