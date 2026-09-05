@@ -42,6 +42,9 @@ import {
   publicAppearancePreferenceSaved,
   publicClaudePermissionHandlingLoaded,
   publicClaudePermissionHandlingSaved,
+  publicRuntimeExecutablesLoaded,
+  publicRuntimeExecutableSaved,
+  defaultWorkbenchRuntimeExecutablePaths,
   publicRuntimeEndpointDiscovery,
 } from "../../../src/workbench-shell/contract.ts";
 import { mountWorkbench } from "../../../src/workbench-shell/renderer/mount.tsx";
@@ -226,6 +229,16 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
   },
   saveClaudePermissionHandling() {
     return Promise.resolve(publicClaudePermissionHandlingSaved());
+  },
+  loadRuntimeExecutables() {
+    return Promise.resolve(
+      publicRuntimeExecutablesLoaded(defaultWorkbenchRuntimeExecutablePaths),
+    );
+  },
+  saveRuntimeExecutable() {
+    return Promise.resolve(
+      publicRuntimeExecutableSaved(defaultWorkbenchRuntimeExecutablePaths),
+    );
   },
   observeProject(listener: WorkbenchHostedProjectListener) {
     projectListener = listener;

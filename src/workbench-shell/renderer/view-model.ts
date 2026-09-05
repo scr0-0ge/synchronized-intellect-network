@@ -23,12 +23,17 @@ import type {
   WorkbenchProjectSelectionResult,
   WorkbenchProjectView,
   WorkbenchRuntimeEndpointDiscoveryCategory,
+  WorkbenchConfigurableRuntime,
   WorkbenchRuntimeEndpointId,
   WorkbenchRuntimeEndpointOption,
   WorkbenchSessionContextUsage,
   WorkbenchSubmissionResult,
   WorkbenchTimelineEvent,
 } from "../contract.ts";
+import {
+  RUNTIME_LOOKUP_SURFACES,
+  type RuntimeLookupSurface,
+} from "../../agent-runtime/runtime-lookup-surface.ts";
 import {
   isValidWorkbenchDirectInput,
   publicRuntimeEndpointDiscovery,
@@ -1935,6 +1940,16 @@ export interface WorkbenchRuntimeEndpointStatusRow {
   readonly statusLabel: StatusRowLabelText;
   readonly detail: string;
   readonly endpoint: WorkbenchRuntimeEndpointOption | null;
+  /** Which runtime's executable path a user would set for this row. */
+  readonly runtime: WorkbenchConfigurableRuntime;
+  /**
+   * What the lookup asked for and where, present only when nothing was found.
+   *
+   * This is read from the SAME constant the discovery code uses, and it is
+   * renderer-side only -- the IPC contract still carries nothing but the
+   * category, so no resolved path from the user's machine crosses the boundary.
+   */
+  readonly lookup: RuntimeLookupSurface | null;
 }
 
 export function directEndpointStatusRows(
@@ -1959,12 +1974,19 @@ export function directEndpointStatusRows(
           : status.category;
       const endpoint =
         category === "catalog-ready" ? catalogEndpoint ?? null : null;
+      const runtime: WorkbenchConfigurableRuntime =
+        status.endpointId === "codex-desktop" ? "codex" : "claude";
       return Object.freeze({
         endpointId: status.endpointId,
         ...identity,
         category,
         ...endpointStatusCopy(category),
         endpoint,
+        runtime,
+        lookup:
+          category === "runtime-not-located"
+            ? RUNTIME_LOOKUP_SURFACES[runtime]
+            : null,
       });
     }),
   );

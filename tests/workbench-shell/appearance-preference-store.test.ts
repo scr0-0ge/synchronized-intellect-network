@@ -155,7 +155,7 @@ test("Ask when needed survives a clean restart without resetting appearance and 
     "ask-when-needed",
   );
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 4,
+    schemaVersion: 5,
     appearance: {
       tone: "dark",
       crt: "blocks",
@@ -164,6 +164,7 @@ test("Ask when needed survives a clean restart without resetting appearance and 
       language: "en",
     },
     claudePermissionHandling: "ask-when-needed",
+    runtimeExecutables: { codex: "", claude: "" },
   });
   await reopened.close();
 });
@@ -220,9 +221,10 @@ test("one exact non-default appearance survives a clean store restart and cannot
   assert.equal(
     await readFile(appearancePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 4,
+      schemaVersion: 5,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
+      runtimeExecutables: { codex: "", claude: "" },
     })}\n`,
   );
   assert.equal(await readFile(directProfilePath, "utf8"), directProfileBytes);
@@ -426,9 +428,10 @@ test("close flushes an in-flight appearance save and rejects every later operati
   assert.equal(
     await readFile(filePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 4,
+      schemaVersion: 5,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
+      runtimeExecutables: { codex: "", claude: "" },
     })}\n`,
   );
 });

@@ -1,3 +1,5 @@
+import type { WindowsRuntimeLaunch } from "../../src/agent-runtime/windows-executable-admission.ts";
+import { nativeLaunch } from "../../src/agent-runtime/claude/process-transport.ts";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
@@ -29,7 +31,7 @@ test("Claude binding fixes auth login, discards all output, scrubs credentials, 
   const launches: unknown[][] = [];
   const dependencies: ClaudeSubscriptionAuthenticationDependencies = Object.freeze({
     async discoverExecutable() {
-      return "private-claude-executable";
+      return nativeLaunch("private-claude-executable");
     },
     async readAuthenticationStatus() {
       return JSON.stringify({
@@ -91,7 +93,7 @@ test("Claude logout fixes auth logout, discards all output, scrubs credentials, 
   const launches: unknown[][] = [];
   const dependencies: ClaudeSubscriptionAuthenticationDependencies = Object.freeze({
     async discoverExecutable() {
-      return "private-claude-executable";
+      return nativeLaunch("private-claude-executable");
     },
     async readAuthenticationStatus() {
       return "private status output must not be consumed by an action";
@@ -345,7 +347,7 @@ test("both provider adapters treat exit zero, nonzero, and signal as output-free
     const claudeProvider = createOfficialClaudeSubscriptionAuthenticationProvider(
       Object.freeze({
         async discoverExecutable() {
-          return "private-claude-executable";
+          return nativeLaunch("private-claude-executable");
         },
         async readAuthenticationStatus() {
           claudeStatusReads += 1;
@@ -442,7 +444,7 @@ test("Codex status uses account/read refreshToken false and projects only recogn
 });
 
 test("official provider logout actions do not spawn after service cancellation wins deferred discovery", async () => {
-  const claudeDiscovery = deferred<string>();
+  const claudeDiscovery = deferred<WindowsRuntimeLaunch>();
   let claudeSpawns = 0;
   const claudeProvider = createOfficialClaudeSubscriptionAuthenticationProvider(
     Object.freeze({
@@ -469,7 +471,7 @@ test("official provider logout actions do not spawn after service cancellation w
   );
   await tick();
   await claudeService.close();
-  claudeDiscovery.resolve("private-claude-executable");
+  claudeDiscovery.resolve(nativeLaunch("private-claude-executable"));
   await tick();
   await tick();
   assert.equal((await claudeBinding).effect, "cancelled");
@@ -610,10 +612,10 @@ test("inspection timeout aborts the exact Claude status command once", async () 
   const provider = createOfficialClaudeSubscriptionAuthenticationProvider(
     Object.freeze({
       async discoverExecutable() {
-        return "private-claude-executable";
+        return nativeLaunch("private-claude-executable");
       },
       readAuthenticationStatus(
-        _executable: string,
+        _launch: WindowsRuntimeLaunch,
         options: Parameters<
           ClaudeSubscriptionAuthenticationDependencies["readAuthenticationStatus"]
         >[1],
@@ -699,7 +701,7 @@ test("inspection timeout stops the exact Codex app-server transport once", async
 function claudeDependencies(status: { value: string }): ClaudeSubscriptionAuthenticationDependencies {
   return Object.freeze({
     async discoverExecutable() {
-      return "claude";
+      return nativeLaunch("claude");
     },
     async readAuthenticationStatus() {
       return status.value;

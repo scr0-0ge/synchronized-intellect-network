@@ -1,12 +1,22 @@
 import { execFile, spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Interface as ReadLineInterface } from "node:readline";
 
 import { RuntimeAdapterError } from "../index.ts";
+import { configuredRuntimeExecutable } from "../configured-executable.ts";
+import { CLAUDE_RUNTIME_LOOKUP_SURFACE } from "../runtime-lookup-surface.ts";
+import {
+  admitLaunchTarget,
+  admitNativeExecutable,
+  lookupOnPathBounded,
+  productionWindowsAdmissionDependencies,
+  resolveNpmGlobalLaunch,
+  type WindowsRuntimeLaunch,
+} from "../windows-executable-admission.ts";
 import type { ProviderRequestBudget } from "../provider-request-budget.ts";
 import {
   classifyClaudeSubscriptionAuthentication,
@@ -25,6 +35,8 @@ import type {
 
 const maximumPathLookupBytes = 16_384;
 const maximumPathCandidates = 16;
+const maximumManagedVersionEntries = 256;
+const managedVersionPattern = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/u;
 export const CLAUDE_CREDENTIAL_ENVIRONMENT_KEYS = Object.freeze([
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -88,9 +100,9 @@ export const CLAUDE_CATALOG_PROCESS_SHAPE = Object.freeze({
 });
 
 export interface ClaudeCatalogProcessDependencies {
-  discoverExecutable(): Promise<string>;
+  discoverExecutable(): Promise<WindowsRuntimeLaunch>;
   readAuthenticationStatus(
-    executable: string,
+    launch: WindowsRuntimeLaunch,
     options: {
       readonly env: NodeJS.ProcessEnv;
       readonly windowsHide: true;
@@ -113,7 +125,7 @@ export interface ClaudeCatalogProcessDependencies {
 }
 
 const productionDependencies: ClaudeCatalogProcessDependencies = Object.freeze({
-  discoverExecutable: discoverClaudeExecutable,
+  discoverExecutable: discoverClaudeLaunch,
   readAuthenticationStatus: readOfficialClaudeAuthenticationStatus,
   spawnProcess: (
     executable: string,
@@ -134,16 +146,16 @@ export async function createOfficialClaudeCatalogTransport(
   if (!isSafeProcessArgument(projectDirectory)) {
     throw new RuntimeAdapterError("invalid-input");
   }
-  let executable: string;
+  let launch: WindowsRuntimeLaunch;
   try {
-    executable = await dependencies.discoverExecutable();
+    launch = await dependencies.discoverExecutable();
   } catch (error) {
     if (error instanceof RuntimeAdapterError) throw error;
     throw new RuntimeAdapterError("runtime-not-located");
   }
   const environment = environmentForClaudeProcess(dependencies);
   await requireClaudeSubscriptionAuthentication(
-    executable,
+    launch,
     dependencies,
     environment,
     providerRequestBudget,
@@ -151,7 +163,7 @@ export async function createOfficialClaudeCatalogTransport(
   let launched: LaunchedClaudeProcess;
   try {
     launched = await launchClaudeCatalog(
-      executable,
+      launch,
       projectDirectory,
       dependencies,
       environment,
@@ -184,16 +196,16 @@ export async function createOfficialClaudeSessionTransport(
   ) {
     throw new RuntimeAdapterError("invalid-input");
   }
-  let executable: string;
+  let launch: WindowsRuntimeLaunch;
   try {
-    executable = await dependencies.discoverExecutable();
+    launch = await dependencies.discoverExecutable();
   } catch (error) {
     if (error instanceof RuntimeAdapterError) throw error;
     throw new RuntimeAdapterError("runtime-not-located");
   }
   const environment = environmentForClaudeProcess(dependencies);
   await requireClaudeSubscriptionAuthentication(
-    executable,
+    launch,
     dependencies,
     environment,
     providerRequestBudget,
@@ -202,7 +214,7 @@ export async function createOfficialClaudeSessionTransport(
   let launched: LaunchedClaudeProcess;
   try {
     launched = await launchClaude(
-      executable,
+      launch,
       request.projectDirectory,
       arguments_,
       dependencies,
@@ -247,84 +259,274 @@ export function createClaudeSessionArguments(
   ]);
 }
 
-export async function discoverClaudeExecutable(): Promise<string> {
-  if (process.platform !== "win32") return "claude";
+/**
+ * Where Claude Code is, described so that a JavaScript entry point can start.
+ *
+ * The order is deliberate. A path the user supplied comes FIRST, because it is
+ * the answer to a lookup that has already failed them once and nothing the
+ * product guesses should outrank it. Then PATH -- asked with the BARE command
+ * name so `where.exe` consults `PATHEXT` and can finally see the `.cmd` an
+ * `npm install -g` writes. Then `%APPDATA%\npm` directly, because an Electron
+ * app launched from Explorer inherits the PATH from login, which is how a user
+ * whose `claude --version` works in their terminal still got told nothing was
+ * installed. Then the two locations that already worked.
+ *
+ * Candidates are deduplicated BY RESOLVED LAUNCH, not by candidate string: one
+ * npm install puts `claude` and `claude.cmd` in the same directory and a bare
+ * lookup returns both, so string-deduplication would report an ambiguity where
+ * there is one install.
+ */
+export async function discoverClaudeLaunch(): Promise<WindowsRuntimeLaunch> {
+  if (process.platform !== "win32") return nativeLaunch("claude");
 
-  const candidates = new Map<string, string>();
+  const surface = CLAUDE_RUNTIME_LOOKUP_SURFACE;
+  const admission = productionWindowsAdmissionDependencies;
+
+  const configured = configuredRuntimeExecutable("claude");
+  if (configured !== undefined) {
+    const admitted = await admitLaunchTarget(configured, surface, admission);
+    // A stored path that has stopped working falls through to ordinary
+    // discovery rather than stranding the user on their own old answer.
+    if (admitted.kind === "admitted") return admitted.launch;
+  }
+
+  const launches = new Map<string, WindowsRuntimeLaunch>();
   for (const candidate of await lookupWindowsPath()) {
-    const validated = await validateNativeExecutable(candidate);
-    if (validated !== undefined) {
-      candidates.set(validated.toLocaleLowerCase("en-US"), validated);
+    const admitted = await admitLaunchTarget(candidate, surface, admission);
+    if (admitted.kind === "admitted") {
+      launches.set(launchKey(admitted.launch), admitted.launch);
     }
   }
-  if (candidates.size > 1) {
+  if (launches.size > 1) {
     throw new RuntimeAdapterError("runtime-not-located");
   }
-  const pathCandidate = candidates.values().next().value as string | undefined;
-  if (pathCandidate !== undefined) return pathCandidate;
+  const pathLaunch = launches.values().next().value as
+    | WindowsRuntimeLaunch
+    | undefined;
+  if (pathLaunch !== undefined) return pathLaunch;
+
+  const prefix = npmGlobalPrefix();
+  if (prefix !== undefined) {
+    const admitted = await resolveNpmGlobalLaunch(prefix, surface, admission);
+    if (admitted.kind === "admitted") return admitted.launch;
+  }
 
   const officialCandidate = await validateNativeExecutable(
     join(homedir(), ".local", "bin", "claude.exe"),
   );
-  if (officialCandidate !== undefined) return officialCandidate;
+  if (officialCandidate !== undefined) return nativeLaunch(officialCandidate);
+
+  const managedCandidate = await discoverManagedClaudeExecutable();
+  if (managedCandidate !== undefined) return nativeLaunch(managedCandidate);
+
   throw new RuntimeAdapterError("runtime-not-located");
 }
 
-async function lookupWindowsPath(): Promise<readonly string[]> {
-  try {
-    const output = await new Promise<string>((resolveOutput, reject) => {
-      execFile(
-        "where.exe",
-        ["claude.exe"],
-        {
-          encoding: "utf8",
-          maxBuffer: maximumPathLookupBytes,
-          windowsHide: true,
-        },
-        (error, stdout) => (error ? reject(error) : resolveOutput(stdout)),
+/**
+ * The executable alone, for callers that only need to know a runtime is there.
+ * A JavaScript entry point cannot be started from this value; use
+ * `discoverClaudeLaunch` to start one.
+ */
+export async function discoverClaudeExecutable(): Promise<string> {
+  return (await discoverClaudeLaunch()).executable;
+}
+
+export function nativeLaunch(executable: string): WindowsRuntimeLaunch {
+  return Object.freeze({
+    executable,
+    prefixArguments: Object.freeze([]),
+  });
+}
+
+function launchKey(launch: WindowsRuntimeLaunch): string {
+  return [launch.executable, ...launch.prefixArguments]
+    .join(" ")
+    .toLocaleLowerCase("en-US");
+}
+
+/**
+ * `%APPDATA%\npm` is where npm puts a global install's shims on Windows. The
+ * fallback mirrors `claudeManagedRoots`: an absent or relative APPDATA means
+ * the roaming profile is derived from the home directory rather than trusted.
+ */
+function npmGlobalPrefix(): string | undefined {
+  const roaming = process.env.APPDATA;
+  const base =
+    typeof roaming === "string" && roaming.length > 0 && isAbsolute(roaming)
+      ? roaming
+      : join(homedir(), "AppData", "Roaming");
+  return join(base, "npm");
+}
+
+// Claude Code installed by the Claude desktop app is not on PATH and is not in
+// ~/.local/bin. It lands in a per-version directory under the roaming profile,
+// and an upgrade leaves the previous version behind rather than deleting it. So
+// the rule here cannot be Codex's "more than one candidate means ambiguous":
+// more than one is the NORMAL state of this directory. The newest version that
+// validates is the one to drive.
+//
+// The desktop APPLICATION also ships a claude.exe, under
+// %LOCALAPPDATA%\AnthropicClaude. That one is the GUI, not the CLI, and driving
+// it would fail in a way no error message would explain. Only the roots below
+// are searched, and a resolved candidate must still land inside the root it was
+// found under -- a junction in a version directory cannot point discovery out.
+function claudeManagedRoots(): readonly string[] {
+  const roaming = process.env.APPDATA;
+  const base =
+    typeof roaming === "string" && roaming.length > 0 && isAbsolute(roaming)
+      ? roaming
+      : join(homedir(), "AppData", "Roaming");
+  return Object.freeze([join(base, "Claude", "claude-code")]);
+}
+
+async function discoverManagedClaudeExecutable(): Promise<string | undefined> {
+  for (const root of claudeManagedRoots()) {
+    const resolvedRoot = await resolveExistingDirectory(root);
+    if (resolvedRoot === undefined) continue;
+    for (const version of await readManagedVersionDirectories(root)) {
+      const validated = await validateNativeExecutable(
+        join(root, version, "claude.exe"),
       );
-    });
-    const values = output
-      .split(/\r?\n/u)
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-    return values.length > maximumPathCandidates ? [] : Object.freeze(values);
+      if (validated !== undefined && isContainedIn(validated, resolvedRoot)) {
+        return validated;
+      }
+    }
+  }
+  return undefined;
+}
+
+// Newest first, so a half-written upgrade that fails validation falls through to
+// the version that was working before it.
+//
+// Two rules here exist so that this scan cannot reintroduce the not-located
+// failure it was written to remove:
+//
+//   - A name this scan cannot parse is RANKED LAST, not dropped. A directory
+//     named for a prerelease, or with four parts, or two, is still a place a
+//     runtime can be; dropping it means a user whose only install is named that
+//     way is told their working Claude Code does not exist.
+//
+//   - The bound is a SLICE, not a cliff. An upgrade leaves the previous version
+//     behind, so this directory only ever grows. Abandoning the scan once it
+//     holds too many entries would mean the fix expires on exactly the machines
+//     that have been running Claude Code the longest.
+async function readManagedVersionDirectories(
+  root: string,
+): Promise<readonly string[]> {
+  let names: readonly string[];
+  try {
+    names = await readdir(root);
   } catch {
     return Object.freeze([]);
   }
+  const ordered = names
+    .map((name) => ({ name, order: parseManagedVersion(name) }))
+    .sort(compareManagedEntries)
+    .slice(0, maximumManagedVersionEntries)
+    .map((entry) => entry.name);
+  return Object.freeze(ordered);
 }
 
-async function validateNativeExecutable(
+function compareManagedEntries(
+  left: { readonly name: string; readonly order: readonly number[] | undefined },
+  right: { readonly name: string; readonly order: readonly number[] | undefined },
+): number {
+  if (left.order !== undefined && right.order !== undefined) {
+    return compareManagedVersions(right.order, left.order);
+  }
+  if (left.order !== undefined) return -1;
+  if (right.order !== undefined) return 1;
+  if (left.name === right.name) return 0;
+  return left.name < right.name ? 1 : -1;
+}
+
+function parseManagedVersion(name: string): readonly number[] | undefined {
+  const matched = managedVersionPattern.exec(name);
+  if (matched === null) return undefined;
+  return Object.freeze([
+    Number(matched[1]),
+    Number(matched[2]),
+    Number(matched[3]),
+  ]);
+}
+
+function compareManagedVersions(
+  left: readonly number[],
+  right: readonly number[],
+): number {
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (left[index] as number) - (right[index] as number);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
+// Resolved first, then required to be a directory -- rather than refused for
+// being a link. Relocating AppData to another drive leaves a junction at this
+// exact path, and refusing it would hide a perfectly good install behind it.
+// Nothing is given up by allowing it: containment below is checked against the
+// RESOLVED root, so a junction inside a version directory that points out of
+// the tree is still rejected.
+async function resolveExistingDirectory(
   candidate: string,
 ): Promise<string | undefined> {
-  if (
-    !isAbsolute(candidate) ||
-    !candidate.toLocaleLowerCase("en-US").endsWith(".exe")
-  ) {
-    return undefined;
-  }
+  if (!isAbsolute(candidate)) return undefined;
   try {
-    const lexical = resolve(candidate);
-    const information = await lstat(lexical);
-    if (!information.isFile() || information.isSymbolicLink()) return undefined;
-    const resolved = await realpath(lexical);
-    return isAbsolute(resolved) &&
-      resolved.toLocaleLowerCase("en-US").endsWith(".exe")
-      ? resolved
-      : undefined;
+    const resolved = await realpath(candidate);
+    if (!isAbsolute(resolved)) return undefined;
+    const information = await stat(resolved);
+    return information.isDirectory() ? resolved : undefined;
   } catch {
     return undefined;
   }
 }
 
+function isContainedIn(candidate: string, root: string): boolean {
+  const normalizedRoot = root
+    .toLocaleLowerCase("en-US")
+    .replace(/[\\/]+$/u, "");
+  if (normalizedRoot.length === 0) return false;
+  return candidate
+    .toLocaleLowerCase("en-US")
+    .startsWith(`${normalizedRoot}\\`);
+}
+
+/**
+ * Ask for the BARE command name. That is the whole difference: given an
+ * explicit extension `where.exe` does not consult `PATHEXT`, so `claude.exe`
+ * could never see the `claude.cmd` and extensionless shim that an
+ * `npm install -g @anthropic-ai/claude-code` actually writes. Given the bare
+ * name it returns every `PATHEXT` match and the extensionless script too.
+ */
+async function lookupWindowsPath(): Promise<readonly string[]> {
+  const values = await lookupOnPathBounded(CLAUDE_RUNTIME_LOOKUP_SURFACE.command);
+  return values.length > maximumPathCandidates ? Object.freeze([]) : values;
+}
+
+/**
+ * Unchanged in strictness -- delegated to the shared admission gate so that a
+ * candidate found here, a candidate found by the Codex lookup, and a path a
+ * user typed into Settings all pass through exactly one implementation of
+ * "this is a real native executable".
+ */
+async function validateNativeExecutable(
+  candidate: string,
+): Promise<string | undefined> {
+  const admitted = await admitNativeExecutable(
+    candidate,
+    productionWindowsAdmissionDependencies,
+  );
+  return admitted.kind === "admitted" ? admitted.path : undefined;
+}
+
 function launchClaudeCatalog(
-  executable: string,
+  launch: WindowsRuntimeLaunch,
   projectDirectory: string,
   dependencies: ClaudeCatalogProcessDependencies,
   environment: NodeJS.ProcessEnv,
 ): Promise<LaunchedClaudeProcess> {
   return launchClaude(
-    executable,
+    launch,
     projectDirectory,
     CLAUDE_CATALOG_ARGUMENTS,
     dependencies,
@@ -348,16 +550,18 @@ interface LaunchedClaudeProcess {
 }
 
 function launchClaude(
-  executable: string,
+  launch: WindowsRuntimeLaunch,
   projectDirectory: string,
   arguments_: readonly string[],
   dependencies: ClaudeCatalogProcessDependencies,
   environment: NodeJS.ProcessEnv,
 ): Promise<LaunchedClaudeProcess> {
   return new Promise((resolveChild, reject) => {
+    // The entry script, when there is one, precedes the runtime's own
+    // arguments. argv stays an array: nothing here is re-parsed by a shell.
     const child = dependencies.spawnProcess(
-      executable,
-      arguments_,
+      launch.executable,
+      [...launch.prefixArguments, ...arguments_],
       Object.freeze({
         cwd: projectDirectory,
         env: environment,
@@ -378,7 +582,7 @@ function launchClaude(
 }
 
 async function requireClaudeSubscriptionAuthentication(
-  executable: string,
+  launch: WindowsRuntimeLaunch,
   dependencies: ClaudeCatalogProcessDependencies,
   environment: NodeJS.ProcessEnv,
   providerRequestBudget?: ProviderRequestBudget,
@@ -387,7 +591,7 @@ async function requireClaudeSubscriptionAuthentication(
   await providerRequestBudget?.claim("claude-auth-status");
   try {
     output = await dependencies.readAuthenticationStatus(
-      executable,
+      launch,
       Object.freeze({
         env: environment,
         windowsHide: true as const,

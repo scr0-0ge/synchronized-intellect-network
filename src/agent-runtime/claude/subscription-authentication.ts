@@ -12,15 +12,16 @@ import {
 } from "./authentication-status.ts";
 import {
   createClaudeOAuthEnvironment,
-  discoverClaudeExecutable,
+  discoverClaudeLaunch,
 } from "./process-transport.ts";
+import type { WindowsRuntimeLaunch } from "../windows-executable-admission.ts";
 import type { ProviderRequestBudget } from "../provider-request-budget.ts";
 import { ProviderRequestBudgetError } from "../provider-request-budget.ts";
 
 export interface ClaudeSubscriptionAuthenticationDependencies {
-  discoverExecutable(): Promise<string>;
+  discoverExecutable(): Promise<WindowsRuntimeLaunch>;
   readAuthenticationStatus(
-    executable: string,
+    launch: WindowsRuntimeLaunch,
     options: {
       readonly env: NodeJS.ProcessEnv;
       readonly signal: AbortSignal;
@@ -42,7 +43,7 @@ export interface ClaudeSubscriptionAuthenticationDependencies {
 
 const productionDependencies: ClaudeSubscriptionAuthenticationDependencies =
   Object.freeze({
-    discoverExecutable: discoverClaudeExecutable,
+    discoverExecutable: discoverClaudeLaunch,
     readAuthenticationStatus: readOfficialClaudeAuthenticationStatus,
     spawnProcess: (
       executable: string,
@@ -110,11 +111,13 @@ async function launchClaudeAuthenticationAction(
   signal: AbortSignal,
 ): Promise<ReturnType<typeof ownSubscriptionAuthenticationProcess>> {
   assertAuthenticationLaunchOpen(signal);
-  const executable = await dependencies.discoverExecutable();
+  const launch = await dependencies.discoverExecutable();
   assertAuthenticationLaunchOpen(signal);
+  // The THIRD launch site on the Claude path. Same rule: prefix arguments
+  // first, argv stays an array, no shell.
   const child = dependencies.spawnProcess(
-    executable,
-    Object.freeze(["auth", action]),
+    launch.executable,
+    Object.freeze([...launch.prefixArguments, "auth", action]),
     Object.freeze({
       env: Object.freeze(createClaudeOAuthEnvironment(dependencies.environment)),
       shell: false as const,

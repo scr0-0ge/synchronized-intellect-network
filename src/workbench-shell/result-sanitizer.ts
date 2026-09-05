@@ -14,6 +14,11 @@ import {
   publicAppearancePreferenceSaved,
   publicAppearancePreferenceUnavailable,
   publicClaudePermissionHandlingLoaded,
+  publicRuntimeExecutablesLoaded,
+  publicRuntimeExecutableSaved,
+  publicRuntimeExecutableRejected,
+  publicRuntimeExecutableUnavailable,
+  WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH,
   publicClaudePermissionHandlingSaved,
   publicClaudePermissionHandlingUnavailable,
   publicCreateProjectResult,
@@ -59,6 +64,11 @@ import {
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchClaudePermissionHandlingLoadResult,
+  type WorkbenchRuntimeExecutablePaths,
+  type WorkbenchRuntimeExecutableRejection,
+  type WorkbenchRuntimeExecutableSaveRequest,
+  type WorkbenchRuntimeExecutableSaveResult,
+  type WorkbenchRuntimeExecutablesLoadResult,
   type WorkbenchClaudePermissionHandlingSaveResult,
   type WorkbenchCreateProjectResult,
   type WorkbenchDirectInputRequest,
@@ -295,6 +305,145 @@ function isClaudePermissionHandlingFailureResult(value: unknown): boolean {
     value.error.category === "claude-permission-handling-unavailable" &&
     value.error.message ===
       "Claude permission handling could not be loaded or saved. Keep the current choice and try again."
+  );
+}
+
+const runtimeExecutablePathControlCharacters = /[\u0000-\u001f\u007f-\u009f]/u;
+
+const runtimeExecutableRejections: ReadonlySet<string> = new Set([
+  "not-absolute",
+  "not-found",
+  "not-a-file",
+  "unsupported-shape",
+  "no-install-beside-it",
+  "no-node-interpreter",
+  "unusable",
+]);
+
+export type WorkbenchRuntimeExecutableSaveRequestReconstruction =
+  | {
+      readonly ok: true;
+      readonly request: WorkbenchRuntimeExecutableSaveRequest;
+    }
+  | { readonly ok: false };
+
+/**
+ * The renderer-to-main direction for the escape hatch. This is the one place a
+ * path a user typed enters the product, so the shape is checked here and the
+ * VALUE is checked at the point of use by `admitLaunchTarget`. Nothing here
+ * tries to repair a path: a control character or an over-long string is refused,
+ * not trimmed into something that looks plausible.
+ */
+export function reconstructWorkbenchRuntimeExecutableSaveRequest(
+  value: unknown,
+): WorkbenchRuntimeExecutableSaveRequestReconstruction {
+  try {
+    if (
+      isStrictDataRecord(value, ["executablePath", "runtime"]) &&
+      (value.runtime === "codex" || value.runtime === "claude") &&
+      typeof value.executablePath === "string" &&
+      value.executablePath.length <=
+        WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH &&
+      !runtimeExecutablePathControlCharacters.test(value.executablePath)
+    ) {
+      return Object.freeze({
+        ok: true,
+        request: Object.freeze({
+          runtime: value.runtime,
+          executablePath: value.executablePath,
+        }),
+      });
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return Object.freeze({ ok: false });
+}
+
+function reconstructRuntimeExecutablePaths(
+  value: unknown,
+): WorkbenchRuntimeExecutablePaths | undefined {
+  if (
+    !isStrictDataRecord(value, ["claude", "codex"]) ||
+    typeof value.codex !== "string" ||
+    typeof value.claude !== "string" ||
+    value.codex.length > WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH ||
+    value.claude.length > WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH ||
+    runtimeExecutablePathControlCharacters.test(value.codex) ||
+    runtimeExecutablePathControlCharacters.test(value.claude)
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ codex: value.codex, claude: value.claude });
+}
+
+export function sanitizeWorkbenchRuntimeExecutablesLoadResult(
+  value: unknown,
+): WorkbenchRuntimeExecutablesLoadResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["executables", "ok", "status"]) &&
+      value.ok === true &&
+      value.status === "loaded"
+    ) {
+      const executables = reconstructRuntimeExecutablePaths(value.executables);
+      if (executables !== undefined) {
+        return publicRuntimeExecutablesLoaded(executables);
+      }
+    }
+    if (isRuntimeExecutableUnavailableResult(value)) {
+      return publicRuntimeExecutableUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicRuntimeExecutableUnavailable();
+}
+
+export function sanitizeWorkbenchRuntimeExecutableSaveResult(
+  value: unknown,
+): WorkbenchRuntimeExecutableSaveResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["executables", "ok", "status"]) &&
+      value.ok === true &&
+      value.status === "saved"
+    ) {
+      const executables = reconstructRuntimeExecutablePaths(value.executables);
+      if (executables !== undefined) {
+        return publicRuntimeExecutableSaved(executables);
+      }
+    }
+    if (
+      isStrictDataRecord(value, ["error", "ok"]) &&
+      value.ok === false &&
+      isStrictDataRecord(value.error, ["category", "message", "reason"]) &&
+      value.error.category === "runtime-executable-rejected" &&
+      value.error.message === "That path cannot be used to start this runtime." &&
+      typeof value.error.reason === "string" &&
+      runtimeExecutableRejections.has(value.error.reason)
+    ) {
+      return publicRuntimeExecutableRejected(
+        value.error.reason as WorkbenchRuntimeExecutableRejection,
+      );
+    }
+    if (isRuntimeExecutableUnavailableResult(value)) {
+      return publicRuntimeExecutableUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicRuntimeExecutableUnavailable();
+}
+
+function isRuntimeExecutableUnavailableResult(value: unknown): boolean {
+  return (
+    isStrictDataRecord(value, ["error", "ok"]) &&
+    value.ok === false &&
+    isStrictDataRecord(value.error, ["category", "message"]) &&
+    value.error.category === "runtime-executable-unavailable" &&
+    value.error.message ===
+      "The executable path could not be loaded or saved. Keep the current value and try again."
   );
 }
 

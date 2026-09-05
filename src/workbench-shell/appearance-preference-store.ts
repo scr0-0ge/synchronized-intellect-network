@@ -12,6 +12,9 @@ import { basename, dirname, join } from "node:path";
 import {
   defaultWorkbenchClaudePermissionHandling,
   defaultWorkbenchAppearancePreference,
+  defaultWorkbenchRuntimeExecutablePaths,
+  WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH,
+  type WorkbenchRuntimeExecutablePaths,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchAppearancePreference,
 } from "./contract.ts";
@@ -19,6 +22,7 @@ import {
 export { defaultWorkbenchAppearancePreference } from "./contract.ts";
 
 const maximumPreferenceDocumentBytes = 64 * 1024;
+const executablePathControlCharacters = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export type WorkbenchAppearancePreferenceStoreFailureCategory =
   | "preferences-invalid"
@@ -45,18 +49,24 @@ export interface WorkbenchAppearancePreferenceStore {
   saveClaudePermissionHandling(
     permissionHandling: WorkbenchClaudePermissionHandling,
   ): Promise<WorkbenchClaudePermissionHandling>;
+  readRuntimeExecutables(): Promise<WorkbenchRuntimeExecutablePaths>;
+  saveRuntimeExecutables(
+    executables: WorkbenchRuntimeExecutablePaths,
+  ): Promise<WorkbenchRuntimeExecutablePaths>;
   close(): Promise<void>;
 }
 
 interface WorkbenchPreferenceDocument {
   readonly appearance: WorkbenchAppearancePreference;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
+  readonly runtimeExecutables: WorkbenchRuntimeExecutablePaths;
 }
 
 const defaultWorkbenchPreferenceDocument: WorkbenchPreferenceDocument =
   Object.freeze({
     appearance: defaultWorkbenchAppearancePreference,
     claudePermissionHandling: defaultWorkbenchClaudePermissionHandling,
+    runtimeExecutables: defaultWorkbenchRuntimeExecutablePaths,
   });
 
 export type WorkbenchAppearancePreferenceAtomicReplace = (
@@ -108,7 +118,11 @@ export function createWorkbenchAppearancePreferenceStore(options: {
         const current = await readPreferenceDocument(options.filePath);
         await writePreference(
           options.filePath,
-          capturePreferenceDocument(captured, current.claudePermissionHandling),
+          capturePreferenceDocument(
+            captured,
+            current.claudePermissionHandling,
+            current.runtimeExecutables,
+          ),
           atomicReplace,
         );
         return captured;
@@ -135,7 +149,41 @@ export function createWorkbenchAppearancePreferenceStore(options: {
         const current = await readPreferenceDocument(options.filePath);
         await writePreference(
           options.filePath,
-          capturePreferenceDocument(current.appearance, captured),
+          capturePreferenceDocument(
+            current.appearance,
+            captured,
+            current.runtimeExecutables,
+          ),
+          atomicReplace,
+        );
+        return captured;
+      });
+    },
+    readRuntimeExecutables(): Promise<WorkbenchRuntimeExecutablePaths> {
+      return enqueue(async () =>
+        (await readPreferenceDocument(options.filePath)).runtimeExecutables,
+      );
+    },
+    saveRuntimeExecutables(
+      executables: WorkbenchRuntimeExecutablePaths,
+    ): Promise<WorkbenchRuntimeExecutablePaths> {
+      let captured: WorkbenchRuntimeExecutablePaths;
+      try {
+        captured = captureRuntimeExecutables(executables);
+      } catch {
+        return Promise.reject(
+          new WorkbenchAppearancePreferenceStoreError("preferences-invalid"),
+        );
+      }
+      return enqueue(async () => {
+        const current = await readPreferenceDocument(options.filePath);
+        await writePreference(
+          options.filePath,
+          capturePreferenceDocument(
+            current.appearance,
+            current.claudePermissionHandling,
+            captured,
+          ),
           atomicReplace,
         );
         return captured;
@@ -190,18 +238,21 @@ async function readPreferenceDocument(
         return capturePreferenceDocument(
           captureLegacyAppearance(document.appearance),
           defaultWorkbenchClaudePermissionHandling,
+          defaultWorkbenchRuntimeExecutablePaths,
         );
       }
       if (document.schemaVersion === 2) {
         return capturePreferenceDocument(
           captureVersionTwoAppearance(document.appearance),
           defaultWorkbenchClaudePermissionHandling,
+          defaultWorkbenchRuntimeExecutablePaths,
         );
       }
       if (document.schemaVersion === 3) {
         return capturePreferenceDocument(
           captureAppearance(document.appearance),
           defaultWorkbenchClaudePermissionHandling,
+          defaultWorkbenchRuntimeExecutablePaths,
         );
       }
     }
@@ -216,6 +267,22 @@ async function readPreferenceDocument(
       return capturePreferenceDocument(
         captureAppearance(document.appearance),
         captureClaudePermissionHandling(document.claudePermissionHandling),
+        defaultWorkbenchRuntimeExecutablePaths,
+      );
+    }
+    if (
+      isExactDataRecord(document, [
+        "appearance",
+        "claudePermissionHandling",
+        "runtimeExecutables",
+        "schemaVersion",
+      ]) &&
+      document.schemaVersion === 5
+    ) {
+      return capturePreferenceDocument(
+        captureAppearance(document.appearance),
+        captureClaudePermissionHandling(document.claudePermissionHandling),
+        captureRuntimeExecutables(document.runtimeExecutables),
       );
     }
     throw new Error("invalid-appearance-preferences");
@@ -242,9 +309,10 @@ async function writePreference(
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const contents = `${JSON.stringify({
-      schemaVersion: 4,
+      schemaVersion: 5,
       appearance: preference.appearance,
       claudePermissionHandling: preference.claudePermissionHandling,
+      runtimeExecutables: preference.runtimeExecutables,
     })}\n`;
     if (
       Buffer.byteLength(contents, "utf8") > maximumPreferenceDocumentBytes
@@ -271,11 +339,33 @@ async function writePreference(
 function capturePreferenceDocument(
   appearance: WorkbenchAppearancePreference,
   claudePermissionHandling: WorkbenchClaudePermissionHandling,
+  runtimeExecutables: WorkbenchRuntimeExecutablePaths,
 ): WorkbenchPreferenceDocument {
   return Object.freeze({
     appearance,
     claudePermissionHandling,
+    runtimeExecutables,
   });
+}
+
+// The stored value is a path a USER typed. It is checked for shape here and for
+// usability by admitLaunchTarget at the point of spawn; storing it does not
+// bless it. An empty string is the cleared state, so the key set never varies.
+function captureRuntimeExecutables(
+  value: unknown,
+): WorkbenchRuntimeExecutablePaths {
+  if (
+    !isExactDataRecord(value, ["claude", "codex"]) ||
+    typeof value.codex !== "string" ||
+    typeof value.claude !== "string" ||
+    value.codex.length > WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH ||
+    value.claude.length > WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH ||
+    executablePathControlCharacters.test(value.codex) ||
+    executablePathControlCharacters.test(value.claude)
+  ) {
+    throw new Error("invalid-appearance-preferences");
+  }
+  return Object.freeze({ codex: value.codex, claude: value.claude });
 }
 
 function captureClaudePermissionHandling(

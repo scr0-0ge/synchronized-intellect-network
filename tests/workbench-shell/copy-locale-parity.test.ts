@@ -34,6 +34,9 @@ import {
 import { copyLocaleDictionaries as sessionMetadataCopyDictionaries } from "../../src/workbench-shell/renderer/copy/session-metadata-copy.ts";
 import { copyLocaleDictionaries as removalCopyDictionaries } from "../../src/workbench-shell/renderer/copy/removal-copy.ts";
 import {
+  copyLocaleDictionaries as runtimeLookupCopyDictionaries,
+} from "../../src/workbench-shell/renderer/copy/runtime-lookup-copy.ts";
+import {
   copyLocaleDictionaries as runtimeProfileCopyDictionaries,
   runtimeProfileCopy,
 } from "../../src/workbench-shell/renderer/copy/runtime-profile-copy.ts";
@@ -75,6 +78,7 @@ const domains: Readonly<Record<string, LocaleDictionaries>> = Object.freeze({
   "project-history": projectHistoryCopyDictionaries,
   shell: shellCopyDictionaries,
   removal: removalCopyDictionaries,
+  "runtime-lookup": runtimeLookupCopyDictionaries,
   "runtime-profile": runtimeProfileCopyDictionaries,
   rail: railCopyDictionaries,
   "session-metadata": sessionMetadataCopyDictionaries,

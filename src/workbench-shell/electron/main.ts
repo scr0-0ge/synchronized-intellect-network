@@ -64,6 +64,11 @@ import {
   type WorkbenchClaudePermissionHandlingIpcBinding,
 } from "./claude-permission-handling-ipc.ts";
 import {
+  installWorkbenchRuntimeExecutableIpc,
+  type WorkbenchRuntimeExecutableIpcBinding,
+} from "./runtime-executable-ipc.ts";
+import { setConfiguredRuntimeExecutable } from "../../agent-runtime/configured-executable.ts";
+import {
   installWorkbenchClipboardIpc,
   type WorkbenchClipboardIpcBinding,
 } from "./clipboard-ipc.ts";
@@ -183,6 +188,7 @@ let appearancePreferenceIpc: WorkbenchAppearancePreferenceIpcBinding | null =
   null;
 let claudePermissionHandlingIpc: WorkbenchClaudePermissionHandlingIpcBinding | null =
   null;
+let runtimeExecutableIpc: WorkbenchRuntimeExecutableIpcBinding | null = null;
 let subscriptionAuthenticationIpc: WorkbenchSubscriptionAuthenticationIpcBinding | null =
   null;
 let subscriptionAuthenticationShutdown: Promise<void> = Promise.resolve();
@@ -298,6 +304,8 @@ const lifecycle = createWorkbenchLifecycleController({
     appearancePreferenceIpc = null;
     claudePermissionHandlingIpc?.dispose();
     claudePermissionHandlingIpc = null;
+    runtimeExecutableIpc?.dispose();
+    runtimeExecutableIpc = null;
     windowControlIpc?.dispose();
     windowControlIpc = null;
     clipboardIpc?.dispose();
@@ -588,6 +596,19 @@ function startPrimaryWorkbench(): void {
     if (shutdownRequested) return;
     const initializedAppearancePreferenceStore = appearancePreferenceStore;
     if (initializedAppearancePreferenceStore === null) return;
+    // A path the user saved in an earlier session has to reach discovery
+    // BEFORE the channel that serves catalog reads is installed. Pushed after,
+    // a profile load could arrive first and the escape hatch would appear not to
+    // work until the second launch after it was used.
+    try {
+      const storedExecutables =
+        await initializedAppearancePreferenceStore.readRuntimeExecutables();
+      setConfiguredRuntimeExecutable("codex", storedExecutables.codex);
+      setConfiguredRuntimeExecutable("claude", storedExecutables.claude);
+    } catch {
+      // An unreadable store leaves discovery on its ordinary tiers. It must not
+      // stop the Workbench from starting.
+    }
     projectViewIpc = installWorkbenchProjectViewIpc({
       ipcMain,
       window: createdWindow,
@@ -621,6 +642,11 @@ function startPrimaryWorkbench(): void {
       source: initializedAppearancePreferenceStore,
     });
     claudePermissionHandlingIpc = installWorkbenchClaudePermissionHandlingIpc({
+      ipcMain,
+      window: createdWindow,
+      source: initializedAppearancePreferenceStore,
+    });
+    runtimeExecutableIpc = installWorkbenchRuntimeExecutableIpc({
       ipcMain,
       window: createdWindow,
       source: initializedAppearancePreferenceStore,
@@ -740,6 +766,8 @@ function startPrimaryWorkbench(): void {
       appearancePreferenceIpc = null;
       claudePermissionHandlingIpc?.dispose();
       claudePermissionHandlingIpc = null;
+      runtimeExecutableIpc?.dispose();
+      runtimeExecutableIpc = null;
       windowControlIpc?.dispose();
       windowControlIpc = null;
       nativeFrameReassertion?.dispose();

@@ -1,3 +1,4 @@
+import { nativeLaunch } from "../../src/agent-runtime/claude/process-transport.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -53,7 +54,7 @@ test("every counted provider operation claims immediately before its inert bound
   const claudeAuthentication = createOfficialClaudeSubscriptionAuthenticationProvider(
     {
       async discoverExecutable() {
-        return "synthetic-executable";
+        return nativeLaunch("synthetic-executable");
       },
       async readAuthenticationStatus() {
         events.push("effect:claude-auth-status");

@@ -1,6 +1,16 @@
-import { For, Show, onCleanup, onMount, type Component } from "solid-js";
+import {
+  For,
+  Show,
+  createSignal,
+  onCleanup,
+  onMount,
+  type Component,
+} from "solid-js";
 import {
   type WorkbenchClaudePermissionHandling,
+  type WorkbenchConfigurableRuntime,
+  type WorkbenchRuntimeExecutablePaths,
+  type WorkbenchRuntimeExecutableRejection,
   type WorkbenchAppearancePreference,
   type WorkbenchRendererBridge,
   type WorkbenchRuntimeEndpointId,
@@ -24,6 +34,7 @@ import {
   settingsProviderAvailabilityPresentation,
   settingsProviderStatusMeanings,
   settingsSubscriptionAuthenticationPresentation,
+  type SettingsRuntimeExecutablePhase,
   type SettingsSubscriptionAuthenticationEntry,
   type SettingsSubscriptionAuthenticationState,
 } from "./settings-view-model.ts";
@@ -33,6 +44,12 @@ import { runtimeClass } from "./view-types.ts";
 import { InspectorFact } from "./inspector.tsx";
 import { commonCopy } from "./copy/common-copy.ts";
 import { chromeCopy } from "./copy/chrome-copy.ts";
+import {
+  runtimeExecutableCopy,
+  runtimeExecutableRejectionCopy,
+  runtimeLookupCopy,
+  runtimeLookupPlaceCopy,
+} from "./copy/runtime-lookup-copy.ts";
 import {
   settingsCopy,
   bindingStatusAriaCopy,
@@ -66,6 +83,14 @@ export const SettingsScreen: Component<{
   readonly appearance: WorkbenchAppearancePreference;
   readonly appearancePersistencePhase: WorkbenchAppearancePersistencePhase;
   readonly onAppearance: (action: WorkbenchAppearanceAction) => void;
+  readonly runtimeExecutables?: WorkbenchRuntimeExecutablePaths;
+  readonly runtimeExecutablePhases?: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
+  >;
+  readonly onSaveRuntimeExecutable?: (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ) => void;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly claudePermissionHandlingPersistencePhase: WorkbenchClaudePermissionHandlingPersistencePhase;
   readonly onClaudePermissionHandling: (
@@ -198,6 +223,9 @@ export const SettingsScreen: Component<{
                 heading={settingsCopy.catalogAvailableHeading}
                 rows={endpointGroups().catalogAvailable}
                 authentication={authentication()}
+                runtimeExecutables={props.runtimeExecutables}
+                runtimeExecutablePhases={props.runtimeExecutablePhases}
+                onSaveExecutablePath={props.onSaveRuntimeExecutable}
                 onBind={props.onBindSubscriptionAuthentication}
                 onBegin={props.onBeginSubscriptionAuthentication}
                 onCancel={props.onCancelSubscriptionAuthentication}
@@ -208,6 +236,9 @@ export const SettingsScreen: Component<{
                 heading={settingsCopy.catalogUnavailableHeading}
                 rows={endpointGroups().catalogUnavailable}
                 authentication={authentication()}
+                runtimeExecutables={props.runtimeExecutables}
+                runtimeExecutablePhases={props.runtimeExecutablePhases}
+                onSaveExecutablePath={props.onSaveRuntimeExecutable}
                 onBind={props.onBindSubscriptionAuthentication}
                 onBegin={props.onBeginSubscriptionAuthentication}
                 onCancel={props.onCancelSubscriptionAuthentication}
@@ -218,6 +249,9 @@ export const SettingsScreen: Component<{
                 heading={settingsCopy.notCheckedHeading}
                 rows={endpointGroups().notInspected}
                 authentication={authentication()}
+                runtimeExecutables={props.runtimeExecutables}
+                runtimeExecutablePhases={props.runtimeExecutablePhases}
+                onSaveExecutablePath={props.onSaveRuntimeExecutable}
                 onBind={props.onBindSubscriptionAuthentication}
                 onBegin={props.onBeginSubscriptionAuthentication}
                 onCancel={props.onCancelSubscriptionAuthentication}
@@ -585,6 +619,14 @@ const ProviderGroup: Component<{
   readonly heading: ProviderGroupHeading;
   readonly rows: readonly WorkbenchRuntimeEndpointStatusRow[];
   readonly authentication: SettingsSubscriptionAuthenticationState;
+  readonly runtimeExecutables?: WorkbenchRuntimeExecutablePaths;
+  readonly runtimeExecutablePhases?: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
+  >;
+  readonly onSaveExecutablePath?: (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ) => void;
   readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
   readonly onBegin?: (
     endpointId: WorkbenchRuntimeEndpointId,
@@ -611,6 +653,9 @@ const ProviderGroup: Component<{
             <ProviderCard
               row={row}
               authentication={props.authentication[row.endpointId]}
+              executablePath={props.runtimeExecutables?.[row.runtime]}
+              executablePhase={props.runtimeExecutablePhases?.[row.runtime]}
+              onSaveExecutablePath={props.onSaveExecutablePath}
               onBind={props.onBind}
               onBegin={props.onBegin}
               onCancel={props.onCancel}
@@ -622,9 +667,114 @@ const ProviderGroup: Component<{
   );
 };
 
+/**
+ * The way out of a discovery gap.
+ *
+ * This is a plain typed path, not a native chooser. Three source-scanning
+ * guards pin the product's one native chooser call site to its own main-process
+ * module and require this file to name no chooser API at all, so adding one
+ * here would be new surface in files this change has no business widening.
+ * Typing a path is what the failure text above already tells the user to do,
+ * and the path is checked the moment they press the button rather than stored
+ * and left to fail at the next session start.
+ */
+const RuntimeExecutableField: Component<{
+  readonly runtime: WorkbenchConfigurableRuntime;
+  readonly value: string;
+  readonly phase?: SettingsRuntimeExecutablePhase;
+  readonly onSave?: (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ) => void;
+}> = (props) => {
+  const [draft, setDraft] = createSignal(props.value);
+  const fieldId = () => `runtime-executable-${props.runtime}`;
+  const saving = () => props.phase?.status === "saving";
+  return (
+    <form
+      class="runtime-executable-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        props.onSave?.(props.runtime, draft().trim());
+      }}
+    >
+      <label class="runtime-executable-label" for={fieldId()}>
+        {runtimeExecutableCopy.fieldLabel}
+      </label>
+      <span id={`${fieldId()}-hint`} class="runtime-executable-hint">
+        {runtimeExecutableCopy.fieldHint}
+      </span>
+      <span class="runtime-executable-controls">
+        <input
+          id={fieldId()}
+          type="text"
+          class="runtime-executable-input"
+          spellcheck={false}
+          autocomplete="off"
+          disabled={saving()}
+          aria-describedby={`${fieldId()}-hint`}
+          placeholder={
+            props.runtime === "codex"
+              ? runtimeExecutableCopy.placeholderCodex
+              : runtimeExecutableCopy.placeholderClaude
+          }
+          value={draft()}
+          onInput={(event) => setDraft(event.currentTarget.value)}
+        />
+        <button type="submit" class="btn sm" disabled={saving()}>
+          {saving()
+            ? runtimeExecutableCopy.savingAction
+            : runtimeExecutableCopy.saveAction}
+        </button>
+        <button
+          type="button"
+          class="btn ghost sm"
+          disabled={saving() || draft().trim().length === 0}
+          onClick={() => {
+            setDraft("");
+            props.onSave?.(props.runtime, "");
+          }}
+        >
+          {runtimeExecutableCopy.clearAction}
+        </button>
+      </span>
+      <Show when={props.phase}>
+        {(phase) => (
+          <p
+            class={
+              phase().status === "rejected" || phase().status === "unavailable"
+                ? "runtime-executable-error"
+                : "runtime-executable-note"
+            }
+            role="status"
+          >
+            {phase().status === "rejected" && phase().rejection !== undefined
+              ? runtimeExecutableRejectionCopy(
+                  phase().rejection as WorkbenchRuntimeExecutableRejection,
+                )
+              : phase().status === "unavailable"
+                ? runtimeExecutableCopy.unavailableSentence
+                : phase().status === "cleared"
+                  ? runtimeExecutableCopy.clearedSentence
+                  : phase().status === "saved"
+                    ? runtimeExecutableCopy.savedSentence
+                    : ""}
+          </p>
+        )}
+      </Show>
+    </form>
+  );
+};
+
 const ProviderCard: Component<{
   readonly row: WorkbenchRuntimeEndpointStatusRow;
   readonly authentication: SettingsSubscriptionAuthenticationEntry;
+  readonly executablePath?: string;
+  readonly executablePhase?: SettingsRuntimeExecutablePhase;
+  readonly onSaveExecutablePath?: (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ) => void;
   readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
   readonly onBegin?: (
     endpointId: WorkbenchRuntimeEndpointId,
@@ -692,6 +842,34 @@ const ProviderCard: Component<{
           </Show>
         </dl>
         <p class="provider-status-detail">{props.row.detail}</p>
+        <Show when={props.row.lookup}>
+          {(lookup) => (
+            <div class="provider-lookup">
+              <p class="provider-lookup-label">
+                {runtimeLookupCopy.lookedForLabel}
+              </p>
+              <ul class="provider-lookup-list">
+                <For each={lookup().places}>
+                  {(place) => (
+                    <li>{runtimeLookupPlaceCopy(place.names, place.location)}</li>
+                  )}
+                </For>
+              </ul>
+              <p class="provider-lookup-get">
+                <span class="provider-lookup-get-label">
+                  {runtimeLookupCopy.getItLabel}
+                </span>{" "}
+                <span class="provider-lookup-url">{lookup().installUrl}</span>
+              </p>
+              <RuntimeExecutableField
+                runtime={props.row.runtime}
+                value={props.executablePath ?? ""}
+                phase={props.executablePhase}
+                onSave={props.onSaveExecutablePath}
+              />
+            </div>
+          )}
+        </Show>
       </div>
       <div class="provider-actions">
         <div class="provider-binding-copy">

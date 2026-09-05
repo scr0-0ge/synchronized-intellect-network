@@ -13,9 +13,12 @@ import type {
   CodexExecutableHandle,
 } from "../../src/agent-runtime/codex/executable-discovery.ts";
 import {
+  codexSpawnArguments,
   createOfficialCodexTransport,
+  launchCodexRuntime,
   removeCodexCleanupDirectory,
   stageCodexRuntime,
+  stageCodexRuntimeLaunch,
   type CodexTransportDiagnostic,
   type CodexProcessTransportDependencies,
 } from "../../src/agent-runtime/codex/process-transport.ts";
@@ -402,6 +405,104 @@ test("temporary executable cleanup retries transient locks with deterministic ba
     await assert.rejects(stat(validDirectory), { code: "ENOENT" });
   } finally {
     await rm(validDirectory, { recursive: true, force: true });
+  }
+});
+
+test("the entry script of an npm global install reaches spawn as argv, never as a shell string", async () => {
+  const child = fakeChild();
+  const node = String.raw`C:\fixture\node\node.exe`;
+  const entry = String.raw`C:\fixture\npm\node_modules\@openai\codex\bin\codex.js`;
+  const calls: {
+    readonly executable: string;
+    readonly arguments_: readonly string[];
+    readonly options: unknown;
+  }[] = [];
+
+  const launched = await launchCodexRuntime(
+    { executable: node, prefixArguments: [entry] },
+    (executable, arguments_, options) => {
+      calls.push({ executable, arguments_: [...arguments_], options });
+      queueMicrotask(() => child.emit("spawn"));
+      return child;
+    },
+  );
+
+  // argv[0] is the native interpreter, argv[1] the vendor's entry script, and
+  // the app-server arguments follow it. Nothing is joined into a command line
+  // and the options object carries no shell.
+  assert.equal(launched, child);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.executable, node);
+  assert.deepEqual(calls[0]?.arguments_, [entry, "app-server", "--stdio"]);
+  assert.deepEqual(calls[0]?.options, { stdio: "pipe", windowsHide: true });
+
+  // The login and logout spawn site assembles argv through the same function,
+  // and a native plan is the identity it has always been.
+  assert.deepEqual(
+    codexSpawnArguments({ executable: node, prefixArguments: [entry] }, ["login"]),
+    [entry, "login"],
+  );
+  assert.deepEqual(
+    codexSpawnArguments({ executable: node, prefixArguments: [] }, ["logout"]),
+    ["logout"],
+  );
+});
+
+test("the access-denied staging fallback is skipped, and says so, for a JavaScript entry point", async () => {
+  const diagnostics: CodexTransportDiagnostic[] = [];
+
+  // There is no directory of Codex sidecar executables to copy when argv[0] is
+  // node.exe. Staging must not run against Node's own directory, and the skip
+  // must not be silent.
+  await assert.rejects(
+    stageCodexRuntimeLaunch(
+      {
+        executable: String.raw`C:\fixture\node\node.exe`,
+        prefixArguments: [String.raw`C:\fixture\npm\codex\bin\codex.js`],
+      },
+      (diagnostic) => diagnostics.push(diagnostic),
+    ),
+    (error: unknown) =>
+      error instanceof RuntimeAdapterError &&
+      error.category === "runtime-unavailable",
+  );
+  assert.deepEqual(diagnostics, [
+    { kind: "staging-skipped", reason: "javascript-entry-point" },
+  ]);
+});
+
+test("the access-denied staging fallback still stages a native plan and returns a native plan", async () => {
+  const sourceDirectory = await mkdtemp(join(tmpdir(), "codex-runtime-source-"));
+  const executable = join(sourceDirectory, "codex.exe");
+  await writeFile(executable, "synthetic codex executable", "utf8");
+  await writeFile(
+    join(sourceDirectory, "codex-code-mode-host.exe"),
+    "synthetic code-mode helper",
+    "utf8",
+  );
+  const diagnostics: CodexTransportDiagnostic[] = [];
+
+  let cleanupDirectory: string | undefined;
+  try {
+    const staged = await stageCodexRuntimeLaunch(
+      { executable, prefixArguments: [] },
+      (diagnostic) => diagnostics.push(diagnostic),
+    );
+    cleanupDirectory = staged.cleanupDirectory;
+    assert.deepEqual(staged.launch, {
+      executable: join(staged.cleanupDirectory, "codex.exe"),
+      prefixArguments: [],
+    });
+    assert.deepEqual(staged.stagedFiles, [
+      "codex.exe",
+      "codex-code-mode-host.exe",
+    ]);
+    assert.deepEqual(diagnostics, []);
+  } finally {
+    if (cleanupDirectory !== undefined) {
+      await removeCodexCleanupDirectory(cleanupDirectory);
+    }
+    await rm(sourceDirectory, { recursive: true, force: true });
   }
 });
 

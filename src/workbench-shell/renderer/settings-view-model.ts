@@ -2,6 +2,7 @@ import type {
   WorkbenchRuntimeEndpointDiscovery,
   WorkbenchRuntimeEndpointDiscoveryCategory,
   WorkbenchRuntimeEndpointId,
+  WorkbenchRuntimeExecutableRejection,
   WorkbenchSubscriptionAuthenticationAction,
   WorkbenchSubscriptionAuthenticationBlockers,
   WorkbenchSubscriptionAuthenticationPublicResponse,
@@ -450,6 +451,16 @@ export function settingsRailPresentation(
     settingsCurrent: surface === "settings",
     settingsAttention: runtimeUnavailable,
   });
+}
+
+/**
+ * What happened to the executable path a user just submitted. "rejected" is not
+ * an error state of the product -- it is the product answering the question the
+ * user asked, with the reason, at the moment they asked it.
+ */
+export interface SettingsRuntimeExecutablePhase {
+  readonly status: "saving" | "saved" | "cleared" | "rejected" | "unavailable";
+  readonly rejection?: WorkbenchRuntimeExecutableRejection;
 }
 
 export function appearancePersistencePresentation(

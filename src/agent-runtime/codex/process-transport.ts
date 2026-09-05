@@ -23,6 +23,7 @@ import {
   type CodexExecutableDiscoveryResult,
   type CodexExecutableHandle,
 } from "./executable-discovery.ts";
+import type { WindowsRuntimeLaunch } from "../windows-executable-admission.ts";
 import type { OfficialRuntimeTransport } from "./transport.ts";
 
 const cleanupLeafPattern = /^codex-adapter-[0-9a-f]{32}$/u;
@@ -52,7 +53,18 @@ const protectedSubscriptionAuthenticationEnvironmentKeys = Object.freeze([
   "AZURE_OPENAI_API_KEY",
   "OPENAI_BASE_URL",
 ] as const);
-const executablePaths = new WeakMap<CodexExecutableHandle, string>();
+// The handle stays opaque: what discovery found never crosses back to a caller,
+// only a token that this module can exchange for a launch plan. What it holds
+// widened from a path to a { executable, prefixArguments } plan, because an npm
+// global install of a JS-entrypoint package is launched as node.exe plus the
+// vendor's entry script and a single string cannot describe that.
+const executableLaunches = new WeakMap<CodexExecutableHandle, WindowsRuntimeLaunch>();
+
+/** The arguments that put the Codex CLI into its app-server protocol mode. */
+export const CODEX_APP_SERVER_ARGUMENTS: readonly string[] = Object.freeze([
+  "app-server",
+  "--stdio",
+]);
 
 export type CodexTransportDiagnostic =
   | { readonly kind: "direct-launch-succeeded" }
@@ -67,6 +79,17 @@ export type CodexTransportDiagnostic =
       readonly files: readonly string[];
     }
   | { readonly kind: "staging-failed"; readonly reason: string }
+  // Staging copies codex.exe and its sidecar .exe files out of the directory
+  // the runtime was found in. A JavaScript entry point has no such directory --
+  // argv[0] is node.exe and its neighbours are Node's, not Codex's -- so the
+  // fallback is skipped rather than pointed at the wrong tree. It is named
+  // here rather than passed over in silence, because a fallback that quietly
+  // stops applying to a whole class of install is exactly the kind of thing
+  // that is discovered years later from a support thread.
+  | {
+      readonly kind: "staging-skipped";
+      readonly reason: "javascript-entry-point";
+    }
   | { readonly kind: "staged-launch-succeeded" }
   | {
       readonly kind: "staged-launch-failed";
@@ -138,15 +161,8 @@ const discoverProductionExecutable = createProductionCodexExecutableDiscovery(
 const productionDependencies: CodexProcessTransportDependencies = Object.freeze({
   discoverExecutable: discoverProductionExecutable,
   launchExecutable: (executable: CodexExecutableHandle) =>
-    launch(executablePath(executable)),
-  async stageExecutable(executable: CodexExecutableHandle) {
-    const staged = await stageCodexRuntime(executablePath(executable));
-    return Object.freeze({
-      executable: holdExecutable(join(staged.cleanupDirectory, "codex.exe")),
-      cleanupDirectory: staged.cleanupDirectory,
-      stagedFiles: staged.stagedFiles,
-    });
-  },
+    launchCodexRuntime(executableLaunch(executable)),
+  stageExecutable: stageProductionCodexRuntime,
   removeCleanupDirectory: removeCodexCleanupDirectory,
   recordDiagnostic: writeCodexTransportDiagnostic,
   waitForExit,
@@ -160,18 +176,33 @@ const productionSubscriptionLoginDependencies: CodexSubscriptionLoginProcessDepe
       options: Parameters<
         CodexSubscriptionLoginProcessDependencies["spawnProcess"]
       >[2],
-    ) => spawn(executablePath(executable), [...arguments_], options),
-    async stageExecutable(executable: CodexExecutableHandle) {
-      const staged = await stageCodexRuntime(executablePath(executable));
-      return Object.freeze({
-        executable: holdExecutable(join(staged.cleanupDirectory, "codex.exe")),
-        cleanupDirectory: staged.cleanupDirectory,
-        stagedFiles: staged.stagedFiles,
-      });
+    ) => {
+      const plan = executableLaunch(executable);
+      // The entry script, when there is one, precedes the runtime's own
+      // arguments. argv stays an array handed to CreateProcess and the options
+      // object is passed through untouched: there is no `shell: true` here or
+      // anywhere else in this repository.
+      return spawn(plan.executable, [...codexSpawnArguments(plan, arguments_)], options);
     },
+    stageExecutable: stageProductionCodexRuntime,
     removeCleanupDirectory: removeCodexCleanupDirectory,
     environment: process.env,
   });
+
+async function stageProductionCodexRuntime(
+  executable: CodexExecutableHandle,
+): Promise<{
+  readonly executable: CodexExecutableHandle;
+  readonly cleanupDirectory: string;
+  readonly stagedFiles: readonly string[];
+}> {
+  const staged = await stageCodexRuntimeLaunch(executableLaunch(executable));
+  return Object.freeze({
+    executable: holdExecutable(staged.launch),
+    cleanupDirectory: staged.cleanupDirectory,
+    stagedFiles: staged.stagedFiles,
+  });
+}
 
 function writeCodexTransportDiagnostic(diagnostic: CodexTransportDiagnostic): void {
   const row = `${JSON.stringify({
@@ -412,6 +443,57 @@ function comparable(path: string): string {
   return process.platform === "win32" ? path.toLocaleLowerCase("en-US") : path;
 }
 
+/**
+ * The access-denied fallback, told which shape of runtime it was handed.
+ *
+ * Staging exists for one situation: a direct launch of the vendor's own
+ * `codex.exe` was refused with EACCES/EPERM -- typically a security product
+ * holding the file -- and a copy of the runtime under the OS temp directory
+ * starts where the original would not. That is a statement about a DIRECTORY OF
+ * NATIVE EXECUTABLES: `codex.exe` plus the sidecars a tool call needs.
+ *
+ * A JavaScript entry point has no such directory. argv[0] is `node.exe` and the
+ * files beside it belong to Node, so the sidecar scan would either fail with
+ * `required-runtime-file-missing:codex.exe` -- a reason that describes the
+ * wrong thing and would send whoever reads it looking for a missing Codex
+ * install -- or, worse, copy an unrelated `codex.exe` that happened to sit in
+ * an npm prefix. So the fallback is SKIPPED for that shape, and the skip is
+ * recorded as its own diagnostic. The direct launch failure remains the public
+ * result, exactly as it does when staging is attempted and fails.
+ */
+export async function stageCodexRuntimeLaunch(
+  plan: WindowsRuntimeLaunch,
+  recordDiagnostic: (diagnostic: CodexTransportDiagnostic) => void =
+    writeCodexTransportDiagnostic,
+): Promise<{
+  readonly launch: WindowsRuntimeLaunch;
+  readonly cleanupDirectory: string;
+  readonly stagedFiles: readonly string[];
+}> {
+  if (plan.prefixArguments.length > 0) {
+    try {
+      recordDiagnostic(
+        Object.freeze({
+          kind: "staging-skipped" as const,
+          reason: "javascript-entry-point" as const,
+        }),
+      );
+    } catch {
+      // Diagnostics are observational and never gain control over the transport.
+    }
+    throw new CodexStagingError("staging-unavailable-for-javascript-entry-point");
+  }
+  const staged = await stageCodexRuntime(plan.executable);
+  return Object.freeze({
+    launch: Object.freeze({
+      executable: join(staged.cleanupDirectory, "codex.exe"),
+      prefixArguments: Object.freeze([]),
+    }),
+    cleanupDirectory: staged.cleanupDirectory,
+    stagedFiles: staged.stagedFiles,
+  });
+}
+
 export async function stageCodexRuntime(executable: string): Promise<{
   readonly cleanupDirectory: string;
   readonly stagedFiles: readonly string[];
@@ -506,12 +588,47 @@ async function validatedRuntimeFiles(
   return Object.freeze(files);
 }
 
-function launch(executable: string): Promise<ChildProcessWithoutNullStreams> {
+/**
+ * argv for a launch plan, assembled in exactly ONE place.
+ *
+ * The vendor's entry script, when there is one, precedes the runtime's own
+ * arguments; for a native plan `prefixArguments` is empty and this is the
+ * identity it always was. Nothing is joined into a string and nothing is
+ * re-parsed by a shell -- the whole point of resolving a `.cmd` shim
+ * structurally instead of spawning it through cmd.exe.
+ */
+export function codexSpawnArguments(
+  plan: WindowsRuntimeLaunch,
+  arguments_: readonly string[],
+): readonly string[] {
+  return Object.freeze([...plan.prefixArguments, ...arguments_]);
+}
+
+export type CodexRuntimeSpawn = (
+  executable: string,
+  arguments_: readonly string[],
+  options: { readonly stdio: "pipe"; readonly windowsHide: true },
+) => ChildProcessWithoutNullStreams;
+
+const productionRuntimeSpawn: CodexRuntimeSpawn = (
+  executable,
+  arguments_,
+  options,
+) => spawn(executable, [...arguments_], options);
+
+export function launchCodexRuntime(
+  plan: WindowsRuntimeLaunch,
+  spawnProcess: CodexRuntimeSpawn = productionRuntimeSpawn,
+): Promise<ChildProcessWithoutNullStreams> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ["app-server", "--stdio"], {
-      stdio: "pipe",
-      windowsHide: true,
-    });
+    const child = spawnProcess(
+      plan.executable,
+      codexSpawnArguments(plan, CODEX_APP_SERVER_ARGUMENTS),
+      {
+        stdio: "pipe",
+        windowsHide: true,
+      },
+    );
     child.stderr.resume();
 
     const onError = (error: Error) => reject(error);
@@ -719,16 +836,16 @@ class ProcessTransport implements OfficialRuntimeTransport {
   }
 }
 
-function holdExecutable(path: string): CodexExecutableHandle {
+function holdExecutable(launch: WindowsRuntimeLaunch): CodexExecutableHandle {
   const executable = Object.freeze({}) as CodexExecutableHandle;
-  executablePaths.set(executable, path);
+  executableLaunches.set(executable, launch);
   return executable;
 }
 
-function executablePath(executable: CodexExecutableHandle): string {
-  const path = executablePaths.get(executable);
-  if (path === undefined) throw new RuntimeAdapterError("runtime-not-located");
-  return path;
+function executableLaunch(executable: CodexExecutableHandle): WindowsRuntimeLaunch {
+  const launch = executableLaunches.get(executable);
+  if (launch === undefined) throw new RuntimeAdapterError("runtime-not-located");
+  return launch;
 }
 
 async function waitForExit(

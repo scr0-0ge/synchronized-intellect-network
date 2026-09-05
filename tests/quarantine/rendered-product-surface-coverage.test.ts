@@ -452,8 +452,13 @@ const FROZEN_BREADTH_INVENTORY: Readonly<Record<string, BreadthInventorySeal>> =
     "f123-profile-unavailable-light": { count: 76, sha256: "64e3e242bfaa8b455602a3d889e6f2be4954c16d7c4e4c0aaf76d56c7c3d8da1" },
     "f123-profile-without-default-dark": { count: 77, sha256: "906009c968884ac1565f55c7f719bcb050a20065714784e5e0008e3159f03c3d" },
     "f123-profile-without-default-light": { count: 77, sha256: "7dc807ce11f5cc2614d236339d3879f15f9014a9fc16944597a8e9eb19e4b67d" },
-    "f123-runtime-not-located-dark": { count: 55, sha256: "d1a2374e9e1b0bde91804d5cec0700d38ca9531d54b6c3785004ace6a66d1a65" },
-    "f123-runtime-not-located-light": { count: 55, sha256: "032fe71a6910b30874ddc6fb1cd39c1d3c21a7603fab268612e0a460b1d59fe9" },
+    // Resealed by worker 477. The denominator did not move -- both stay at 55
+    // text sites -- and 40 of the 42 surfaces hashed byte-identical. Only these
+    // two changed, and only because the runtime-not-located detail sentence
+    // was replaced: "No lookup path is exposed." became "Not found under any
+    // name that was checked.", the string public issue #2 names as the defect.
+    "f123-runtime-not-located-dark": { count: 55, sha256: "6473e22c1f946f32aa0145071bfc10374cdec675830a71c6e886037be3e6d1d5" },
+    "f123-runtime-not-located-light": { count: 55, sha256: "5d0f5a6c4e39babb13834b136e79187a1f0f790c55d23951c6f27f59af9a2c2e" },
     "f123-archived-session-list-dark": { count: 113, sha256: "be1990583859504e4c6dfc76f47f17fffcea34572e65b52da7a8ab8347af9294" },
     "f123-archived-session-list-light": { count: 113, sha256: "cbba8325bb2e543e9b55d66151fdbae5ba500c5eabfa2b6110fa63fd142de240" },
     "f123-archived-session-blocked-dark": { count: 99, sha256: "767d276443007729b839f4e1a96fa1e8119a7997236308b6046a1f3716a59e40" },

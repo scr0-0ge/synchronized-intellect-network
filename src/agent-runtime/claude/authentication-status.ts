@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 
 import type { SubscriptionAuthenticationState } from "../subscription-authentication.ts";
+import type { WindowsRuntimeLaunch } from "../windows-executable-admission.ts";
 
 const maximumAuthenticationStatusBytes = 16_384;
 
@@ -21,7 +22,7 @@ export interface ClaudeAuthenticationStatus {
 }
 
 export function readOfficialClaudeAuthenticationStatus(
-  executable: string,
+  launch: WindowsRuntimeLaunch,
   options: {
     readonly env: NodeJS.ProcessEnv;
     readonly signal?: AbortSignal;
@@ -29,9 +30,12 @@ export function readOfficialClaudeAuthenticationStatus(
   },
 ): Promise<string> {
   return new Promise<string>((resolveOutput, reject) => {
+    // This is the SECOND launch site on the Claude path. It has to carry the
+    // entry script too, or an npm global install would be discovered and then
+    // fail its very first authentication read.
     execFile(
-      executable,
-      ["auth", "status", "--json"],
+      launch.executable,
+      [...launch.prefixArguments, "auth", "status", "--json"],
       {
         ...options,
         encoding: "utf8",

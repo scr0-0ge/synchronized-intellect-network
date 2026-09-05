@@ -1,3 +1,4 @@
+import type { WindowsRuntimeLaunch } from "../../src/agent-runtime/windows-executable-admission.ts";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire, syncBuiltinESMExports } from "node:module";
@@ -13,6 +14,7 @@ import {
 import {
   createOfficialClaudeCatalogTransport,
   type ClaudeCatalogProcessDependencies,
+  nativeLaunch,
 } from "../../src/agent-runtime/claude/process-transport.ts";
 import {
   createOfficialClaudeSubscriptionAuthenticationProvider,
@@ -146,7 +148,7 @@ test("numeric nonzero completion still rejects bound, unknown, drifted, and malf
 test("spawn, abort, signal, and max-buffer failures reject even with recognized stdout", async () => {
   await assert.rejects(
     readOfficialClaudeAuthenticationStatus(
-      join(fixtureDirectory, "missing-claude-executable"),
+      nativeLaunch(join(fixtureDirectory, "missing-claude-executable")),
       fixtureOptions("signed-out-exit-1"),
     ),
     (error: unknown) =>
@@ -193,16 +195,16 @@ test("spawn, abort, signal, and max-buffer failures reject even with recognized 
 test("the observed exit-1 tuple reaches the Claude catalog as authentication-required", async () => {
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return process.execPath;
+      return nativeLaunch(process.execPath);
     },
     readAuthenticationStatus(
-      executable: string,
+      launch: WindowsRuntimeLaunch,
       options: Parameters<
         ClaudeCatalogProcessDependencies["readAuthenticationStatus"]
       >[1],
     ) {
       return readOfficialClaudeAuthenticationStatus(
-        executable,
+        launch,
         Object.freeze({
           ...options,
           env: fixtureEnvironment("signed-out-exit-1"),
@@ -226,7 +228,7 @@ test("repeated exit-1 subscription reads move Settings from Unknown / Re-check t
   const dependencies: ClaudeSubscriptionAuthenticationDependencies =
     Object.freeze({
       async discoverExecutable() {
-        return process.execPath;
+        return nativeLaunch(process.execPath);
       },
       readAuthenticationStatus: readOfficialClaudeAuthenticationStatus,
       spawnProcess() {
@@ -337,7 +339,7 @@ function readFixture(
   signal?: AbortSignal,
 ): Promise<string> {
   return readOfficialClaudeAuthenticationStatus(
-    process.execPath,
+    nativeLaunch(process.execPath),
     fixtureOptions(mode, signal),
   );
 }

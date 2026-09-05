@@ -1,5 +1,16 @@
+import type { WindowsRuntimeLaunch } from "../../src/agent-runtime/windows-executable-admission.ts";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
@@ -20,14 +31,16 @@ import {
   createOfficialClaudeSessionTransport,
   createClaudeProcessEnvironment,
   createClaudeSessionArguments,
+  discoverClaudeExecutable,
   type ClaudeCatalogProcessDependencies,
+  nativeLaunch,
 } from "../../src/agent-runtime/claude/process-transport.ts";
 
 test("Claude catalog is unavailable when official subscription OAuth is logged out", async () => {
   const child = fakeChild();
   const dependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return JSON.stringify({
@@ -69,7 +82,7 @@ test("Claude catalog accepts the real seven-key logged-in subscription response"
   let spawnCount = 0;
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return loggedInSubscriptionAuthentication();
@@ -135,7 +148,7 @@ test("Claude child stderr is privately retained with explicit captured and omitt
   const diagnostics: ClaudeRuntimeDiagnostic[] = [];
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return loggedInSubscriptionAuthentication();
@@ -173,7 +186,7 @@ test("Claude catalog and Session spawns receive the selected deployment mode at 
       let capturedEnvironment: NodeJS.ProcessEnv | undefined;
       const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
         async discoverExecutable() {
-          return "claude.exe";
+          return nativeLaunch("claude.exe");
         },
         async readAuthenticationStatus() {
           return loggedInSubscriptionAuthentication();
@@ -250,7 +263,7 @@ test("Claude catalog and Session transports claim auth status immediately before
     });
     const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
       async discoverExecutable() {
-        return "claude.exe";
+        return nativeLaunch("claude.exe");
       },
       async readAuthenticationStatus() {
         events.push("effect:claude-auth-status");
@@ -299,7 +312,7 @@ test("Claude catalog and Session transports claim auth status immediately before
       "project-directory",
       Object.freeze({
         async discoverExecutable() {
-          return "claude.exe";
+          return nativeLaunch("claude.exe");
         },
         async readAuthenticationStatus() {
           effects += 1;
@@ -323,7 +336,7 @@ test("Claude Session does not start when subscription OAuth expires after catalo
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return JSON.stringify({
@@ -374,7 +387,7 @@ test("Claude authentication status ignores fields it does not consume", async ()
   let spawnCount = 0;
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return JSON.stringify({
@@ -404,7 +417,7 @@ test("Claude API-key authentication is refused as authentication-required", asyn
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return JSON.stringify({
@@ -440,7 +453,7 @@ test("Claude authentication status with missing consumed fields is protocol-inva
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return JSON.stringify({
@@ -480,7 +493,7 @@ test("Claude authentication literal drift is protocol-invalid rather than logged
   ] as const) {
     const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
       async discoverExecutable() {
-        return "claude.exe";
+        return nativeLaunch("claude.exe");
       },
       async readAuthenticationStatus() {
         return JSON.stringify(status);
@@ -502,7 +515,7 @@ test("unparseable Claude authentication status is protocol-invalid", async () =>
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return "not-json";
@@ -543,15 +556,15 @@ test("Claude catalog launch uses the captured headless OAuth-only process shape"
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus(
-      executable: string,
+      launch: WindowsRuntimeLaunch,
       options: Parameters<
         ClaudeCatalogProcessDependencies["readAuthenticationStatus"]
       >[1],
     ) {
-      captured.authenticationExecutable = executable;
+      captured.authenticationExecutable = launch.executable;
       captured.authenticationOptions = options;
       return loggedInSubscriptionAuthentication();
     },
@@ -663,7 +676,7 @@ test("Claude session launch uses streaming input, explicit profile, OAuth-only e
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return loggedInSubscriptionAuthentication();
@@ -758,7 +771,7 @@ test("Claude Ask when needed launch uses manual stdio approval and omits the dan
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return loggedInSubscriptionAuthentication();
@@ -818,7 +831,7 @@ test("Claude session transport rejects every unadmitted permission mode before d
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
       externalOperations += 1;
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       externalOperations += 1;
@@ -862,7 +875,7 @@ test("Claude ultracode launch couples the private flag to native xhigh and never
   const child = fakeChild();
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       return loggedInSubscriptionAuthentication();
@@ -921,7 +934,7 @@ test("Claude rejects impossible ultracode combinations before discovery or launc
   const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
     async discoverExecutable() {
       externalOperationCount += 1;
-      return "claude.exe";
+      return nativeLaunch("claude.exe");
     },
     async readAuthenticationStatus() {
       externalOperationCount += 1;
@@ -1037,3 +1050,178 @@ function fakeChild(): EventEmitter & {
   };
   return child;
 }
+
+// discoverClaudeExecutable consults PATH, then homedir()\.local\bin, before it
+// ever reaches the managed root. Both have to be pointed somewhere empty, or
+// these tests answer according to what the machine running them happens to have
+// installed. ~/.local/bin/claude.exe in particular is exactly where the native
+// installer puts Claude Code -- that is, on the box of the contributor most
+// likely to be editing this file.
+function isolateDiscovery(
+  register: (teardown: () => void) => void,
+  home: string,
+  appData: string,
+): void {
+  const previous = new Map<string, string | undefined>([
+    ["APPDATA", process.env.APPDATA],
+    ["USERPROFILE", process.env.USERPROFILE],
+    ["PATH", process.env.PATH],
+  ]);
+  register(() => {
+    for (const [key, value] of previous) {
+      // Assigning a captured undefined back would set the literal string
+      // "undefined" and poison every later test in this process.
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  process.env.USERPROFILE = home;
+  process.env.APPDATA = appData;
+  // System32 stays on PATH so where.exe still runs; it just finds no claude.exe.
+  process.env.PATH = join(
+    process.env.SystemRoot ?? String.raw`C:\Windows`,
+    "System32",
+  );
+}
+
+async function managedFixture(
+  register: (teardown: () => void) => void,
+  versions: readonly string[],
+): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-"));
+  register(() => {
+    void rm(root, { recursive: true, force: true });
+  });
+  const managed = join(root, "Claude", "claude-code");
+  for (const version of versions) {
+    await mkdir(join(managed, version), { recursive: true });
+    await writeFile(join(managed, version, "claude.exe"), "");
+  }
+  isolateDiscovery(register, join(root, "home"), root);
+  return managed;
+}
+
+test("the desktop app's managed Claude Code is discovered, newest version first", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // Two wrong answers are named here on purpose. 2.10.0 is the newest, but it is
+  // NOT what a directory read hands back first -- NTFS enumerates these as
+  // 2.0.10, 2.0.9, 2.10.0 -- and it is not what a string comparison picks
+  // either. Without 2.10.0 in this list the correct answer is already the first
+  // entry, and the whole version ordering can be deleted with this test still
+  // green. "brand-new" parses as no version at all: it must rank last, not
+  // vanish, so it cannot win here and cannot be dropped in the test below.
+  const managed = await managedFixture((teardown) => t.after(teardown), [
+    "2.0.9",
+    "2.0.10",
+    "2.10.0",
+    "brand-new",
+  ]);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "2.10.0", "claude.exe")),
+  );
+});
+
+test("a managed version directory this scan cannot parse is still driven, not discarded", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // A prerelease is the whole install. Dropping names that do not parse would
+  // tell this user their working, signed-in Claude Code does not exist -- the
+  // exact failure the managed scan was added to remove, moved one naming
+  // convention over.
+  const managed = await managedFixture((teardown) => t.after(teardown), [
+    "2.1.0-rc.1",
+  ]);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "2.1.0-rc.1", "claude.exe")),
+  );
+});
+
+test("a managed root past the entry bound still yields its newest runtime", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // An upgrade leaves the previous version behind, so this directory only grows.
+  // A bound that abandons the scan instead of trimming it would make the fix
+  // expire on exactly the machines that have run Claude Code the longest.
+  const versions: string[] = [];
+  for (let minor = 0; minor < 300; minor += 1) versions.push(`1.${minor}.0`);
+  const managed = await managedFixture((teardown) => t.after(teardown), versions);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "1.299.0", "claude.exe")),
+  );
+});
+
+test("a managed root holding no runtime is not located rather than half-answered", async (t) => {
+  if (process.platform !== "win32") return;
+
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-empty-"));
+  t.after(() => {
+    void rm(root, { recursive: true, force: true });
+  });
+  await mkdir(join(root, "Claude", "claude-code", "2.0.10"), {
+    recursive: true,
+  });
+  isolateDiscovery((teardown) => t.after(teardown), join(root, "home"), root);
+
+  await assert.rejects(
+    () => discoverClaudeExecutable(),
+    (error: unknown) =>
+      error instanceof RuntimeAdapterError &&
+      error.category === "runtime-not-located",
+  );
+});
+
+test("a managed root reached through a junction is resolved, not refused", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // Relocating AppData to another drive leaves a junction at exactly this path.
+  // Node reports a junction as a link, so refusing links here would hide a
+  // perfectly good install behind one.
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-junction-"));
+  t.after(() => {
+    void rm(root, { recursive: true, force: true });
+  });
+  const real = join(root, "elsewhere");
+  await mkdir(join(real, "2.0.10"), { recursive: true });
+  await writeFile(join(real, "2.0.10", "claude.exe"), "");
+  await mkdir(join(root, "Claude"), { recursive: true });
+  await symlink(real, join(root, "Claude", "claude-code"), "junction");
+  isolateDiscovery((teardown) => t.after(teardown), join(root, "home"), root);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(real, "2.0.10", "claude.exe")),
+  );
+});
+
+test("a version directory that junctions out of the managed root is skipped, not spawned", async (t) => {
+  if (process.platform !== "win32") return;
+
+  // The path discovery returns is spawned. Allowing a junctioned ROOT must not
+  // also allow a junction INSIDE the root to nominate a binary from anywhere on
+  // the disk -- so the newest-looking entry here points outside and must lose to
+  // the older one that really lives in the tree.
+  const root = await mkdtemp(join(tmpdir(), "claude-managed-escape-"));
+  t.after(() => {
+    void rm(root, { recursive: true, force: true });
+  });
+  const managed = join(root, "Claude", "claude-code");
+  await mkdir(join(managed, "2.0.9"), { recursive: true });
+  await writeFile(join(managed, "2.0.9", "claude.exe"), "");
+  const outside = join(root, "outside");
+  await mkdir(outside, { recursive: true });
+  await writeFile(join(outside, "claude.exe"), "");
+  await symlink(outside, join(managed, "2.0.10"), "junction");
+  isolateDiscovery((teardown) => t.after(teardown), join(root, "home"), root);
+
+  assert.equal(
+    await discoverClaudeExecutable(),
+    await realpath(join(managed, "2.0.9", "claude.exe")),
+  );
+});

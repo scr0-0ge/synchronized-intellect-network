@@ -39,6 +39,36 @@ const inspections = new Map<string, DiscoveryEntryInspection>([
 const dependencies: CodexExecutableDiscoveryDependencies = {
   platform: "win32",
   officialRoots: [permittedRoot],
+  admission: {
+    async inspect(path) {
+      const inspection: DiscoveryEntryInspection = inspections.get(path) ?? {
+        kind: "missing",
+      };
+      if (
+        inspection.kind === "file" ||
+        inspection.kind === "directory" ||
+        inspection.kind === "other"
+      ) {
+        return { kind: inspection.kind, symbolicLink: inspection.symbolicLink };
+      }
+      return { kind: inspection.kind };
+    },
+    async resolveRealPath(path) {
+      return path;
+    },
+    async readTextFile() {
+      return undefined;
+    },
+    async lookupOnPath() {
+      return [];
+    },
+  },
+  configuredExecutable() {
+    return undefined;
+  },
+  npmGlobalPrefix() {
+    return undefined;
+  },
   async lookupOnPath() {
     pathLookups += 1;
     return { kind: "candidates", values: scrubbedRuntimePathEntries };
@@ -53,7 +83,7 @@ const dependencies: CodexExecutableDiscoveryDependencies = {
     rootEnumerations += 1;
     return { kind: "entries", names: [leaf] };
   },
-  holdExecutable(_path) {
+  holdExecutable(_launch) {
     heldExecutables += 1;
     return Object.freeze({}) as CodexExecutableHandle;
   },

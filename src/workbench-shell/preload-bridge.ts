@@ -8,6 +8,9 @@ import {
   WORKBENCH_DISPOSE_CHANNEL,
   WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL,
   WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL,
+  WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
+  WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
+  publicRuntimeExecutableUnavailable,
   WORKBENCH_LOAD_PROFILE_CHANNEL,
   WORKBENCH_INTERRUPT_CHANNEL,
   WORKBENCH_STEER_CHANNEL,
@@ -48,6 +51,9 @@ import {
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchClaudePermissionHandlingLoadResult,
+  type WorkbenchRuntimeExecutableSaveRequest,
+  type WorkbenchRuntimeExecutableSaveResult,
+  type WorkbenchRuntimeExecutablesLoadResult,
   type WorkbenchClaudePermissionHandlingSaveResult,
   type WorkbenchCreateProjectResult,
   type WorkbenchDirectSessionProfileDefaultRequest,
@@ -99,6 +105,9 @@ import {
   sanitizeWorkbenchAppearancePreferenceLoadResult,
   sanitizeWorkbenchAppearancePreferenceSaveResult,
   sanitizeWorkbenchClaudePermissionHandlingLoadResult,
+  sanitizeWorkbenchRuntimeExecutablesLoadResult,
+  sanitizeWorkbenchRuntimeExecutableSaveResult,
+  reconstructWorkbenchRuntimeExecutableSaveRequest,
   sanitizeWorkbenchClaudePermissionHandlingSaveResult,
   sanitizeWorkbenchDirectSessionProfileResult,
   sanitizeWorkbenchHostedProjectResult,
@@ -177,6 +186,8 @@ export interface FixedProjectViewIpc {
       | typeof WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL
       | typeof WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL
       | typeof WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL
+      | typeof WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL
+      | typeof WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL
       | typeof WORKBENCH_HISTORY_RECOVERY_BROWSE_CHANNEL
       | typeof WORKBENCH_HISTORY_RECOVERY_CANCEL_CHANNEL
       | typeof WORKBENCH_HISTORY_RECOVERY_PERFORM_CHANNEL
@@ -556,6 +567,32 @@ export function createWorkbenchPreloadBridge(
         );
       } catch {
         return publicClaudePermissionHandlingUnavailable();
+      }
+    },
+    async loadRuntimeExecutables(): Promise<WorkbenchRuntimeExecutablesLoadResult> {
+      try {
+        return sanitizeWorkbenchRuntimeExecutablesLoadResult(
+          await ipc.invoke(WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL),
+        );
+      } catch {
+        return publicRuntimeExecutableUnavailable();
+      }
+    },
+    async saveRuntimeExecutable(
+      request: WorkbenchRuntimeExecutableSaveRequest,
+    ): Promise<WorkbenchRuntimeExecutableSaveResult> {
+      const reconstructed =
+        reconstructWorkbenchRuntimeExecutableSaveRequest(request);
+      if (!reconstructed.ok) return publicRuntimeExecutableUnavailable();
+      try {
+        return sanitizeWorkbenchRuntimeExecutableSaveResult(
+          await ipc.invoke(
+            WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
+            reconstructed.request,
+          ),
+        );
+      } catch {
+        return publicRuntimeExecutableUnavailable();
       }
     },
     async createProject(): Promise<WorkbenchCreateProjectResult> {

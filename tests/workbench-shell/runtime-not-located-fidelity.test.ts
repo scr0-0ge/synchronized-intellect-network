@@ -126,8 +126,8 @@ test("runtime-not-located start surface follows screen 04 without changing ordin
       const endpointRows = checklist.match(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gu) ?? [];
       assert.equal(endpointRows.length, 2);
       assert.deepEqual(endpointRows.map(plainText), [
-        "● Codex · Runtime not located Codex desktop. No lookup path is exposed.",
-        "● Claude · Runtime not located Claude Code desktop. No lookup path is exposed.",
+        "● Codex · Runtime not located Codex desktop. Not found under any name that was checked.",
+        "● Claude · Runtime not located Claude Code desktop. Not found under any name that was checked.",
       ]);
       assert.match(
         runtimeWithHistory,

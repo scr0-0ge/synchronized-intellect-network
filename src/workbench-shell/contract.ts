@@ -46,6 +46,10 @@ export const WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL =
   "workbench:load-claude-permission-handling";
 export const WORKBENCH_SAVE_CLAUDE_PERMISSION_HANDLING_CHANNEL =
   "workbench:save-claude-permission-handling";
+export const WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL =
+  "workbench:load-runtime-executables";
+export const WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL =
+  "workbench:save-runtime-executable";
 export const WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL =
   "workbench:inspect-subscription-authentication";
 export const WORKBENCH_BIND_SUBSCRIPTION_AUTHENTICATION_CHANNEL =
@@ -146,6 +150,80 @@ export type WorkbenchClaudePermissionHandlingSaveResult =
       readonly ok: false;
       readonly error: WorkbenchClaudePermissionHandlingFailure;
     };
+
+/**
+ * The escape hatch: where a user says the runtime executable actually is.
+ *
+ * An empty string means "not set" rather than a key that comes and goes, so the
+ * exact-shape validators on this boundary keep one key set to check.
+ */
+export interface WorkbenchRuntimeExecutablePaths {
+  readonly codex: string;
+  readonly claude: string;
+}
+
+export const WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH = 4_096;
+
+export const defaultWorkbenchRuntimeExecutablePaths: WorkbenchRuntimeExecutablePaths =
+  Object.freeze({ codex: "", claude: "" });
+
+export type WorkbenchConfigurableRuntime = "codex" | "claude";
+
+/**
+ * Why a path a user supplied cannot be used. A FIXED vocabulary: the reason
+ * crosses the boundary, the path never does.
+ */
+export type WorkbenchRuntimeExecutableRejection =
+  | "not-absolute"
+  | "not-found"
+  | "not-a-file"
+  | "unsupported-shape"
+  | "no-install-beside-it"
+  | "no-node-interpreter"
+  | "unusable";
+
+export interface WorkbenchRuntimeExecutableUnavailableFailure {
+  readonly category: "runtime-executable-unavailable";
+  readonly message: "The executable path could not be loaded or saved. Keep the current value and try again.";
+}
+
+export interface WorkbenchRuntimeExecutableRejectedFailure {
+  readonly category: "runtime-executable-rejected";
+  readonly message: "That path cannot be used to start this runtime.";
+  readonly reason: WorkbenchRuntimeExecutableRejection;
+}
+
+export type WorkbenchRuntimeExecutableFailure =
+  | WorkbenchRuntimeExecutableUnavailableFailure
+  | WorkbenchRuntimeExecutableRejectedFailure;
+
+export type WorkbenchRuntimeExecutablesLoadResult =
+  | {
+      readonly ok: true;
+      readonly status: "loaded";
+      readonly executables: WorkbenchRuntimeExecutablePaths;
+    }
+  | {
+      readonly ok: false;
+      readonly error: WorkbenchRuntimeExecutableUnavailableFailure;
+    };
+
+export type WorkbenchRuntimeExecutableSaveResult =
+  | {
+      readonly ok: true;
+      readonly status: "saved";
+      readonly executables: WorkbenchRuntimeExecutablePaths;
+    }
+  | {
+      readonly ok: false;
+      readonly error: WorkbenchRuntimeExecutableFailure;
+    };
+
+export interface WorkbenchRuntimeExecutableSaveRequest {
+  readonly runtime: WorkbenchConfigurableRuntime;
+  /** An empty string clears the override and returns to ordinary discovery. */
+  readonly executablePath: string;
+}
 
 export type WorkbenchTimelineEvent =
   | { readonly kind: "user-message"; readonly text: string }
@@ -1060,6 +1138,10 @@ export interface WorkbenchRendererBridge
   saveClaudePermissionHandling(
     permissionHandling: WorkbenchClaudePermissionHandling,
   ): Promise<WorkbenchClaudePermissionHandlingSaveResult>;
+  loadRuntimeExecutables(): Promise<WorkbenchRuntimeExecutablesLoadResult>;
+  saveRuntimeExecutable(
+    request: WorkbenchRuntimeExecutableSaveRequest,
+  ): Promise<WorkbenchRuntimeExecutableSaveResult>;
   createProject(): Promise<WorkbenchCreateProjectResult>;
   openProject(): Promise<WorkbenchOpenProjectResult>;
   selectProject(
@@ -1166,6 +1248,59 @@ export function publicClaudePermissionHandlingUnavailable(): Extract<
       category: "claude-permission-handling-unavailable",
       message:
         "Claude permission handling could not be loaded or saved. Keep the current choice and try again.",
+    }),
+  });
+}
+
+export function publicRuntimeExecutablesLoaded(
+  executables: WorkbenchRuntimeExecutablePaths,
+): WorkbenchRuntimeExecutablesLoadResult {
+  return Object.freeze({
+    ok: true,
+    status: "loaded",
+    executables: Object.freeze({
+      codex: executables.codex,
+      claude: executables.claude,
+    }),
+  });
+}
+
+export function publicRuntimeExecutableSaved(
+  executables: WorkbenchRuntimeExecutablePaths,
+): WorkbenchRuntimeExecutableSaveResult {
+  return Object.freeze({
+    ok: true,
+    status: "saved",
+    executables: Object.freeze({
+      codex: executables.codex,
+      claude: executables.claude,
+    }),
+  });
+}
+
+export function publicRuntimeExecutableRejected(
+  reason: WorkbenchRuntimeExecutableRejection,
+): Extract<WorkbenchRuntimeExecutableSaveResult, { readonly ok: false }> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "runtime-executable-rejected",
+      message: "That path cannot be used to start this runtime.",
+      reason,
+    }),
+  });
+}
+
+export function publicRuntimeExecutableUnavailable(): Extract<
+  WorkbenchRuntimeExecutablesLoadResult,
+  { readonly ok: false }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "runtime-executable-unavailable",
+      message:
+        "The executable path could not be loaded or saved. Keep the current value and try again.",
     }),
   });
 }

@@ -42,7 +42,7 @@ const englishCopy = {
     },
     "runtime-not-located": {
       statusLabel: "Runtime not located",
-      detail: "No lookup path is exposed.",
+      detail: "Not found under any name that was checked.",
     },
     "authentication-required": {
       statusLabel: "Authentication required",
@@ -109,7 +109,7 @@ const simplifiedChineseCopy = {
     },
     "runtime-not-located": {
       statusLabel: "未找到运行时",
-      detail: "不会公开查找路径。",
+      detail: "使用检查过的任何名称都未找到。",
     },
     "authentication-required": {
       statusLabel: "需要身份验证",

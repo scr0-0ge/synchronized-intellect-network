@@ -32,6 +32,10 @@ import {
   isValidWorkbenchDirectInput,
   publicAppearancePreferenceUnavailable,
   publicClaudePermissionHandlingUnavailable,
+  publicRuntimeExecutableUnavailable,
+  defaultWorkbenchRuntimeExecutablePaths,
+  type WorkbenchConfigurableRuntime,
+  type WorkbenchRuntimeExecutablePaths,
   publicCreateProjectResult,
   publicInterruptUnavailable,
   publicSteerUnavailable,
@@ -124,6 +128,7 @@ import {
   completeSettingsSubscriptionAuthenticationResponse,
   initialSettingsSubscriptionAuthenticationState,
   subscriptionAuthenticationSelectionKey,
+  type SettingsRuntimeExecutablePhase,
   type SettingsSubscriptionAuthenticationState,
   type WorkbenchSurface,
 } from "./settings-view-model.ts";
@@ -221,6 +226,15 @@ const WorkbenchApp: Component<{
   );
   const [claudePermissionHandlingPersistence, setClaudePermissionHandlingPersistence] =
     createSignal(initialWorkbenchClaudePermissionHandlingPersistenceState);
+  const [runtimeExecutables, setRuntimeExecutables] =
+    createSignal<WorkbenchRuntimeExecutablePaths>(
+      defaultWorkbenchRuntimeExecutablePaths,
+    );
+  const [runtimeExecutablePhases, setRuntimeExecutablePhases] = createSignal<
+    Readonly<
+      Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
+    >
+  >(Object.freeze({}));
   const [subscriptionAuthentication, setSubscriptionAuthentication] =
     createSignal<SettingsSubscriptionAuthenticationState>(
       initialSettingsSubscriptionAuthenticationState(),
@@ -668,6 +682,15 @@ const WorkbenchApp: Component<{
             result,
           ),
         );
+      });
+  });
+  onMount(() => {
+    void props.bridge
+      .loadRuntimeExecutables()
+      .catch(() => publicRuntimeExecutableUnavailable())
+      .then((result) => {
+        if (!active || !result.ok) return;
+        setRuntimeExecutables(result.executables);
       });
   });
   createEffect(() =>
@@ -1175,6 +1198,33 @@ const WorkbenchApp: Component<{
       });
   };
 
+  const saveRuntimeExecutable = (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ): void => {
+    const clearing = executablePath.trim().length === 0;
+    setRuntimeExecutablePhases((current) =>
+      Object.freeze({ ...current, [runtime]: { status: "saving" as const } }),
+    );
+    void props.bridge
+      .saveRuntimeExecutable(Object.freeze({ runtime, executablePath }))
+      .catch(() => publicRuntimeExecutableUnavailable())
+      .then((result) => {
+        if (!active) return;
+        if (result.ok) setRuntimeExecutables(result.executables);
+        // A rejection is the product ANSWERING the user, with the reason, at the
+        // moment they asked -- not an error state to swallow.
+        const phase: SettingsRuntimeExecutablePhase = result.ok
+          ? { status: clearing ? "cleared" : "saved" }
+          : result.error.category === "runtime-executable-rejected"
+            ? { status: "rejected", rejection: result.error.reason }
+            : { status: "unavailable" };
+        setRuntimeExecutablePhases((current) =>
+          Object.freeze({ ...current, [runtime]: phase }),
+        );
+      });
+  };
+
   const view = createMemo(() => {
     const current = state().result;
     return current?.ok ? current.view : undefined;
@@ -1395,6 +1445,9 @@ const WorkbenchApp: Component<{
           appearance={appearancePersistence().appearance}
           appearancePersistencePhase={appearancePersistence().phase}
           onAppearance={changeAppearance}
+          runtimeExecutables={runtimeExecutables()}
+          runtimeExecutablePhases={runtimeExecutablePhases()}
+          onSaveRuntimeExecutable={saveRuntimeExecutable}
           claudePermissionHandling={
             claudePermissionHandlingPersistence().permissionHandling
           }
@@ -1534,6 +1587,14 @@ const ResolvedWorkbench: Component<{
   readonly appearance: WorkbenchAppearancePreference;
   readonly appearancePersistencePhase: WorkbenchAppearancePersistencePhase;
   readonly onAppearance: (action: WorkbenchAppearanceAction) => void;
+  readonly runtimeExecutables: WorkbenchRuntimeExecutablePaths;
+  readonly runtimeExecutablePhases: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
+  >;
+  readonly onSaveRuntimeExecutable: (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ) => void;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly claudePermissionHandlingPersistencePhase: WorkbenchClaudePermissionHandlingPersistencePhase;
   readonly onClaudePermissionHandling: (
@@ -1627,6 +1688,9 @@ const ResolvedWorkbench: Component<{
           appearance={props.appearance}
           appearancePersistencePhase={props.appearancePersistencePhase}
           onAppearance={props.onAppearance}
+          runtimeExecutables={props.runtimeExecutables}
+          runtimeExecutablePhases={props.runtimeExecutablePhases}
+          onSaveRuntimeExecutable={props.onSaveRuntimeExecutable}
           claudePermissionHandling={props.claudePermissionHandling}
           claudePermissionHandlingPersistencePhase={
             props.claudePermissionHandlingPersistencePhase
@@ -1714,6 +1778,14 @@ interface WorkbenchScreenProps {
   readonly appearance: WorkbenchAppearancePreference;
   readonly appearancePersistencePhase: WorkbenchAppearancePersistencePhase;
   readonly onAppearance: (action: WorkbenchAppearanceAction) => void;
+  readonly runtimeExecutables: WorkbenchRuntimeExecutablePaths;
+  readonly runtimeExecutablePhases: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
+  >;
+  readonly onSaveRuntimeExecutable: (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ) => void;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly claudePermissionHandlingPersistencePhase: WorkbenchClaudePermissionHandlingPersistencePhase;
   readonly onClaudePermissionHandling: (
@@ -1926,6 +1998,9 @@ const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
             appearance={props.appearance}
             appearancePersistencePhase={props.appearancePersistencePhase}
             onAppearance={props.onAppearance}
+            runtimeExecutables={props.runtimeExecutables}
+            runtimeExecutablePhases={props.runtimeExecutablePhases}
+            onSaveRuntimeExecutable={props.onSaveRuntimeExecutable}
             claudePermissionHandling={props.claudePermissionHandling}
             claudePermissionHandlingPersistencePhase={
               props.claudePermissionHandlingPersistencePhase
