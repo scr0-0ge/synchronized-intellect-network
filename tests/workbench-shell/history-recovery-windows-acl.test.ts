@@ -45,7 +45,7 @@ test("Windows private-reader disposable copies inherit only the protected intake
             $records = @(foreach ($item in $items) {
               $acl = $item.GetAccessControl()
               $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-              if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid -or $rules[0].FileSystemRights -ne 'FullControl' -or $rules[0].AccessControlType -ne 'Allow') { throw 'disposable-not-owner-only' }
+              if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid -or $rules[0].FileSystemRights -ne 'FullControl' -or $rules[0].AccessControlType -ne 'Allow') { throw "disposable-not-owner-only expected-sid=$sid path=$($item.FullName) owner=$($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) rules=$($rules.Count) sddl=$($acl.Sddl)" }
               [pscustomobject]@{ path = $item.FullName; sddl = $acl.Sddl }
             })
             ConvertTo-Json -InputObject $records -Compress

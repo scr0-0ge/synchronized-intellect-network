@@ -40,10 +40,17 @@ const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0'
 const nodeArchiveName = 'node-v24.20.0-win-x64.zip';
 const nodeArchiveBytes = new Map();
 
-/* The launcher spawns at most five short-lived stubs. 30s is far above all of
-   them together and still separates "did the work" from "hung", which is what
-   an unanswered corepack download prompt would look like. */
-const LAUNCHER_TIMEOUT_MS = 30_000;
+/* The launcher spawns at most five short-lived stubs plus, on the provisioning
+   paths, two powershell.exe starts and a 110 MB extraction. 30s covered all of
+   that on the machine this suite was written on, and nowhere else: on a clean
+   GitHub runner the one-PowerShell case took 23s and every two-PowerShell case
+   was killed at the limit -- which surfaces as `status: null`, reading like a
+   wrong answer rather than the timeout it is. The limit is here to separate
+   "did the work" from "hung", which is what an unanswered corepack download
+   prompt would look like, and 120s still does that with room for a slow
+   machine. Every failure message now carries the status, the kill signal and
+   the elapsed time, so the two can never be confused again. */
+const LAUNCHER_TIMEOUT_MS = 120_000;
 
 function batch(...lines) {
   return [...lines, ''].join('\r\n');
@@ -289,7 +296,8 @@ function runLauncher(root, pathDirectory, { args = [], env = {} } = {}) {
   // Invoked by absolute path, never by bare name: cmd searches the current
   // directory only when NoDefaultCurrentDirectoryInExePath is unset, and it IS
   // set on machines this suite has to pass on.
-  return spawnSync('cmd.exe', ['/d', '/c', path.join(root, 'start.bat'), ...args], {
+  const started = performance.now();
+  const result = spawnSync('cmd.exe', ['/d', '/c', path.join(root, 'start.bat'), ...args], {
     cwd: root,
     encoding: 'utf8',
     env: {
@@ -311,10 +319,33 @@ function runLauncher(root, pathDirectory, { args = [], env = {} } = {}) {
     timeout: LAUNCHER_TIMEOUT_MS,
     windowsHide: true,
   });
+  result.elapsedMs = Math.round(performance.now() - started);
+  return result;
 }
 
+/* A launcher killed at the limit reports `status: null`, and a bare
+   `null !== 0` names neither the limit nor the signal. Every assertion in
+   this file passes this string as its failure message, so the how travels
+   with the what. */
 function output(result) {
-  return `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  const how =
+    result.elapsedMs === undefined
+      ? ''
+      : `\n[launcher: status=${result.status} signal=${result.signal ?? 'none'} ` +
+        `elapsed=${result.elapsedMs}ms limit=${LAUNCHER_TIMEOUT_MS}ms]`;
+  return `${result.stdout ?? ''}\n${result.stderr ?? ''}${how}`;
+}
+
+/* Provisioning is the only part of the launcher whose cost is a property of
+   the machine rather than of the launcher: two powershell.exe starts and an
+   extraction. Report it on every run, green included, so "it got slower" and
+   "it started hanging" are told apart by a number instead of by a limit. */
+function reportLauncherCost(t, result, label) {
+  t.diagnostic(
+    `${label === undefined ? 'launcher' : `launcher (${label})`}: ` +
+      `status=${result.status} signal=${result.signal ?? 'none'} ` +
+      `elapsed=${result.elapsedMs}ms limit=${LAUNCHER_TIMEOUT_MS}ms`,
+  );
 }
 
 function readIfPresent(file) {
@@ -541,6 +572,7 @@ test('no node on PATH provisions the private LTS runtime, then builds and starts
 
   const result = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
   const text = output(result);
+  reportLauncherCost(t, result);
 
   assert.equal(result.status, 0, text);
   assert.match(text, /node was not found on PATH/i);
@@ -593,6 +625,7 @@ test('a node older than 22.5 is left untouched while the private LTS runtime is 
     env: { ...pretendNodeVersion(root, '22.4.9'), SIN_NODE_ZIP_SOURCE: archive },
   });
   const text = output(result);
+  reportLauncherCost(t, result);
 
   assert.equal(result.status, 0, text);
   assert.match(text, /node 22\.4\.9 on PATH is too old/i);
@@ -611,6 +644,7 @@ test('an older major also falls back to the private LTS runtime', (t) => {
     env: { ...pretendNodeVersion(root, '20.19.0'), SIN_NODE_ZIP_SOURCE: archive },
   });
   const text = output(result);
+  reportLauncherCost(t, result);
 
   assert.equal(result.status, 0, text);
   assert.match(text, /node 20\.19\.0 on PATH is too old/i);
@@ -629,6 +663,8 @@ test('a validated private runtime is reused without touching the download source
   fs.rmSync(path.join(root, 'electron-args.txt'));
   const second = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
 
+  reportLauncherCost(t, first, 'first');
+  reportLauncherCost(t, second, 'second');
   assert.equal(second.status, 0, output(second));
   assert.match(output(second), /cached private Node/i);
   assert.ok(fs.existsSync(path.join(root, 'electron-args.txt')), output(second));
@@ -681,6 +717,7 @@ test('a verified file that is not a zip reports extraction failure', (t) => {
 
   const result = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
   const text = output(result);
+  reportLauncherCost(t, result);
 
   assert.equal(result.status, 1, text);
   assert.match(text, /verified Node zip could not be extracted into the private cache/i);
@@ -694,6 +731,7 @@ test('an archive that has no working node is refused after extraction', (t) => {
 
   const result = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
   const text = output(result);
+  reportLauncherCost(t, result);
 
   assert.equal(result.status, 1, text);
   assert.match(text, /archive did not contain a working node\.exe/i);
