@@ -25,6 +25,12 @@ import type {
   ProviderRequestBudget,
 } from "../../src/agent-runtime/provider-request-budget.ts";
 import { discoverRuntimeEndpointComposition } from "../../src/workbench-shell/runtime-endpoint-composition.ts";
+import { locateClaudeRuntimeForThisTestFile } from "../helpers/vendor-cli-presence.ts";
+
+// The claude-api endpoint's discovery category depends on whether a Claude CLI
+// exists on this machine; the seam turns that into an injected input. See
+// tests/helpers/vendor-cli-presence.ts.
+locateClaudeRuntimeForThisTestFile();
 
 const selection = Object.freeze({
   model: "directory-model",

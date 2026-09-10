@@ -27,6 +27,12 @@ import {
   createTestDirectory,
   registerTestClosable,
 } from "../helpers/test-lifecycle.ts";
+import { locateClaudeRuntimeForThisTestFile } from "../helpers/vendor-cli-presence.ts";
+
+// The claude-api endpoint's discovery category depends on whether a Claude CLI
+// exists on this machine; the seam turns that into an injected input. See
+// tests/helpers/vendor-cli-presence.ts.
+locateClaudeRuntimeForThisTestFile();
 
 const FAKE_GLM_ENVIRONMENT: NodeJS.ProcessEnv = Object.freeze({
   GLM_ANTHROPIC_AUTH_TOKEN: "FAKE-GLM-TOKEN-1234",
