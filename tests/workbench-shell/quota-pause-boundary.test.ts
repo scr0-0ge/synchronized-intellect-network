@@ -18,6 +18,7 @@ import { initialRendererState, beginDirectSessionProfileLoad, completeDirectSess
 import { presentationText } from "../../src/workbench-shell/renderer/presentation-text.ts";
 
 test("production host and sanitizer expose quota pause and accept only explicit same-Session continuation", async t => {
+  const testStarted = performance.now();
   const root = await createTestDirectory(t, join(tmpdir(), "uaw114-host-"));
   const project = join(root, "p");
   await mkdir(project);
@@ -49,12 +50,28 @@ test("production host and sanitizer expose quota pause and accept only explicit 
   assert.equal((await host.submitDirectInput({ kind: "start", input: "INITIAL", snapshotKey: profile.profile.snapshotKey,
     endpointKey: endpoint.key, modelKey: model.key, workIntensityKey: model.workIntensities[0].key,
     executionModeKey: endpoint.executionModes[0].key, accessModeKey: endpoint.accessModes[0].key })).ok, true);
+  t.diagnostic(`setup (host + profile + submit): elapsed=${Math.round(performance.now() - testStarted)}ms`);
+  /* How long a projection takes to reach this listener is a property of the machine, not of
+     the host: the chain behind observeProject is serialised and every hop pays a filesystem
+     availability probe. The old 3s bound was measured on the machine this test was written on;
+     on a clean GitHub runner (run 34533189195, attempt 1) nothing had arrived 3s after the
+     submission and the assertion read `observed undefined`, which looks like a missing
+     projection rather than the timeout it was. The bound only has to separate "arrived" from
+     "never arrives", and 60s still does that with room for a slow runner. Every wait reports
+     its elapsed time, green runs included, so a slower machine shows up as a number before it
+     shows up as a red. */
+  const WAIT_LIMIT_MS = 60_000;
+  const describeView = () => view === undefined ? "no projection yet"
+    : `${view.commands.length} command(s), status ${view.commands[0]?.status}`;
   const wait = async (status: string) => {
-    const until = performance.now() + 3000;
+    const started = performance.now();
     while (view?.commands[0]?.status !== status) {
-      assert.ok(performance.now() < until, `expected ${status}, observed ${view?.commands[0]?.status}`);
+      const elapsed = Math.round(performance.now() - started);
+      assert.ok(elapsed < WAIT_LIMIT_MS,
+        `expected ${status}, observed ${view?.commands[0]?.status} [${describeView()}] after ${elapsed}ms (limit ${WAIT_LIMIT_MS}ms)`);
       await new Promise(resolve => setTimeout(resolve, 5));
     }
+    t.diagnostic(`wait(${status}): elapsed=${Math.round(performance.now() - started)}ms limit=${WAIT_LIMIT_MS}ms`);
     return view;
   };
   const paused = await wait("quota-paused");
