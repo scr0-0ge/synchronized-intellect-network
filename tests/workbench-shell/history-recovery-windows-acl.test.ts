@@ -41,11 +41,17 @@ test("Windows private-reader disposable copies inherit only the protected intake
           const output = execFileSync(powershell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `
             $ErrorActionPreference = 'Stop'
             $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            # The identity Windows stamps on objects THIS process creates. It is the
+            # user on an ordinary account and BUILTIN\Administrators on an elevated
+            # one, and the disposable is created by mkdtemp, which sets no owner --
+            # so this, not the user SID, is what an inherited owner can be. The DACL
+            # clauses below still demand the USER and nobody else.
+            $owner = [Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value
             $items = @((Get-Item -LiteralPath $env:UAW_ACL_TEST_ROOT)) + @(Get-ChildItem -LiteralPath $env:UAW_ACL_TEST_ROOT -Recurse -Force)
             $records = @(foreach ($item in $items) {
               $acl = $item.GetAccessControl()
               $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-              if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid -or $rules[0].FileSystemRights -ne 'FullControl' -or $rules[0].AccessControlType -ne 'Allow') { throw "disposable-not-owner-only expected-sid=$sid path=$($item.FullName) owner=$($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) rules=$($rules.Count) sddl=$($acl.Sddl)" }
+              if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $owner -or $rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid -or $rules[0].FileSystemRights -ne 'FullControl' -or $rules[0].AccessControlType -ne 'Allow') { throw "disposable-not-owner-only expected-sid=$sid expected-owner=$owner path=$($item.FullName) owner=$($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) rules=$($rules.Count) sddl=$($acl.Sddl)" }
               [pscustomobject]@{ path = $item.FullName; sddl = $acl.Sddl }
             })
             ConvertTo-Json -InputObject $records -Compress
