@@ -443,10 +443,16 @@ function endpointSnapshot(): WorkbenchDirectRuntimeEndpointSnapshot {
         directStart: "supported",
       },
     ],
-    endpointDiscovery: publicRuntimeEndpointDiscovery(
-      "catalog-ready",
-      "not-inspected",
-    ),
+    endpointDiscovery: publicRuntimeEndpointDiscovery([
+      { endpointId: "codex-desktop", category: "catalog-ready" },
+      { endpointId: "claude-code-desktop", category: "not-inspected" },
+      { endpointId: "glm-coding-plan", category: "not-inspected" },
+      { endpointId: "kimi-code", category: "not-inspected" },
+      { endpointId: "deepseek-api", category: "not-inspected" },
+      { endpointId: "kimi-platform", category: "not-inspected" },
+      { endpointId: "claude-api", category: "not-inspected" },
+      { endpointId: "codex-api", category: "not-inspected" },
+    ]),
   };
 }
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, readFile, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,6 +15,7 @@ import {
 } from "../helpers/test-lifecycle.ts";
 import {
   createSyntheticStore,
+  directoryManifest,
   syntheticContinueEnvelope,
   syntheticLedgerSlot,
   syntheticStartEnvelope,
@@ -24,6 +25,24 @@ import {
 const rollbackMagic = Buffer.from([
   0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7,
 ]);
+
+test("private reader logs native operational errors without exposing them in its public category", async (t) => {
+  const parent = await temporaryDirectory(t);
+  const warnings: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => warnings.push(args));
+  await assert.rejects(readHistoricalRecoveryInventory(join(parent, "missing-capture")), (error: unknown) => {
+    assert.ok(error instanceof HistoryRecoveryPrivateReaderError);
+    assert.equal(error.category, "verification-failed");
+    assert.equal(error.message, "verification-failed");
+    assert.ok(error.cause instanceof Error);
+    assert.equal((error.cause as NodeJS.ErrnoException).code, "ENOENT");
+    assert.deepEqual(warnings, [[
+      "Historical recovery private reader encountered an operational failure, not an inventory validation failure.",
+      error.cause,
+    ]]);
+    return true;
+  });
+});
 
 test("private reader accepts exact v2 and legacy v1 stores on disposable copies", async (t) => {
   const parent = await temporaryDirectory(t);
@@ -85,6 +104,52 @@ test("WAL with copied SHM and WAL without SHM are reconstructed only on disposab
     database.close();
   }
 });
+
+for (const mode of ["closed", "wal", "hot-journal"] as const) {
+  test(`private reader verifies ${mode} stores under a 900-character private parent`, async (t) => {
+    const root = await createTestDirectory(t, join(tmpdir(), "w75-reader-"));
+    const source = await createSyntheticStore(join(root, "source"), 2);
+    let database: DatabaseSync | undefined;
+    let privateParent = join(root, "private");
+    while (privateParent.length < 900) {
+      const remaining = 900 - privateParent.length;
+      privateParent = remaining === 1 ? `${privateParent}p` : join(privateParent, "p".repeat(Math.min(100, remaining - 1)));
+    }
+    await mkdir(privateParent, { recursive: true });
+    try {
+      if (mode !== "closed") {
+        database = new DatabaseSync(source.ledgerPath!);
+        if (mode === "wal") {
+          database.exec(`
+            PRAGMA journal_mode = WAL;
+            PRAGMA wal_autocheckpoint = 0;
+            INSERT INTO updates (project_id, command_id, kind, status, session_id, data_json)
+            VALUES ('project-1', 'command-root', 'runtime-event', 'in-flight', 'session-1',
+              '{"event":{"kind":"agent-message","text":"synthetic"}}');
+          `);
+        } else {
+          database.exec("PRAGMA journal_mode = DELETE; PRAGMA synchronous = FULL; PRAGMA cache_size = 1; BEGIN IMMEDIATE;");
+          database.prepare("UPDATE sessions SET profile_json = ? WHERE session_id = 'session-1'")
+            .run(JSON.stringify({ payload: "x".repeat(2 * 1_024 * 1_024) }));
+          const header = await readFile(`${source.ledgerPath!}-journal`);
+          assert.equal(header.subarray(0, 8).equals(rollbackMagic), true);
+        }
+      }
+      const captured = join(privateParent, "captured");
+      await cp(source.root, captured, { recursive: true });
+      const before = await directoryManifest(captured);
+      const inventory = await readHistoricalRecoveryInventory(captured, { disposableParent: privateParent });
+      assert.deepEqual(inventory.counts, { projects: 1, sessions: 1, commands: 2, updates: mode === "wal" ? 5 : 4 });
+      assert.deepEqual(await directoryManifest(captured), before);
+      assert.deepEqual(await readdir(privateParent), ["captured"]);
+      await writeFile(join(captured, "unknown-artifact.bin"), "synthetic");
+      await expectCategory(readHistoricalRecoveryInventory(captured, { disposableParent: privateParent }), "unsupported-artifact");
+    } finally {
+      if (mode === "hot-journal") database?.exec("ROLLBACK");
+      database?.close();
+    }
+  });
+}
 
 test("orphan SHM and mixed WAL plus rollback journal fail closed", async (t) => {
   const parent = await temporaryDirectory(t);
@@ -378,6 +443,18 @@ test("all actual v1 and v2 update payload branches remain accepted", async (t) =
     JSON.stringify({ event: { kind: "agent-message", text: "synthetic" } }),
   );
   insert.run(
+    "runtime-event",
+    "in-flight",
+    "session-1",
+    JSON.stringify({
+      event: {
+        kind: "turn-completed",
+        status: "completed",
+        suggestions: ["Inspect the recovered changes"],
+      },
+    }),
+  );
+  insert.run(
     "completed",
     "completed",
     "session-1",
@@ -396,7 +473,7 @@ test("all actual v1 and v2 update payload branches remain accepted", async (t) =
   await closeDatabase();
   const inventory = await readHistoricalRecoveryInventory(source.root);
   assert.equal(inventory.readerVersion, 2);
-  assert.equal(inventory.counts.updates, 10);
+  assert.equal(inventory.counts.updates, 11);
 });
 
 function hotJournalBytes(): Buffer {

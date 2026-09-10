@@ -206,6 +206,12 @@ test("production composition renders each of the four independent availability c
       const adapter = await createProductionRuntimeEndpointAdapter({
         codexAdapter: codex,
         claudeAdapter: claude,
+        glmEnvironment: {},
+        kimiEnvironment: {},
+        deepseekEnvironment: {},
+        kimiPlatformEnvironment: {},
+        claudeApiEnvironment: {},
+        codexApiEnvironment: {},
       });
       assert.equal(codex.inspectCalls, 0);
       assert.equal(claude.inspectCalls, 0);
@@ -229,6 +235,30 @@ test("production composition renders each of the four independent availability c
               endpointId: "claude-code-desktop",
               category: combination.expectedCategories[1],
             },
+            {
+              endpointId: "glm-coding-plan",
+              category: "authentication-required",
+            },
+            {
+              endpointId: "kimi-code",
+              category: "authentication-required",
+            },
+            {
+              endpointId: "deepseek-api",
+              category: "authentication-required",
+            },
+            {
+              endpointId: "kimi-platform",
+              category: "authentication-required",
+            },
+            {
+              endpointId: "claude-api",
+              category: "authentication-required",
+            },
+            {
+              endpointId: "codex-api",
+              category: "authentication-required",
+            },
           ],
         });
       if (combination.expected.length === 0) {
@@ -248,6 +278,30 @@ test("production composition renders each of the four independent availability c
               {
                 endpointId: "claude-code-desktop",
                 category: "inspection-failed",
+              },
+              {
+                endpointId: "glm-coding-plan",
+                category: "authentication-required",
+              },
+              {
+                endpointId: "kimi-code",
+                category: "authentication-required",
+              },
+              {
+                endpointId: "deepseek-api",
+                category: "authentication-required",
+              },
+              {
+                endpointId: "kimi-platform",
+                category: "authentication-required",
+              },
+              {
+                endpointId: "claude-api",
+                category: "authentication-required",
+              },
+              {
+                endpointId: "codex-api",
+                category: "authentication-required",
               },
             ],
           },
@@ -377,17 +431,23 @@ test("production discovery maps not-located, authentication, and opaque inspecti
           false,
           row.claudeFailure,
         ),
+        glmEnvironment: {},
+        kimiEnvironment: {},
+        deepseekEnvironment: {},
+        kimiPlatformEnvironment: {},
+        claudeApiEnvironment: {},
+        codexApiEnvironment: {},
       });
 
       assert.deepEqual(discovery.endpoints, []);
       assert.deepEqual(discovery.registrations, []);
       assert.deepEqual(
         discovery.endpointDiscovery.statuses.map((status) => status.category),
-        row.expected,
+        [...row.expected, "authentication-required", "authentication-required", "authentication-required", "authentication-required", "authentication-required", "authentication-required"],
       );
       assert.deepEqual(
         discovery.endpointDiscovery.statuses.map((status) => status.endpointId),
-        ["codex-desktop", "claude-code-desktop"],
+        ["codex-desktop", "claude-code-desktop", "glm-coding-plan", "kimi-code", "deepseek-api", "kimi-platform", "claude-api", "codex-api"],
       );
       assert.equal(JSON.stringify(discovery).includes("PRIVATE_"), false);
     });
@@ -433,11 +493,26 @@ test("Claude credential and catalog-shape failures remain publicly fixed but are
       codexAdapter: new MutableCatalogAdapter(codexCatalog, true),
       claudeAdapter: new DiagnosticFailureAdapter(row.error),
       claudeDiagnosticObserver: (diagnostic) => diagnostics.push(diagnostic),
+      glmEnvironment: {},
+      kimiEnvironment: {},
+      deepseekEnvironment: {},
+      kimiPlatformEnvironment: {},
+      claudeApiEnvironment: {},
+      codexApiEnvironment: {},
     });
 
     assert.deepEqual(
       discovery.endpointDiscovery.statuses.map((status) => status.category),
-      ["catalog-ready", row.expectedPublicCategory],
+      [
+        "catalog-ready",
+        row.expectedPublicCategory,
+        "authentication-required",
+        "authentication-required",
+        "authentication-required",
+        "authentication-required",
+        "authentication-required",
+        "authentication-required",
+      ],
     );
     assert.equal(diagnostics.length, 1);
     assert.equal(diagnostics[0]?.kind, row.expectedPrivateKind);
@@ -465,6 +540,38 @@ test("two not-located outcomes produce the exact aggregate Runtime-not-located r
         false,
         "runtime-not-located",
       ),
+      // The GLM endpoint rides the same claude CLI: when that runtime is not
+      // located, all six endpoints report it and the aggregate holds.
+      glmAdapter: new MutableCatalogAdapter(
+        claudeCatalog,
+        false,
+        "runtime-not-located",
+      ),
+      kimiAdapter: new MutableCatalogAdapter(
+        claudeCatalog,
+        false,
+        "runtime-not-located",
+      ),
+      deepseekAdapter: new MutableCatalogAdapter(
+        claudeCatalog,
+        false,
+        "runtime-not-located",
+      ),
+      kimiPlatformAdapter: new MutableCatalogAdapter(
+        codexCatalog,
+        false,
+        "runtime-not-located",
+      ),
+      claudeApiAdapter: new MutableCatalogAdapter(
+        claudeCatalog,
+        false,
+        "runtime-not-located",
+      ),
+      codexApiAdapter: new MutableCatalogAdapter(
+        codexCatalog,
+        false,
+        "runtime-not-located",
+      ),
     }),
   });
 
@@ -477,6 +584,12 @@ test("two not-located outcomes produce the exact aggregate Runtime-not-located r
           endpointId: "claude-code-desktop",
           category: "runtime-not-located",
         },
+        { endpointId: "glm-coding-plan", category: "runtime-not-located" },
+        { endpointId: "kimi-code", category: "runtime-not-located" },
+        { endpointId: "deepseek-api", category: "runtime-not-located" },
+        { endpointId: "kimi-platform", category: "runtime-not-located" },
+        { endpointId: "claude-api", category: "runtime-not-located" },
+        { endpointId: "codex-api", category: "runtime-not-located" },
       ],
     },
     error: {
@@ -502,6 +615,7 @@ test("a blocked project reports both fixed endpoints as not inspected without in
       codexAdapter: codex,
       claudeAdapter: claude,
       blockedProjectDirectory: projectDirectory,
+      glmAdapter: new MutableCatalogAdapter(claudeCatalog, true),
     }),
   });
 
@@ -511,6 +625,12 @@ test("a blocked project reports both fixed endpoints as not inspected without in
       statuses: [
         { endpointId: "codex-desktop", category: "not-inspected" },
         { endpointId: "claude-code-desktop", category: "not-inspected" },
+        { endpointId: "glm-coding-plan", category: "not-inspected" },
+        { endpointId: "kimi-code", category: "not-inspected" },
+        { endpointId: "deepseek-api", category: "not-inspected" },
+        { endpointId: "kimi-platform", category: "not-inspected" },
+        { endpointId: "claude-api", category: "not-inspected" },
+        { endpointId: "codex-api", category: "not-inspected" },
       ],
     },
     error: {
@@ -529,6 +649,12 @@ test("production registrations keep native Effort Levels when catalogs provide d
     projectDirectory: "project",
     codexAdapter: new MutableCatalogAdapter(codexCatalog, true),
     claudeAdapter: new MutableCatalogAdapter(claudeCatalog, true),
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const registrationLabels = discovery.registrations.flatMap((registration) =>
     registration.capabilitySnapshot.profiles.map(
@@ -548,6 +674,12 @@ test("production composition keeps ultracode on the intensity slider and resolve
     projectDirectory: "project",
     codexAdapter: new MutableCatalogAdapter(codexCatalog, false),
     claudeAdapter: new MutableCatalogAdapter(claudeUltracodeCatalog, true),
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const endpoint = discovery.endpoints[0]!;
   const registration = discovery.registrations[0]!;
@@ -612,6 +744,12 @@ test("production composition keeps ultracode on the intensity slider and resolve
     adapter: await createProductionRuntimeEndpointAdapter({
       codexAdapter: new MutableCatalogAdapter(codexCatalog, false),
       claudeAdapter: claude,
+      glmEnvironment: {},
+      kimiEnvironment: {},
+      deepseekEnvironment: {},
+      kimiPlatformEnvironment: {},
+      claudeApiEnvironment: {},
+      codexApiEnvironment: {},
     }),
   });
   const loaded = await backend.loadDirectSessionProfile();
@@ -667,6 +805,12 @@ test("Claude product names use an exact map while a new resolved identity falls 
     adapter: await createProductionRuntimeEndpointAdapter({
       codexAdapter: new MutableCatalogAdapter(codexCatalog, false),
       claudeAdapter: new MutableCatalogAdapter(futureClaudeCatalog, true),
+      glmEnvironment: {},
+      kimiEnvironment: {},
+      deepseekEnvironment: {},
+      kimiPlatformEnvironment: {},
+      claudeApiEnvironment: {},
+      codexApiEnvironment: {},
     }),
   });
 
@@ -737,12 +881,27 @@ test("production inspection remains fail-closed on every unadmitted model key, i
         projectDirectory: "project",
         codexAdapter: new MutableCatalogAdapter(codexCatalog, false),
         claudeAdapter: new MutableCatalogAdapter(malformed, true),
+        glmEnvironment: {},
+        kimiEnvironment: {},
+        deepseekEnvironment: {},
+        kimiPlatformEnvironment: {},
+        claudeApiEnvironment: {},
+        codexApiEnvironment: {},
       });
       assert.deepEqual(discovery.endpoints, []);
       assert.deepEqual(discovery.registrations, []);
       assert.deepEqual(
         discovery.endpointDiscovery.statuses.map((status) => status.category),
-        ["inspection-failed", "inspection-failed"],
+        [
+          "inspection-failed",
+          "inspection-failed",
+          "authentication-required",
+          "authentication-required",
+          "authentication-required",
+          "authentication-required",
+          "authentication-required",
+          "authentication-required",
+        ],
       );
     });
   }
@@ -761,6 +920,12 @@ test("a Claude selection is durably accepted and uses the Claude Runtime without
     adapter: await createProductionRuntimeEndpointAdapter({
       codexAdapter: codex,
       claudeAdapter: claude,
+      glmEnvironment: {},
+      kimiEnvironment: {},
+      deepseekEnvironment: {},
+      kimiPlatformEnvironment: {},
+      claudeApiEnvironment: {},
+      codexApiEnvironment: {},
     }),
   });
   const observed: WorkbenchProjectResult[] = [];
@@ -808,7 +973,8 @@ test("a Claude selection is durably accepted and uses the Claude Runtime without
     requested: {
       kind: "recorded",
       runtimeFamilyLabel: "Claude",
-      endpointLabel: "Claude Code desktop",
+      // Ticket 25 facade naming: short segment name, family carries brand.
+      endpointLabel: "Subscription",
       modelLabel: "Opus 5",
       workIntensityControlLabel: {
         label: null,
@@ -880,6 +1046,12 @@ test("a fresh production composition continues one Session through its stored ca
     adapter: await createProductionRuntimeEndpointAdapter({
       codexAdapter: currentCodex,
       claudeAdapter: new MutableCatalogAdapter(claudeCatalog, false),
+      glmEnvironment: {},
+      kimiEnvironment: {},
+      deepseekEnvironment: {},
+      kimiPlatformEnvironment: {},
+      claudeApiEnvironment: {},
+      codexApiEnvironment: {},
     }),
   });
   const observed: WorkbenchProjectResult[] = [];
@@ -1000,6 +1172,12 @@ test("deleting a digest-bound durable native identity makes the corrupted store 
       adapter: await createProductionRuntimeEndpointAdapter({
         codexAdapter: currentCodex,
         claudeAdapter: new MutableCatalogAdapter(claudeCatalog, false),
+        glmEnvironment: {},
+        kimiEnvironment: {},
+        deepseekEnvironment: {},
+        kimiPlatformEnvironment: {},
+        claudeApiEnvironment: {},
+        codexApiEnvironment: {},
       }),
     }),
     (error) =>
@@ -1037,6 +1215,12 @@ async function persistHistoricalProductionSession(options: {
     adapter: await createProductionRuntimeEndpointAdapter({
       codexAdapter: historicalCodex,
       claudeAdapter: new MutableCatalogAdapter(claudeCatalog, false),
+      glmEnvironment: {},
+      kimiEnvironment: {},
+      deepseekEnvironment: {},
+      kimiPlatformEnvironment: {},
+      claudeApiEnvironment: {},
+      codexApiEnvironment: {},
     }),
   });
   const observed: WorkbenchProjectResult[] = [];
@@ -1143,13 +1327,28 @@ test("profile reload rechecks availability and sparse display fallback is isolat
     adapter: await createProductionRuntimeEndpointAdapter({
       codexAdapter: codex,
       claudeAdapter: claude,
+      glmEnvironment: {},
+      kimiEnvironment: {},
+      deepseekEnvironment: {},
+      kimiPlatformEnvironment: {},
+      claudeApiEnvironment: {},
+      codexApiEnvironment: {},
     }),
   });
   const first = await backend.loadDirectSessionProfile();
   assert.equal(first.ok, true);
   assert.deepEqual(
     first.endpointDiscovery.statuses.map((status) => status.category),
-    ["catalog-ready", "catalog-ready"],
+    [
+      "catalog-ready",
+      "catalog-ready",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+    ],
   );
   assert.equal(
     first.ok
@@ -1161,7 +1360,16 @@ test("profile reload rechecks availability and sparse display fallback is isolat
   const second = await backend.loadDirectSessionProfile();
   assert.deepEqual(
     second.endpointDiscovery.statuses.map((status) => status.category),
-    ["catalog-ready", "inspection-failed"],
+    [
+      "catalog-ready",
+      "inspection-failed",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+    ],
   );
   assert.deepEqual(
     second.ok
@@ -1188,6 +1396,12 @@ test("profile reload rechecks availability and sparse display fallback is isolat
       },
       true,
     ),
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   assert.deepEqual(
     isolated.endpoints.map((endpoint) => endpoint.runtimeFamilyLabel),
@@ -1195,7 +1409,16 @@ test("profile reload rechecks availability and sparse display fallback is isolat
   );
   assert.deepEqual(
     isolated.endpointDiscovery.statuses.map((status) => status.category),
-    ["catalog-ready", "inspection-failed"],
+    [
+      "catalog-ready",
+      "inspection-failed",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+    ],
   );
 });
 

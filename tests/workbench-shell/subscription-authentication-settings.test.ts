@@ -21,6 +21,7 @@ import {
 import {
   beginDirectSessionProfileLoad,
   completeDirectSessionProfileLoad,
+  hasHostedProjectView,
   initialRendererState,
   replaceProjectResult,
   selectedCommand,
@@ -142,12 +143,12 @@ test("Settings credential-control guard rejects entry surfaces without rejecting
 });
 
 test("Settings models exact D20 inspection, guard, confirmation, pending, and fresh-state transitions", () => {
-  const discovery = publicRuntimeEndpointDiscovery(
-    "catalog-ready",
-    "authentication-required",
-  );
+  const discovery = publicRuntimeEndpointDiscovery([
+    { endpointId: "codex-desktop", category: "catalog-ready" },
+    { endpointId: "claude-code-desktop", category: "authentication-required" },
+  ]);
   const initial = initialSettingsSubscriptionAuthenticationState(discovery);
-  assert.deepEqual(initial["codex-desktop"], {
+  assert.deepEqual(initial["codex-desktop"]!, {
     authentication: "unknown",
     inspectionPending: false,
     preparationPending: null,
@@ -166,12 +167,15 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
     "not-inspected",
   ] as const) {
     const catalogOnly = initialSettingsSubscriptionAuthenticationState(
-      publicRuntimeEndpointDiscovery(category, category),
+      publicRuntimeEndpointDiscovery([
+        { endpointId: "codex-desktop", category },
+        { endpointId: "claude-code-desktop", category },
+      ]),
     );
     assert.deepEqual(
       [
-        catalogOnly["codex-desktop"].authentication,
-        catalogOnly["claude-code-desktop"].authentication,
+        catalogOnly["codex-desktop"]!.authentication,
+        catalogOnly["claude-code-desktop"]!.authentication,
       ],
       ["unknown", "unknown"],
       `catalog ${category} must not imply subscription authentication`,
@@ -182,9 +186,9 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
     initial,
     "codex-desktop",
   );
-  assert.equal(inspecting["codex-desktop"].inspectionPending, true);
+  assert.equal(inspecting["codex-desktop"]!.inspectionPending, true);
   assert.match(
-    presentationText(inspecting["codex-desktop"].feedback) ?? "",
+    presentationText(inspecting["codex-desktop"]!.feedback) ?? "",
     /re-check subscription sign-in/u,
   );
   const signedOut = completeSettingsSubscriptionAuthenticationResponse(
@@ -192,18 +196,18 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
     "codex-desktop",
     { kind: "authentication-state", state: "sign-in-required" },
   );
-  assert.equal(signedOut["codex-desktop"].inspectionPending, false);
-  assert.equal(signedOut["codex-desktop"].authentication, "sign-in-required");
+  assert.equal(signedOut["codex-desktop"]!.inspectionPending, false);
+  assert.equal(signedOut["codex-desktop"]!.authentication, "sign-in-required");
 
   const preparing = beginSettingsSubscriptionAuthenticationPreparation(
     signedOut,
     "codex-desktop",
     "login",
   );
-  assert.equal(preparing["codex-desktop"].preparationPending, "login");
+  assert.equal(preparing["codex-desktop"]!.preparationPending, "login");
   assert.equal(
     settingsSubscriptionAuthenticationPresentation(
-      preparing["codex-desktop"],
+      preparing["codex-desktop"]!,
     ).pending,
     true,
   );
@@ -232,7 +236,7 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
   );
   assert.deepEqual(
     settingsSubscriptionAuthenticationPresentation(
-      blocked["codex-desktop"],
+      blocked["codex-desktop"]!,
     ),
     {
       label: "Sign-in required",
@@ -265,7 +269,7 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
       consequences: { resumableSessionCount: 2, projectCount: 1 },
     },
   );
-  assert.deepEqual(confirmation["codex-desktop"].confirmation, {
+  assert.deepEqual(confirmation["codex-desktop"]!.confirmation, {
     preparationKey: "opaque-preparation-01",
     action: "login",
     resumableSessionCount: 2,
@@ -275,7 +279,7 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
     clearSettingsSubscriptionAuthenticationConfirmation(
       confirmation,
       "codex-desktop",
-    )["codex-desktop"].confirmation,
+    )["codex-desktop"]!.confirmation,
     null,
   );
 
@@ -289,26 +293,26 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
     "codex-desktop",
     { kind: "authentication-action-requested", action: "login" },
   );
-  assert.equal(requested["codex-desktop"].pendingAction, "login");
+  assert.equal(requested["codex-desktop"]!.pendingAction, "login");
   assert.equal(
-    presentationText(requested["codex-desktop"].feedback),
+    presentationText(requested["codex-desktop"]!.feedback),
     "The Workbench asked the provider CLI to log in.",
   );
   assert.equal(
-    typeof requested["codex-desktop"].feedback === "string"
+    typeof requested["codex-desktop"]!.feedback === "string"
       ? null
-      : requested["codex-desktop"].feedback?.key,
+      : requested["codex-desktop"]!.feedback?.key,
     "authentication.login.requested",
   );
-  assert.equal(requested["codex-desktop"].outcome, "requested");
+  assert.equal(requested["codex-desktop"]!.outcome, "requested");
   const fresh = completeSettingsSubscriptionAuthenticationResponse(
     requested,
     "codex-desktop",
     { kind: "authentication-state", state: "bound" },
   );
-  assert.equal(fresh["codex-desktop"].pendingAction, null);
-  assert.equal(fresh["codex-desktop"].authentication, "bound");
-  assert.equal(fresh["codex-desktop"].outcome, null);
+  assert.equal(fresh["codex-desktop"]!.pendingAction, null);
+  assert.equal(fresh["codex-desktop"]!.authentication, "bound");
+  assert.equal(fresh["codex-desktop"]!.outcome, null);
 });
 
 test("F115 the partial outcome is neither the success nor the failure state and names the lost resumability", () => {
@@ -342,30 +346,30 @@ test("F115 the partial outcome is neither the success nor the failure state and 
 
   assert.deepEqual(
     [
-      notRequested["codex-desktop"].outcome,
-      partial["codex-desktop"].outcome,
-      requested["codex-desktop"].outcome,
+      notRequested["codex-desktop"]!.outcome,
+      partial["codex-desktop"]!.outcome,
+      requested["codex-desktop"]!.outcome,
     ],
     ["not-requested", "partially-completed", "requested"],
   );
   assert.equal(
-    presentationText(partial["codex-desktop"].feedback),
+    presentationText(partial["codex-desktop"]!.feedback),
     "The Workbench asked the provider CLI to log out but could not record the log out. Sessions started before this log out can no longer be resumed, even where the Workbench still offers to resume them.",
   );
   assert.notEqual(
-    presentationText(partial["codex-desktop"].feedback),
-    presentationText(notRequested["codex-desktop"].feedback),
+    presentationText(partial["codex-desktop"]!.feedback),
+    presentationText(notRequested["codex-desktop"]!.feedback),
   );
   assert.notEqual(
-    presentationText(partial["codex-desktop"].feedback),
-    presentationText(requested["codex-desktop"].feedback),
+    presentationText(partial["codex-desktop"]!.feedback),
+    presentationText(requested["codex-desktop"]!.feedback),
   );
   assert.match(
-    presentationText(partial["codex-desktop"].feedback) ?? "",
+    presentationText(partial["codex-desktop"]!.feedback) ?? "",
     /can no longer be resumed/u,
   );
   assert.equal(
-    settingsSubscriptionAuthenticationPresentation(partial["codex-desktop"])
+    settingsSubscriptionAuthenticationPresentation(partial["codex-desktop"]!)
       .outcome,
     "partially-completed",
   );
@@ -376,11 +380,11 @@ test("F115 the partial outcome is neither the success nor the failure state and 
     "login",
   );
   assert.match(
-    presentationText(partialLogin["claude-code-desktop"].feedback) ?? "",
+    presentationText(partialLogin["claude-code-desktop"]!.feedback) ?? "",
     /could not record the sign-in change/u,
   );
   assert.match(
-    presentationText(partialLogin["claude-code-desktop"].feedback) ?? "",
+    presentationText(partialLogin["claude-code-desktop"]!.feedback) ?? "",
     /can no longer be resumed/u,
   );
 
@@ -398,32 +402,32 @@ test("F115 the partial outcome is neither the success nor the failure state and 
   );
   assert.deepEqual(
     {
-      ...fromResponse["codex-desktop"],
-      feedback: presentationText(fromResponse["codex-desktop"].feedback),
+      ...fromResponse["codex-desktop"]!,
+      feedback: presentationText(fromResponse["codex-desktop"]!.feedback),
     },
     {
-      ...partial["codex-desktop"],
-      feedback: presentationText(partial["codex-desktop"].feedback),
+      ...partial["codex-desktop"]!,
+      feedback: presentationText(partial["codex-desktop"]!.feedback),
     },
   );
   assert.equal(
-    typeof fromResponse["codex-desktop"].feedback === "string"
+    typeof fromResponse["codex-desktop"]!.feedback === "string"
       ? null
-      : fromResponse["codex-desktop"].feedback?.key,
+      : fromResponse["codex-desktop"]!.feedback?.key,
     "authentication.logout.partially-completed",
   );
-  assert.equal(fromResponse["codex-desktop"].outcome, "partially-completed");
+  assert.equal(fromResponse["codex-desktop"]!.outcome, "partially-completed");
   // The card is left usable: nothing else will arrive to release it, and a
   // fresh inspection would replace the sentence that names what was lost.
-  assert.equal(fromResponse["codex-desktop"].pendingAction, null);
+  assert.equal(fromResponse["codex-desktop"]!.pendingAction, null);
   assert.equal(
-    presentationText(notRequested["codex-desktop"].feedback),
+    presentationText(notRequested["codex-desktop"]!.feedback),
     "The Workbench could not ask the provider CLI to log out. Nothing changed, and every Session stays exactly as resumable as it was.",
   );
   assert.equal(
-    typeof notRequested["codex-desktop"].feedback === "string"
+    typeof notRequested["codex-desktop"]!.feedback === "string"
       ? null
-      : notRequested["codex-desktop"].feedback?.key,
+      : notRequested["codex-desktop"]!.feedback?.key,
     "authentication.logout.not-requested",
   );
 });
@@ -477,10 +481,13 @@ test("existing provider cards render independent states, exact copy, blockers, a
       beginDirectSessionProfileLoad(project),
       {
         ok: false,
-        endpointDiscovery: publicRuntimeEndpointDiscovery(
-          "authentication-required",
-          "authentication-required",
-        ),
+        endpointDiscovery: publicRuntimeEndpointDiscovery([
+          { endpointId: "codex-desktop", category: "authentication-required" },
+          {
+            endpointId: "claude-code-desktop",
+            category: "authentication-required",
+          },
+        ]),
         error: {
           category: "profile-unavailable",
           message:
@@ -551,10 +558,13 @@ test("existing provider cards render independent states, exact copy, blockers, a
     assert.match(visibleHtml, /Resumable Sessions:\s*3; Projects:\s*2/u);
     assert.match(visibleHtml, />Continue with Login</u);
     assert.match(visibleHtml, />Cancel</u);
-    assert.match(visibleHtml, /The Workbench never handles credentials/u);
     assert.match(
       visibleHtml,
-      /This page never asks for a password, API key or token, never reads a credential file, and never stores credentials\. None of those controls may be added\./u,
+      /Subscription credentials never pass through the Workbench/u,
+    );
+    assert.match(
+      visibleHtml,
+      /Subscription sign-in happens in each provider's own app\. This page never asks for a subscription password or token, never reads a subscription credential file, and never stores subscription credentials\. The exceptions — the API keys of the API-key endpoints — are each disclosed in that provider's API key section below\./u,
     );
     assert.doesNotMatch(
       visibleHtml,
@@ -617,7 +627,8 @@ function renderSettings(
   state: ReturnType<typeof completeDirectSessionProfileLoad>,
   subscriptionAuthentication: unknown,
 ): string {
-  assert.equal(state.result?.ok, true);
+  assert.equal(hasHostedProjectView(state.result), true);
+  if (!hasHostedProjectView(state.result)) assert.fail("Expected a Project view.");
   const view = state.result.view;
   return renderToString(() =>
     Screen({

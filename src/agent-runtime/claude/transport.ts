@@ -3,6 +3,8 @@ import type { SessionProfile } from "../index.ts";
 export interface ClaudeCatalogTransport {
   send(line: string): Promise<void>;
   receive(): Promise<string | null>;
+  /** End stream-json input while leaving stdout readable for trailing frames. */
+  finishInput?(): void;
   stop(): Promise<void>;
 }
 

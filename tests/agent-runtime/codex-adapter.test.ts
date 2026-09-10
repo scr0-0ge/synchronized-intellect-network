@@ -8,6 +8,10 @@ import {
 } from "../../src/agent-runtime/codex-adapter.ts";
 import type { CodexCatalogObservation } from "../../src/agent-runtime/codex-adapter.ts";
 import { RuntimeAdapterError } from "../../src/agent-runtime/index.ts";
+import {
+  CodexJsonlPeer,
+  type CodexPeerMessageObservation,
+} from "../../src/agent-runtime/codex/protocol.ts";
 import type {
   NormalizedRuntimeEvent,
   RuntimeInput,
@@ -77,6 +81,21 @@ function codexSteerTransport(
   steerResult: unknown,
   includeSuccessfulTerminal = true,
 ): ScriptedTransport {
+  return codexSteerAcknowledgementTransport(
+    { jsonrpc: "2.0", id: 6, result: steerResult },
+    includeSuccessfulTerminal,
+  );
+}
+
+/**
+ * The same live turn, with the `turn/steer` acknowledgement supplied whole so
+ * a test can script the Runtime's own documented refusals (issue #6 case 9)
+ * rather than only well-formed results.
+ */
+function codexSteerAcknowledgementTransport(
+  acknowledgement: Record<string, unknown>,
+  includeSuccessfulTerminal = true,
+): ScriptedTransport {
   const frames: string[] = [
     JSON.stringify({ jsonrpc: "2.0", id: 1, result: { server: "synthetic" } }),
     JSON.stringify({
@@ -125,7 +144,7 @@ function codexSteerTransport(
         turn: { id: "turn-fixed", status: "inProgress" },
       },
     }),
-    JSON.stringify({ jsonrpc: "2.0", id: 6, result: steerResult }),
+    JSON.stringify(acknowledgement),
   ];
   if (includeSuccessfulTerminal) {
     frames.push(
@@ -1528,8 +1547,7 @@ test("F110 round 2: the ten-row next-vendor-change probe leaves the catalog aliv
  * stops being required, the quarantine rows pass instead of rejecting; if
  * value validation is widened into a pass-through, the invalid-value rows
  * accept. The session wire keeps exact shapes; its own sentinels are the
- * `nativeExtra` rows in the resume tests below, which reject any additive
- * key on `thread/resume` results.
+ * resume wire guards, which now apply the same additive-field contract.
  */
 test("F133: required keys and validated values hold at every tolerated layer", async () => {
   const sibling = currentFullCatalogModel({
@@ -2619,13 +2637,13 @@ test("Codex steers the correlated active turn without starting a second turn", a
   assert.equal(transport.recordedStopCalls(), 1);
 });
 
-test("Codex rejects every widened or mismatched turn/steer acknowledgement", async () => {
+test("Codex rejects every malformed or mismatched turn/steer acknowledgement", async () => {
   for (const [name, steerResult] of [
-    ["matching id plus extra key", { turnId: "turn-fixed", extra: true }],
+    ["malformed turn id", { turnId: 42 }],
     ["mismatched turn id", { turnId: "turn-other" }],
     ["missing turn id", {}],
   ] as const) {
-    const transport = codexSteerTransport(steerResult, false);
+    const transport = codexSteerTransport(steerResult);
     const binding = await new CodexAdapter(async () => transport).start({
       projectDirectory: "C:\\synthetic-project",
       profile: requestedProfile,
@@ -2644,13 +2662,130 @@ test("Codex rejects every widened or mismatched turn/steer acknowledgement", asy
         error instanceof RuntimeAdapterError && error.category === "protocol-invalid",
       name,
     );
+    // Issue #6 case 9: the acknowledgement is refused, and only it. The turn
+    // it was addressed to never stopped running and still reaches its own
+    // terminal, so the Agent Session survives a refused piece of guidance.
     assert.deepEqual(
       await remaining,
-      [{ kind: "failed", category: "protocol-invalid" }],
+      [
+        { kind: "item-started", itemType: "agent-message" },
+        { kind: "item-completed", itemType: "agent-message" },
+        { kind: "agent-message", text: "GUIDANCE_APPLIED_IN_SAME_TURN" },
+        { kind: "turn-completed", status: "completed" },
+      ],
       name,
     );
     assert.equal(transport.recordedStopCalls(), 1, name);
   }
+});
+
+test("a Runtime refusal of turn/steer fails the guidance and never the running turn", async () => {
+  // The Runtime documents refusals for steering a turn that is not steerable
+  // (no active turn, wrong turn, empty input, plan mode, review, compaction).
+  // Issue #6 case 9 reported one of these on kimi as `失败` with no agent
+  // message and no safe continuation handle, forcing a fresh Session.
+  for (const [name, error] of [
+    ["method not found", { code: -32_601, message: "Method not found" }],
+    ["no active turn", { code: -32_602, message: "no active turn" }],
+    ["wrong turn", { code: -32_602, message: "expected turn is not active" }],
+  ] as const) {
+    const transport = codexSteerAcknowledgementTransport({
+      jsonrpc: "2.0",
+      id: 6,
+      error,
+    });
+    const binding = await new CodexAdapter(async () => transport).start({
+      projectDirectory: "C:\\synthetic-project",
+      profile: requestedProfile,
+    });
+    await binding.send({ text: "寻找一个中国武汉的新闻" });
+    const iterator = binding.events()[Symbol.asyncIterator]();
+    await iterator.next();
+    await iterator.next();
+    assert.equal(binding.steerAvailability?.(), "available", name);
+
+    const steer = binding.steer?.({ text: "算了寻找一个中国天水的新闻" });
+    assert.notEqual(steer, undefined, name);
+    const remaining = collectIterator(iterator);
+    await assert.rejects(
+      steer!,
+      (thrown) =>
+        thrown instanceof RuntimeAdapterError &&
+        thrown.category === "protocol-rejected",
+      name,
+    );
+    assert.deepEqual(
+      await remaining,
+      [
+        { kind: "item-started", itemType: "agent-message" },
+        { kind: "item-completed", itemType: "agent-message" },
+        { kind: "agent-message", text: "GUIDANCE_APPLIED_IN_SAME_TURN" },
+        { kind: "turn-completed", status: "completed" },
+      ],
+      name,
+    );
+    assert.equal(transport.recordedStopCalls(), 1, name);
+  }
+});
+
+test("a refused steer leaves steering available for the rest of the same turn", async () => {
+  const transport = codexSteerAcknowledgementTransport({
+    jsonrpc: "2.0",
+    id: 6,
+    error: { code: -32_602, message: "no active turn" },
+  });
+  const binding = await new CodexAdapter(async () => transport).start({
+    projectDirectory: "C:\\synthetic-project",
+    profile: requestedProfile,
+  });
+  await binding.send({ text: "Inspect the migration carefully." });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  await iterator.next();
+  await iterator.next();
+
+  const steer = binding.steer?.({ text: "Use the safer migration." });
+  const remaining = collectIterator(iterator);
+  await assert.rejects(
+    steer!,
+    (thrown) =>
+      thrown instanceof RuntimeAdapterError &&
+      thrown.category === "protocol-rejected",
+  );
+  assert.equal(binding.steerAvailability?.(), "available");
+  await remaining;
+});
+
+test("a Runtime refusal of turn/interrupt still ends the turn fail-closed", async () => {
+  // The opposite contract, held deliberately: turn/interrupt asks the Runtime
+  // to end the turn, so a refused receipt leaves the turn's fate unknown and
+  // must not be reported as a turn that kept running.
+  const transport = codexSteerAcknowledgementTransport({
+    jsonrpc: "2.0",
+    id: 6,
+    error: { code: -32_602, message: "no active turn" },
+  });
+  const binding = await new CodexAdapter(async () => transport).start({
+    projectDirectory: "C:\\synthetic-project",
+    profile: requestedProfile,
+  });
+  await binding.send({ text: "Inspect the migration carefully." });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  await iterator.next();
+  await iterator.next();
+
+  const interrupt = binding.interrupt?.();
+  assert.notEqual(interrupt, undefined);
+  const remaining = collectIterator(iterator);
+  await assert.rejects(
+    interrupt!,
+    (thrown) =>
+      thrown instanceof RuntimeAdapterError &&
+      thrown.category === "protocol-rejected",
+  );
+  assert.deepEqual(await remaining, [
+    { kind: "failed", category: "protocol-rejected" },
+  ]);
+  assert.equal(transport.recordedStopCalls(), 1);
 });
 
 test("resume sends the exact closed official-runtime request on its fresh transport", async () => {
@@ -2745,7 +2880,7 @@ test("resume accepts the current official-runtime response shape", async () => {
   assert.equal(transport.recordedStopCalls(), 1);
 });
 
-test("resume accepts the 0.151 thread shape whose one admitted addition is projectId (F220)", async () => {
+test("resume accepts projectId and later additive thread fields (F220)", async () => {
   // Measured from a live `thread/resume` reply on codex-cli 0.151.0-alpha.7.1
   // (worker 468): the result envelope is unchanged and the thread object
   // carries exactly one key the previous generation did not, `projectId`.
@@ -2760,7 +2895,7 @@ test("resume accepts the 0.151 thread shape whose one admitted addition is proje
     id: 3,
     result: {
       ...result,
-      thread: { ...result.thread, projectId: null },
+      thread: { ...result.thread, projectId: null, nativeExtra: "UNCONSUMED_VENDOR_CANARY" },
     },
   });
   const transport = new ScriptedTransport(lines);
@@ -2781,33 +2916,9 @@ test("resume accepts the 0.151 thread shape whose one admitted addition is proje
   assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed" });
   assert.equal(transport.recordedStopCalls(), 1);
 
-  // The matching adversarial row (rule 1): the admitted key does not open the
-  // thread to arbitrary additions — a 0.151-shaped thread with one more
-  // native field still rejects exactly.
-  const adversarialTransport = new ScriptedTransport([
-    JSON.stringify({ jsonrpc: "2.0", id: 1, result: { server: "synthetic" } }),
-    JSON.stringify({ jsonrpc: "2.0", id: 2, result: { account: { type: "chatgpt" } } }),
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: 3,
-      result: {
-        ...result,
-        thread: { ...result.thread, projectId: null, nativeExtra: true },
-      },
-    }),
-  ]);
-  const adversarialAdapter = new CodexAdapter(async () => adversarialTransport);
-  await assert.rejects(
-    adversarialAdapter.resume({
-      projectDirectory: "C:\\synthetic-project",
-      profile: requestedProfile,
-      opaqueSessionReference: "thread-fixed",
-    }),
-    (error) =>
-      error instanceof RuntimeAdapterError &&
-      error.category === "protocol-invalid",
-  );
-  assert.equal(adversarialTransport.recordedStopCalls(), 1);
+
+  assert.equal(JSON.stringify(events).includes("UNCONSUMED_VENDOR_CANARY"), false);
+
 });
 
 test("resume applies a changed model and effort to one native thread and reports that exact effective profile", async () => {
@@ -3076,55 +3187,6 @@ test("resume rejects invalid native results through fixed categories and stops",
       },
       category: "protocol-invalid",
     },
-    {
-      response: {
-        jsonrpc: "2.0",
-        id: 3,
-        result: { ...validResult, nativeExtra: true },
-      },
-      category: "protocol-invalid",
-    },
-    {
-      response: {
-        jsonrpc: "2.0",
-        id: 3,
-        result: { ...validResult, thread: { id: opaqueReference, nativeExtra: true } },
-      },
-      category: "protocol-invalid",
-    },
-    {
-      response: {
-        jsonrpc: "2.0",
-        id: 3,
-        result: {
-          ...validResult,
-          sandbox: { type: "dangerFullAccess", nativeExtra: true },
-        },
-      },
-      category: "protocol-invalid",
-    },
-    {
-      response: {
-        jsonrpc: "2.0",
-        id: 3,
-        result: { ...currentOfficialResumeResult(opaqueReference), nativeExtra: true },
-      },
-      category: "protocol-invalid",
-    },
-    {
-      response: {
-        jsonrpc: "2.0",
-        id: 3,
-        result: {
-          ...currentOfficialResumeResult(opaqueReference),
-          thread: {
-            ...currentOfficialResumeResult(opaqueReference).thread,
-            nativeExtra: true,
-          },
-        },
-      },
-      category: "protocol-invalid",
-    },
   ] as const;
 
   for (const fixture of cases) {
@@ -3334,6 +3396,224 @@ test("start preserves the independent Session Profile and streams one correlated
   ]);
 });
 
+const kimiResponsesProfile = Object.freeze({
+  model: "kimi-k2.7-code",
+  effortLevel: "high",
+  executionMode: "single-agent",
+  accessMode: "full-access",
+});
+
+/**
+ * Ticket 19. The real kimi-platform turn (responses wire, codex
+ * 0.153.0-alpha.5) was killed by `correlation-invalid` while the CLI itself
+ * succeeded. The fixture is a faithful transcription of the app-server
+ * notification sequence captured offline against the same binary (fake
+ * provider on 127.0.0.1, `evidence/kimi-platform-binding-correlation.md`):
+ * a `userMessage` pair, a full `reasoning` item with summary deltas, the
+ * `agentMessage` started/delta/completed triple, the exact observed
+ * `thread/tokenUsage/updated` key set, and the advisory notifications
+ * (`warning`, `item/reasoning/*`, `account/rateLimits/updated`,
+ * `thread/status/changed`) the binding must pass over without touching.
+ */
+async function observeKimiResponsesTurn(lines: readonly string[]) {
+  const transport = new ScriptedTransport(lines);
+  const binding = await new CodexAdapter(async () => transport).start({
+    projectDirectory: "C:\\synthetic-project",
+    profile: kimiResponsesProfile,
+  });
+  await binding.send({ text: "fixed input" });
+  const events = [];
+  for await (const event of binding.events()) events.push(event);
+  return { events, transport };
+}
+
+async function kimiResponsesFixtureLines(): Promise<string[]> {
+  const contents = await readFile(
+    new URL("./fixtures/kimi-responses-turn.jsonl", import.meta.url),
+    "utf8",
+  );
+  return contents.split(/\r?\n/u).filter(Boolean);
+}
+
+/** Rewrite `item.phase` on the completed agentMessage item only. */
+function withCompletedAgentMessagePhase(
+  lines: readonly string[],
+  phase: unknown,
+): string[] {
+  return lines.map((line) => {
+    const message = JSON.parse(line) as {
+      readonly method?: string;
+      readonly params?: {
+        readonly item?: { readonly type?: string; readonly phase?: unknown };
+      };
+    };
+    if (
+      message.method !== "item/completed" ||
+      message.params?.item?.type !== "agentMessage"
+    ) {
+      return line;
+    }
+    const rewritten = JSON.parse(line) as {
+      params: { item: { phase: unknown } };
+    };
+    rewritten.params.item.phase = phase;
+    return JSON.stringify(rewritten);
+  });
+}
+
+test("a captured responses-wire turn with a null-phased agentMessage completes (ticket 19)", async () => {
+  // Red before the fix: the real wire spells an unphased agentMessage as
+  // `"phase": null`, the binding only recognised an absent key, and the sole
+  // final-message candidate vanished into `correlation-invalid`.
+  const { events, transport } = await observeKimiResponsesTurn(
+    await kimiResponsesFixtureLines(),
+  );
+
+  // The captured wire carries a reasoning item/started between the turn
+  // start and the agent message; since issue #6 case 4 it surfaces as a
+  // thinking progress note and public summary (the input echo stays quiet).
+  assert.equal(events.filter((event) => event.kind === "reasoning").length, 1);
+  assert.deepEqual(events.filter((event) => event.kind !== "reasoning"), [
+    { kind: "session-started" },
+    { kind: "turn-started" },
+    { kind: "progress", activity: "thinking" },
+    { kind: "item-started", itemType: "agent-message" },
+    { kind: "item-completed", itemType: "agent-message" },
+    { kind: "agent-message", text: "FIXED_MARKER" },
+    {
+      kind: "turn-completed",
+      status: "completed",
+      context: {
+        basis: "active-context",
+        usedTokens: 7785,
+        windowTokens: 249036,
+      },
+    },
+  ]);
+  assert.equal(transport.recordedStopCalls(), 1);
+});
+
+test("the captured responses-wire turn stays fatal for unrecognized phases and admits final_answer (ticket 19)", async () => {
+  for (const phase of ["analysis", "", 42, false]) {
+    const { events } = await observeKimiResponsesTurn(
+      withCompletedAgentMessagePhase(await kimiResponsesFixtureLines(), phase),
+    );
+    assert.deepEqual(
+      events.at(-1),
+      { kind: "failed", category: "correlation-invalid" },
+      `phase=${JSON.stringify(phase)}`,
+    );
+  }
+
+  const { events } = await observeKimiResponsesTurn(
+    withCompletedAgentMessagePhase(
+      await kimiResponsesFixtureLines(),
+      "final_answer",
+    ),
+  );
+  assert.deepEqual(events.at(-1), {
+    kind: "turn-completed",
+    status: "completed",
+    context: {
+      basis: "active-context",
+      usedTokens: 7785,
+      windowTokens: 249036,
+    },
+  });
+});
+
+test("a peer message observer records both wire directions in order (ticket 19)", async () => {
+  const observations: CodexPeerMessageObservation[] = [];
+  const peer = new CodexJsonlPeer(
+    new ScriptedTransport([
+      JSON.stringify({ jsonrpc: "2.0", id: 1, result: { server: "synthetic" } }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "thread/started",
+        params: { thread: { id: "thread-fixed" } },
+      }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        result: { turn: { id: "turn-fixed", status: "inProgress" } },
+      }),
+    ]),
+    undefined,
+    (observation) => observations.push(observation),
+  );
+
+  await peer.request("initialize", { clientInfo: { name: "probe" } });
+  await peer.nextNotification();
+  const turnResult = await peer.request("turn/start");
+
+  assert.deepEqual(
+    observations.map((observation) => ({
+      direction: observation.direction,
+      method: observation.message.method,
+      id: observation.message.id,
+    })),
+    [
+      { direction: "outbound", method: "initialize", id: 1 },
+      { direction: "inbound", method: undefined, id: 1 },
+      { direction: "inbound", method: "thread/started", id: undefined },
+      { direction: "outbound", method: "turn/start", id: 2 },
+      { direction: "inbound", method: undefined, id: 2 },
+    ],
+  );
+  assert.equal(
+    JSON.stringify(turnResult),
+    JSON.stringify({ turn: { id: "turn-fixed", status: "inProgress" } }),
+  );
+});
+
+test("a peer message observer cannot change outcomes and still sees a rejected line (ticket 19)", async () => {
+  const observedMethods: string[] = [];
+  const hostile = new CodexJsonlPeer(
+    new ScriptedTransport([
+      JSON.stringify({ jsonrpc: "2.0", id: 1, result: { server: "synthetic" } }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "thread/started",
+        params: { thread: { id: "thread-fixed" } },
+      }),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "item/fileChange/requestApproval",
+        params: { threadId: "thread-fixed", turnId: "turn-fixed" },
+      }),
+    ]),
+    undefined,
+    (observation) => {
+      if (
+        observation.direction === "inbound" &&
+        typeof observation.message.method === "string"
+      ) {
+        observedMethods.push(observation.message.method);
+      }
+      observation.message.method = "mutated";
+      throw new Error("observer fault");
+    },
+  );
+
+  await hostile.request("initialize");
+  await hostile.nextNotification();
+  await assert.rejects(
+    hostile.nextNotification(),
+    (error: unknown) =>
+      error instanceof RuntimeAdapterError &&
+      error.category === "approval-required",
+  );
+
+  // Every notification was observed — including the one the peer then
+  // rejected — and neither the observer's throw nor its attempted mutation
+  // changed what the peer saw: the approval notification still failed closed
+  // and the earlier thread/started stayed intact.
+  assert.deepEqual(observedMethods, [
+    "thread/started",
+    "item/fileChange/requestApproval",
+  ]);
+});
+
 test("Codex carries the latest active context rather than accumulated Session usage", async () => {
   const laterUsage = {
     ...tokenUsage,
@@ -3358,7 +3638,7 @@ test("Codex carries the latest active context rather than accumulated Session us
   assert.equal(transport.recordedStopCalls(), 1);
 });
 
-test("Codex token usage fails closed on every invalid context row", async () => {
+test("Codex rejects every invalid context row without losing the completed answer", async () => {
   const adversarial = [
     {
       name: "negative count",
@@ -3376,14 +3656,8 @@ test("Codex token usage fails closed on every invalid context row", async () => 
       name: "non-integer active-context count",
       value: { ...tokenUsage, last: { ...tokenUsage.last, totalTokens: 1.5 } },
     },
-    {
-      name: "unrecognized accumulated-count key",
-      value: { ...tokenUsage, total: { ...tokenCounts, nativeExtra: 1 } },
-    },
-    {
-      name: "unrecognized active-context key",
-      value: { ...tokenUsage, last: { ...tokenUsage.last, nativeExtra: 1 } },
-    },
+
+
     {
       name: "window smaller than active context",
       value: {
@@ -3396,21 +3670,18 @@ test("Codex token usage fails closed on every invalid context row", async () => 
       name: "window present but not a number",
       value: { ...tokenUsage, modelContextWindow: "258400" },
     },
-    {
-      name: "unrecognized extra key",
-      value: { ...tokenUsage, futureProviderField: 1 },
-    },
+
   ];
 
   for (const row of adversarial) {
     const { events, transport } = await observeTokenUsage([row.value]);
     assert.deepEqual(
       events.at(-1),
-      { kind: "failed", category: "protocol-invalid" },
+      { kind: "turn-completed", status: "completed" },
       row.name,
     );
     assert.equal(
-      events.some((event) => event.kind === "turn-completed"),
+      events.some((event) => event.kind === "turn-completed" && event.context !== undefined),
       false,
       row.name,
     );
@@ -3444,7 +3715,7 @@ test("the official-runtime Seam receives the ordered normalized-to-native reques
       method: "initialize",
       params: {
         clientInfo: {
-          name: "unified-agent-workbench",
+          name: "synchronized-intellect-network",
           title: "Synchronized Intellect Network",
           version: "0.1.0",
         },

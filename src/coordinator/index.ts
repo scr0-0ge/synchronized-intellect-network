@@ -1,7 +1,10 @@
 import type { ResumableAgentRuntimeAdapter } from "../agent-runtime/index.ts";
 import { SqliteWorkbenchCoordinator } from "./sqlite-project-channel.ts";
 import type { WorkbenchCoordinator } from "./types.ts";
-import type { WorkLedgerAuthGenerationModule } from "./work-ledger-auth-generation.ts";
+import type {
+  DurableRuntimeEndpointId,
+  WorkLedgerAuthGenerationModule,
+} from "./work-ledger-auth-generation.ts";
 
 export type {
   CommandReceipt,
@@ -52,6 +55,12 @@ export type {
 } from "../session-metadata.ts";
 export { CoordinatorError } from "./types.ts";
 export {
+  createSessionContinuationPlan,
+  parseSessionContinuationPlan,
+  sessionContinuationStepInput,
+  SESSION_CONTINUATION_MAX_STEPS,
+} from "./session-continuation-plan.ts";
+export {
   cloneEffectiveSessionProfileProjection,
   cloneRequestedSessionProfileProjection,
   observedDifferentProfileValueLabel,
@@ -72,6 +81,14 @@ export interface WorkbenchCoordinatorOptions {
   readonly adapter: ResumableAgentRuntimeAdapter;
   /** Optional until the Workbench-private F104 module is composed at startup. */
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
+  /**
+   * Endpoint ids the channel admits in command runtime contexts and stored
+   * runtime resume identities. Defaults to the two subscription endpoints so
+   * direct consumers and tests are unchanged; the Workbench shell injects its
+   * full registered roster, which includes the api-key endpoints (GLM). The
+   * coordinator never imports the shell — the roster travels downward only.
+   */
+  readonly endpointIds?: readonly DurableRuntimeEndpointId[];
 }
 
 export function createWorkbenchCoordinator(
@@ -81,6 +98,7 @@ export function createWorkbenchCoordinator(
     options.databasePath,
     options.adapter,
     options.authGeneration,
+    options.endpointIds,
   );
 }
 

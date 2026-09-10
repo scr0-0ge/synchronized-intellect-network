@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  createWorkbenchProjectTransferDecoder,
+  createWorkbenchProjectTransferEncoder,
+  sanitizeWorkbenchHostedProjectResult,
+} from "../../src/workbench-shell/result-sanitizer.ts";
 
 import {
   WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL,
@@ -38,6 +43,7 @@ import {
 import {
   createWorkbenchPreloadBridge,
   type FixedProjectViewIpc,
+  type WorkbenchPreloadBridge,
 } from "../../src/workbench-shell/preload-bridge.ts";
 import {
   WORKBENCH_HISTORY_RECOVERY_BROWSE_CHANNEL,
@@ -56,6 +62,7 @@ const expectedWorkbenchPreloadBridgeKeys = Object.freeze([
   "browse",
   "cancel",
   "cancelPreparedSubscriptionAuthentication",
+  "checkCliUpdates",
   "createProject",
   "discoverProjectHistories",
   "getSnapshot",
@@ -65,17 +72,33 @@ const expectedWorkbenchPreloadBridgeKeys = Object.freeze([
   "loadAppearancePreference",
   "loadClaudePermissionHandling",
   "loadDirectSessionProfile",
+  "loadEndpointCatalogFreshness",
+  "loadEndpointKeyStatus",
+  "loadEndpointPreferences",
   "loadRuntimeExecutables",
   "mutateSessionMetadata",
   "notifyTurnCompleted",
+  "observeNotificationActivation",
   "observeProject",
+  "observeSubscriptionUsage",
+  "observeUserInput",
   "openProject",
   "perform",
   "prepareSubscriptionAuthentication",
+  "probeEndpointKey",
+  "readUserInput",
+  "refreshEndpointCatalogFreshness",
+  "relaunchApp",
+  "removeEndpointKey",
   "removeProject",
   "removeSession",
+  "respondToUserInput",
+  "revealEndpointKey",
+  "runCliUpdate",
   "saveAppearancePreference",
   "saveClaudePermissionHandling",
+  "saveEndpointKey",
+  "saveEndpointPreference",
   "saveRuntimeExecutable",
   "selectProject",
   "steerActiveTurn",
@@ -83,6 +106,18 @@ const expectedWorkbenchPreloadBridgeKeys = Object.freeze([
   "useDirectSessionProfileAsDefault",
   "writeClipboardText",
 ]);
+
+function observeDecodedProject(
+  bridge: Pick<WorkbenchPreloadBridge, "observeProject">,
+  listener: (result: WorkbenchHostedProjectResult) => void,
+): () => void {
+  const decode = createWorkbenchProjectTransferDecoder();
+  return bridge.observeProject(transfer => {
+    const result = decode(transfer);
+    assert.notEqual(result, undefined, "preload must send a valid transfer");
+    listener(result!);
+  });
+}
 
 class FakeProjectViewIpc implements FixedProjectViewIpc {
   readonly sent: string[] = [];
@@ -147,7 +182,7 @@ class FakeProjectViewIpc implements FixedProjectViewIpc {
   }
 
   emit(value: unknown): void {
-    for (const listener of [...this.listeners]) listener({}, value);
+    for (const listener of [...this.listeners]) listener({}, { kind: "snapshot", revision: 1, result: value });
   }
 }
 
@@ -419,6 +454,12 @@ test("preload loads one profile through the fixed channel and reconstructs a fre
         endpointId: "claude-code-desktop",
         category: "inspection-failed",
       },
+      { endpointId: "glm-coding-plan", category: "not-inspected" },
+      { endpointId: "kimi-code", category: "not-inspected" },
+      { endpointId: "deepseek-api", category: "not-inspected" },
+      { endpointId: "kimi-platform", category: "not-inspected" },
+      { endpointId: "claude-api", category: "not-inspected" },
+      { endpointId: "codex-api", category: "not-inspected" },
     ],
   });
   assert.equal(Object.isFrozen(first), true);
@@ -844,7 +885,7 @@ test("preload invokes one fixed default-save channel and reconstructs fresh deep
   ipc.invokeResult = {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
     preferencePath: "PRIVATE_PREFERENCE_PATH",
     storedValue: "PRIVATE_STORED_VALUE",
   };
@@ -855,7 +896,7 @@ test("preload invokes one fixed default-save channel and reconstructs fresh deep
   assert.deepEqual(first, {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
   });
   assert.deepEqual(second, first);
   assert.notEqual(first, second);
@@ -1195,7 +1236,7 @@ test("preload exposes one frozen Project observation with an idempotent disposer
   const bridge = createWorkbenchPreloadBridge(ipc);
   const results: WorkbenchHostedProjectResult[] = [];
 
-  const dispose = bridge.observeProject((result) => results.push(result));
+  const dispose = observeDecodedProject(bridge, (result) => results.push(result));
   ipc.emit(validResult());
 
   assert.deepEqual(Object.keys(bridge).sort(), expectedWorkbenchPreloadBridgeKeys);
@@ -1205,7 +1246,9 @@ test("preload exposes one frozen Project observation with an idempotent disposer
   assert.equal(results.length, 1);
   assert.equal(Object.isFrozen(results[0]), true);
   assert.equal(
-    results[0]?.ok ? Object.isFrozen(results[0].view.commands[0]?.session) : false,
+    results[0]?.ok && "view" in results[0]
+      ? Object.isFrozen(results[0].view.commands[0]?.session)
+      : false,
     true,
   );
 
@@ -1218,11 +1261,32 @@ test("preload exposes one frozen Project observation with an idempotent disposer
   assert.equal(ipc.listeners.size, 0);
 });
 
+test("preload preserves the exact empty Project registry result", () => {
+  const ipc = new FakeProjectViewIpc();
+  const bridge = createWorkbenchPreloadBridge(ipc);
+  const results: WorkbenchHostedProjectResult[] = [];
+  const dispose = observeDecodedProject(bridge, (result) => results.push(result));
+
+  ipc.emit({ ok: true, empty: true });
+  ipc.emit({ ok: true, empty: true, extra: true });
+
+  assert.deepEqual(results[0], { ok: true, empty: true });
+  assert.equal(Object.isFrozen(results[0]), true);
+  assert.deepEqual(results[1], {
+    ok: false,
+    error: {
+      category: "project-view-unavailable",
+      message: "Live Project data is unavailable.",
+    },
+  });
+  dispose();
+});
+
 test("preload fails closed on widened outer, view, Session, or event records", () => {
   const ipc = new FakeProjectViewIpc();
   const bridge = createWorkbenchPreloadBridge(ipc);
   const results: WorkbenchHostedProjectResult[] = [];
-  const dispose = bridge.observeProject((result) => results.push(result));
+  const dispose = observeDecodedProject(bridge, (result) => results.push(result));
 
   const widenedOuter = validResult() as unknown as Record<string, unknown>;
   widenedOuter.projectDirectory = "C:\\private\\project";
@@ -1279,11 +1343,13 @@ test("preload observation preserves exact user text and rejects an extra event k
     "<script>literal</script>",
     "# Markdown stays text",
   ].join("\n");
-  const dispose = bridge.observeProject((result) => results.push(result));
+  const dispose = observeDecodedProject(bridge, (result) => results.push(result));
 
   ipc.emit(validResultWithTimeline([{ kind: "user-message", text }]));
   assert.equal(results[0]?.ok, true);
-  if (!results[0]?.ok) assert.fail("Expected the exact public user event.");
+  if (!results[0]?.ok || "empty" in results[0]) {
+    assert.fail("Expected the exact public user event.");
+  }
   const event = results[0].view.commands[0]?.session?.timeline[0];
   assert.deepEqual(event, { kind: "user-message", text });
   assert.equal(event?.kind === "user-message" ? event.text : undefined, text);
@@ -1313,6 +1379,7 @@ test("preload observation preserves exact user text and rejects an extra event k
   dispose();
   assert.deepEqual(ipc.sent, [
     WORKBENCH_OBSERVE_CHANNEL,
+    WORKBENCH_OBSERVE_CHANNEL,
     WORKBENCH_DISPOSE_CHANNEL,
   ]);
 });
@@ -1321,7 +1388,7 @@ test("preload keeps repeated sanitized failures observable through a later valid
   const ipc = new FakeProjectViewIpc();
   const bridge = createWorkbenchPreloadBridge(ipc);
   const results: WorkbenchHostedProjectResult[] = [];
-  const dispose = bridge.observeProject((result) => results.push(result));
+  const dispose = observeDecodedProject(bridge, (result) => results.push(result));
   ipc.invokeResult = { outcome: "created" };
 
   assert.deepEqual(await bridge.createProject(), { outcome: "created" });
@@ -1356,8 +1423,8 @@ test("preload replacement isolates old disposers and retains a sanitized failure
   const firstResults: WorkbenchHostedProjectResult[] = [];
   const laterResults: WorkbenchHostedProjectResult[] = [];
 
-  const firstDispose = bridge.observeProject((result) => firstResults.push(result));
-  const laterDispose = bridge.observeProject((result) => laterResults.push(result));
+  const firstDispose = observeDecodedProject(bridge, (result) => firstResults.push(result));
+  const laterDispose = observeDecodedProject(bridge, (result) => laterResults.push(result));
   firstDispose();
   ipc.emit({
     ok: true,
@@ -1380,10 +1447,11 @@ test("preload replacement isolates old disposers and retains a sanitized failure
     WORKBENCH_OBSERVE_CHANNEL,
     WORKBENCH_DISPOSE_CHANNEL,
     WORKBENCH_OBSERVE_CHANNEL,
+    WORKBENCH_OBSERVE_CHANNEL,
   ]);
   assert.equal(ipc.listeners.size, 1);
   laterDispose();
-  assert.equal(ipc.sent.length, 4);
+  assert.equal(ipc.sent.length, 5);
   assert.equal(ipc.listeners.size, 0);
 });
 
@@ -1554,6 +1622,12 @@ function profileUnavailable(): WorkbenchPublicDirectSessionProfileResult {
       statuses: [
         { endpointId: "codex-desktop", category: "not-inspected" },
         { endpointId: "claude-code-desktop", category: "not-inspected" },
+        { endpointId: "glm-coding-plan", category: "not-inspected" },
+        { endpointId: "kimi-code", category: "not-inspected" },
+        { endpointId: "deepseek-api", category: "not-inspected" },
+        { endpointId: "kimi-platform", category: "not-inspected" },
+        { endpointId: "claude-api", category: "not-inspected" },
+        { endpointId: "codex-api", category: "not-inspected" },
       ],
     },
     error: {
@@ -1574,6 +1648,12 @@ function runtimeNotLocated(): WorkbenchPublicDirectSessionProfileResult {
           endpointId: "claude-code-desktop",
           category: "runtime-not-located",
         },
+        { endpointId: "glm-coding-plan", category: "runtime-not-located" },
+        { endpointId: "kimi-code", category: "runtime-not-located" },
+        { endpointId: "deepseek-api", category: "runtime-not-located" },
+        { endpointId: "kimi-platform", category: "runtime-not-located" },
+        { endpointId: "claude-api", category: "runtime-not-located" },
+        { endpointId: "codex-api", category: "runtime-not-located" },
       ],
     },
     error: {
@@ -1594,6 +1674,12 @@ function profileLoadResult(): WorkbenchCatalogDefaultPublicProfileResult {
           endpointId: "claude-code-desktop",
           category: "inspection-failed",
         },
+        { endpointId: "glm-coding-plan", category: "not-inspected" },
+        { endpointId: "kimi-code", category: "not-inspected" },
+        { endpointId: "deepseek-api", category: "not-inspected" },
+        { endpointId: "kimi-platform", category: "not-inspected" },
+        { endpointId: "claude-api", category: "not-inspected" },
+        { endpointId: "codex-api", category: "not-inspected" },
       ],
     },
     profile: {
@@ -1647,3 +1733,105 @@ function profileLoadResult(): WorkbenchCatalogDefaultPublicProfileResult {
     },
   };
 }
+
+function resultWithTurns() {
+  const result = validResult();
+  assert.ok(result.ok && "view" in result);
+  return { ok: true as const, view: { ...result.view, commands: result.view.commands.map(command => {
+    const session = command.session!;
+    return { ...command, session: { ...session, turns: [{ profile: session.profile, timeline: session.timeline }] } };
+  }) } };
+}
+
+test("preload carries the validated compact Project transfer to the renderer boundary", () => {
+  const ipc = new FakeProjectViewIpc();
+  const bridge = createWorkbenchPreloadBridge(ipc);
+  const received: unknown[] = [];
+  const dispose = bridge.observeProject(value => received.push(value));
+  const result = sanitizeWorkbenchHostedProjectResult(resultWithTurns());
+  const encode = createWorkbenchProjectTransferEncoder();
+
+  for (const listener of ipc.listeners) {
+    listener({}, structuredClone(encode(result)));
+    listener({}, structuredClone(encode(result)));
+  }
+
+  assert.equal((received[0] as { kind?: unknown }).kind, "snapshot");
+  assert.equal((received[1] as { kind?: unknown }).kind, "delta");
+  assert.equal(
+    (
+      received[1] as {
+        view?: { commands?: Array<{ session?: { turns?: unknown[] } }> };
+      }
+    ).view?.commands?.[0]?.session?.turns?.some(
+      turn =>
+        typeof turn === "object" &&
+        turn !== null &&
+        "reuse" in turn,
+    ),
+    true,
+  );
+  assert.equal(JSON.stringify(received[1]).includes("session-started"), false);
+
+  dispose();
+});
+
+test("preload really reobserves after a delta base mismatch and resumes only from a new full snapshot", t => {
+  const warnings: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => warnings.push(args));
+  const ipc = new FakeProjectViewIpc();
+  const bridge = createWorkbenchPreloadBridge(ipc);
+  const received: WorkbenchHostedProjectResult[] = [];
+  const dispose = observeDecodedProject(bridge, value => received.push(value));
+  t.after(dispose);
+  const emit = (packet: unknown) => { for (const listener of ipc.listeners) listener({}, structuredClone(packet)); };
+  const result = sanitizeWorkbenchHostedProjectResult(resultWithTurns());
+  const encode = createWorkbenchProjectTransferEncoder();
+  emit(encode(result));
+  const delta = encode(result);
+  assert.equal(delta.kind, "delta");
+  emit({ ...delta, baseRevision: -1 });
+  assert.equal(received.at(-1)?.ok, false, "bad delta never remains a valid view");
+  assert.equal(ipc.sent.filter(channel => channel === WORKBENCH_OBSERVE_CHANNEL).length, 2);
+  emit(delta);
+  assert.equal(ipc.sent.filter(channel => channel === WORKBENCH_OBSERVE_CHANNEL).length, 2, "one recovery request while waiting");
+  const recovered = createWorkbenchProjectTransferEncoder();
+  emit(recovered(result));
+  emit(recovered(result));
+  assert.deepEqual(received.at(-1), result);
+  assert.match(String(warnings[0]), /mismatch; requesting a full snapshot/);
+});
+
+test("delta references keep exact-member guards and reject missing, widened and out-of-range history", t => {
+  t.mock.method(console, "warn", () => undefined);
+  const result = sanitizeWorkbenchHostedProjectResult(resultWithTurns());
+  for (const corrupt of [
+    (packet: any) => { packet.extra = true; },
+    (packet: any) => { packet.view.commands[0].session.timeline = []; },
+    (packet: any) => { packet.view.commands[0].session.turns[0].extra = true; },
+    (packet: any) => { packet.view.commands[0].session.turns[0].reuse = 999; },
+    (packet: any) => { delete packet.view.commands[0].session.profile; },
+  ]) {
+    const ipc = new FakeProjectViewIpc();
+    const bridge = createWorkbenchPreloadBridge(ipc);
+    const received: WorkbenchHostedProjectResult[] = [];
+    const dispose = observeDecodedProject(bridge, value => received.push(value));
+    const encode = createWorkbenchProjectTransferEncoder();
+    for (const listener of ipc.listeners) listener({}, structuredClone(encode(result)));
+    const delta = structuredClone(encode(result));
+    corrupt(delta);
+    for (const listener of ipc.listeners) listener({}, delta);
+    assert.equal(received.at(-1)?.ok, false);
+    assert.equal(ipc.sent.filter(channel => channel === WORKBENCH_OBSERVE_CHANNEL).length, 2);
+    dispose();
+  }
+});
+
+test("a frozen turn with mutable children cannot poison the sanitizer reuse cache", () => {
+  const result = resultWithTurns();
+  const session = result.view.commands[0]!.session;
+  Object.freeze(session.turns[0]);
+  assert.equal(sanitizeWorkbenchHostedProjectResult(result).ok, true);
+  Object.assign(session.turns[0]!.profile.requested, { privateExtra: "MUST_BE_REJECTED" });
+  assert.equal(sanitizeWorkbenchHostedProjectResult(result).ok, false);
+});

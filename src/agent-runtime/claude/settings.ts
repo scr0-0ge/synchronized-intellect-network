@@ -1,14 +1,8 @@
 import { types as nodeUtilTypes } from "node:util";
 
 import { RuntimeAdapterError } from "../index.ts";
+import { isVendorRecord, hasUnpairedSurrogate } from "../vendor-wire.ts";
 
-const appliedEffortLevels = new Set([
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
 const settingSources = new Set([
   "userSettings",
   "projectSettings",
@@ -19,7 +13,7 @@ const settingSources = new Set([
 
 export interface ClaudeAppliedSettings {
   readonly model: string;
-  readonly effort: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  readonly effort: string | null;
   readonly advisor?: string | null;
   readonly ultracode?: boolean;
 }
@@ -31,8 +25,8 @@ export interface ClaudeSettingsObservationCollector {
 
 /**
  * Validate the documented `get_settings` response without forwarding any raw
- * setting, source, or error record. Unknown top-level/applied keys and malformed
- * source/error rows fail closed. Safe new source names and validated error rows
+ * setting, source, or error record. Additional vendor fields are dropped; missing
+ * or malformed required fields remain fatal. Safe new source names and validated error rows
  * are counted on the private observation collector, then dropped. The two
  * record-valued setting fields remain opaque because the CLI explicitly
  * defines their contents as open setting maps.
@@ -42,16 +36,12 @@ export function readClaudeAppliedSettings(
   observation?: ClaudeSettingsObservationCollector,
 ): ClaudeAppliedSettings | undefined {
   if (
-    !isRecordWithKnownKeys(
-      value,
-      ["effective", "sources"],
-      ["applied", "errors"],
-    ) ||
+    !isVendorRecord(value, ["effective", "sources"]) ||
     !isPlainDataRecord(value.effective) ||
     !isDenseArray(value.sources) ||
     value.sources.some(
       (source) =>
-        !isExactDataRecord(source, ["settings", "source"]) ||
+        !isVendorRecord(source, ["settings", "source"]) ||
         !isSafeSettingSourceName(source.source) ||
         !isPlainDataRecord(source.settings),
     ) ||
@@ -59,7 +49,7 @@ export function readClaudeAppliedSettings(
       (!isDenseArray(value.errors) ||
         value.errors.some(
           (error) =>
-            !isExactDataRecord(error, ["file", "message", "path"]) ||
+            !isVendorRecord(error, ["file", "message", "path"]) ||
             !isSafeText(error.file, 32_768) ||
             !isSafeText(error.path, 32_768) ||
             !isSafeText(error.message, 8_192),
@@ -69,7 +59,7 @@ export function readClaudeAppliedSettings(
   }
   if (observation !== undefined) {
     // Source identifiers are vendor-owned namespace values. Safe unfamiliar
-    // names are diagnostic drift, while each source record stays exact and
+    // names are diagnostic drift, while each source record is projected and
     // its opaque settings map is never forwarded.
     for (const sourceValue of value.sources) {
       const source = sourceValue as Record<string, unknown>;
@@ -85,14 +75,10 @@ export function readClaudeAppliedSettings(
   }
   if (value.applied === undefined) return undefined;
   if (
-    !isRecordWithKnownKeys(
-      value.applied,
-      ["effort", "model"],
-      ["advisor", "ultracode"],
-    ) ||
+    !isVendorRecord(value.applied, ["effort", "model"]) ||
     !isSafeText(value.applied.model, 240) ||
     (value.applied.effort !== null &&
-      !appliedEffortLevels.has(value.applied.effort as string)) ||
+      !isSafeText(value.applied.effort, 120)) ||
     (value.applied.advisor !== undefined &&
       value.applied.advisor !== null &&
       !isSafeText(value.applied.advisor, 240)) ||
@@ -111,36 +97,6 @@ export function readClaudeAppliedSettings(
       ? {}
       : { ultracode: value.applied.ultracode }),
   });
-}
-
-function isRecordWithKnownKeys(
-  value: unknown,
-  required: readonly string[],
-  optional: readonly string[],
-): value is Record<string, unknown> {
-  if (!isPlainDataRecord(value)) return false;
-  const keys = Reflect.ownKeys(value);
-  return (
-    keys.every(
-      (key) =>
-        typeof key === "string" &&
-        (required.includes(key) || optional.includes(key)),
-    ) && required.every((key) => keys.includes(key))
-  );
-}
-
-function isExactDataRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-): value is Record<string, unknown> {
-  if (!isPlainDataRecord(value)) return false;
-  const keys = Reflect.ownKeys(value);
-  return (
-    keys.length === expectedKeys.length &&
-    keys.every(
-      (key) => typeof key === "string" && expectedKeys.includes(key),
-    )
-  );
 }
 
 function isPlainDataRecord(value: unknown): value is Record<string, unknown> {
@@ -218,18 +174,4 @@ function isSafeSettingSourceName(value: unknown): value is string {
     !hasUnpairedSurrogate(value) &&
     !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
   );
-}
-
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return true;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return true;
-    }
-  }
-  return false;
 }

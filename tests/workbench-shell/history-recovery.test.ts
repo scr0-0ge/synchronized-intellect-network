@@ -28,6 +28,11 @@ import {
   type HistoryRecoverySourceCandidate,
 } from "../../src/workbench-shell/history-recovery.ts";
 import {
+  sanitizeHistoryRecoveryActionResult,
+  sanitizeHistoryRecoveryBrowseResult,
+  sanitizeHistoryRecoverySnapshotResult,
+} from "../../src/workbench-shell/history-recovery-sanitizer.ts";
+import {
   createTestDirectory,
   registerTestClosable,
 } from "../helpers/test-lifecycle.ts";
@@ -38,6 +43,50 @@ import {
 } from "./fixtures/synthetic-history-recovery-fixtures.ts";
 
 const fixedSecret = Buffer.alloc(32, 0x5a);
+
+for (const inventory of ["readable", "unsupported-artifact"] as const) {
+  test(`real ${inventory} recovery results survive the preload sanitizer after IPC cloning`, async (t) => {
+    const parent = await temporaryDirectory(t);
+    const sources = await Promise.all(["one", "two"].map(async (name) => {
+      const source = await createSyntheticStore(join(parent, name), 2);
+      if (inventory === "unsupported-artifact") {
+        await writeFile(join(source.root, "unknown-artifact.bin"), "synthetic");
+      }
+      return source;
+    }));
+    const before = await Promise.all(sources.map((source) => directoryManifest(source.root)));
+    const library = recoveryLibrary(t, {
+      dataDirectory: join(parent, "recovery"),
+      candidates: sources.map((source) => candidate("historical", source.root, "synthetic-history")),
+    });
+    const owner = {};
+    const initial = await snapshot(library, owner, "snapshot-ipc");
+    // Electron IPC preserves shared references. JSON round-tripping here would
+    // hide the real producer/preload mismatch that rejected committed copies.
+    assert.deepEqual(sanitizeHistoryRecoverySnapshotResult(structuredClone(initial), initial.requestKey), initial);
+    let current = initial.snapshot;
+    for (const ordinal of [1, 2]) {
+      const request = preserveRequest(current, `preserve-ipc-${ordinal}`);
+      const result = await library.execute(owner, request) as HistoryRecoveryActionResult;
+      assertPreserveSuccess(result);
+      assert.equal(result.status, "preserved");
+      assert.deepEqual(sanitizeHistoryRecoveryActionResult(structuredClone(result), request), result);
+      const replay = await library.execute(owner, request) as HistoryRecoveryActionResult;
+      assert.equal(replay.status, "already-preserved");
+      assert.deepEqual(sanitizeHistoryRecoveryActionResult(structuredClone(replay), request), replay);
+      current = result.snapshot;
+    }
+    const request = {
+      version: 1, kind: "generations", requestKey: "generations-ipc",
+      snapshotKey: current.snapshotKey, libraryKey: current.library.libraryKey,
+      page: { after: null, size: 10 },
+    } as const;
+    const generations = await browse(library, owner, request);
+    assert.equal(generations.status, "ready");
+    assert.deepEqual(sanitizeHistoryRecoveryBrowseResult(structuredClone(generations), request), generations);
+    assert.deepEqual(await Promise.all(sources.map((source) => directoryManifest(source.root))), before);
+  });
+}
 
 test("capture, preserve, browse, and two deliberate exports remain branch-preserving and source-read-only", async (t) => {
   const parent = await temporaryDirectory(t);

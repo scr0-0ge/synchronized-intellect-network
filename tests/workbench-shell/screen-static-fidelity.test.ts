@@ -218,6 +218,114 @@ test("screens 01-03, 05 and 06 retain the remaining exact static fidelity contra
       assert.match(disabled, /title="This Runtime does not support interruption\."/u);
     });
 
+    await t.test(
+      "screen 02 offers Guide only once an attached Runtime binding reports same-turn steering",
+      () => {
+        // Issue #6 case 6. Between accepting a prompt and attaching the
+        // Runtime binding the Coordinator cannot know whether this Runtime
+        // steers, so it reports idle (projected `unavailable`) and then
+        // `pending`. Mounting Guide on "not yet unsupported" put the button on
+        // screen for that whole latency and withdrew it when a Runtime with no
+        // steering contract finally said so -- the vanishing Guide button on
+        // GLM and deepseek.
+        const running = interruptVisualFixture.commands[1];
+        assert.ok(running?.session);
+        const composerHtml = (command: WorkbenchCommandView): string =>
+          clean(renderToString(() =>
+            module.DirectInputComposer({
+              ...directComposerProps(viewWith(command), command),
+              composer: Object.freeze({
+                ...initialRendererState.composer,
+                draft: "Guide this exact running turn.",
+              }),
+              interruptPending: false,
+              interruptFeedback: null,
+              onInterrupt: noOp,
+              steerPending: false,
+              steerFeedback: null,
+              onSteer: noOp,
+            }),
+          ));
+        const withSteer = (
+          steer: WorkbenchCommandView["steer"],
+          status: WorkbenchCommandView["status"] = "in-flight",
+        ): WorkbenchCommandView =>
+          Object.freeze({ ...running!, status, ...(steer === undefined ? {} : { steer }) });
+
+        for (const [name, command] of [
+          [
+            "accepted, before the command reaches the Runtime at all",
+            withSteer(
+              Object.freeze({
+                status: "unavailable" as const,
+                reason:
+                  "Same-turn guidance is unavailable. Your draft stays local." as const,
+              }),
+              "accepted",
+            ),
+          ],
+          [
+            "in flight, binding not yet attached",
+            withSteer(
+              Object.freeze({
+                status: "pending" as const,
+                reason:
+                  "Same-turn guidance becomes available when the Runtime turn starts." as const,
+              }),
+            ),
+          ],
+          [
+            "attached to a Runtime with no steering contract",
+            withSteer(
+              Object.freeze({
+                status: "unsupported" as const,
+                reason:
+                  "This Runtime does not support same-turn guidance. Your draft stays local." as const,
+              }),
+            ),
+          ],
+        ] as const) {
+          const html = composerHtml(command);
+          assert.doesNotMatch(html, /guide-button/u, name);
+          assert.match(html, /class="send stop-button"/u, name);
+        }
+
+        // ...and once a Runtime has proved the contract for this running turn
+        // the control stays mounted, including while guidance is momentarily
+        // unavailable, so it never disappears mid-turn.
+        for (const [name, steer] of [
+          [
+            "available",
+            Object.freeze({
+              status: "available" as const,
+              steerKey: "turn-steer:00000000-0000-4000-8000-000000000092",
+            }),
+          ],
+          [
+            "submitting",
+            Object.freeze({
+              status: "submitting" as const,
+              reason: "Sending guidance to this running turn." as const,
+            }),
+          ],
+          [
+            "unavailable on a Runtime that steers",
+            Object.freeze({
+              status: "unavailable" as const,
+              reason:
+                "Same-turn guidance is unavailable. Your draft stays local." as const,
+            }),
+          ],
+        ] as const) {
+          assert.match(
+            composerHtml(withSteer(steer)),
+            /<button[^>]*class="send guide-button"/u,
+            name,
+          );
+        }
+      },
+    );
+
     await t.test("screen 03 distinguishes fixed failure from recovery in composer, Inspector and statusbar", () => {
       const failed = commandWithStatus("failed", false);
       const recovery = commandWithStatus("recovery-required", false);
@@ -350,10 +458,16 @@ test("screens 01-03, 05 and 06 retain the remaining exact static fidelity contra
         phase: "unavailable" as const,
         result: Object.freeze({
           ok: false as const,
-          endpointDiscovery: publicRuntimeEndpointDiscovery(
-            "authentication-required",
-            "inspection-failed",
-          ),
+          endpointDiscovery: publicRuntimeEndpointDiscovery([
+            {
+              endpointId: "codex-desktop",
+              category: "authentication-required",
+            },
+            {
+              endpointId: "claude-code-desktop",
+              category: "inspection-failed",
+            },
+          ]),
           error: Object.freeze({
             category: "profile-unavailable" as const,
             message: "Catalogs unavailable.",

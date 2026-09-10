@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { WorkbenchUserInputBridge, WorkbenchUserInputReadRequest, WorkbenchUserInputResponse, WorkbenchUserInputResult, WorkbenchUserInputResponseResult } from "./contract.ts";
 import {
   lstat,
   mkdir,
@@ -18,6 +19,7 @@ import {
   type WorkbenchBackend,
 } from "./backend.ts";
 import {
+  publicEmptyProjectRegistry,
   publicInvalidProjectSelection,
   publicInterruptUnavailable,
   publicSteerUnavailable,
@@ -89,6 +91,7 @@ const registryFileName = "project-registry-v1.json";
 const registryReplacementName = "project-registry-v1.replacement";
 const registryBackupName = "project-registry-v1.backup";
 const ledgerDirectoryName = "project-ledgers";
+const projectAvailabilityProbeTimeoutMilliseconds = 5_000;
 const recordKeyPattern =
   /^project-record-v1-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const ledgerSlotPattern =
@@ -152,7 +155,7 @@ export type WorkbenchProjectRegistryAtomicReplace = (
   destinationPath: string,
 ) => Promise<void>;
 
-export interface WorkbenchProjectHost {
+export interface WorkbenchProjectHost extends WorkbenchUserInputBridge {
   observeProject(listener: WorkbenchHostedProjectListener): () => void;
   readTurnActivity(): ProjectTurnActivity;
   removeSession(
@@ -224,14 +227,20 @@ export async function createWorkbenchProjectHost(options: {
   readonly preferencePath?: string;
   readonly backendFactory?: WorkbenchProjectBackendFactory;
   readonly availabilityProbe?: WorkbenchProjectAvailabilityProbe;
+  /** May shorten the production deadline for a deterministic test, never extend it. */
+  readonly availabilityProbeTimeoutMilliseconds?: number;
   readonly atomicReplace?: WorkbenchProjectRegistryAtomicReplace;
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
 }): Promise<WorkbenchProjectHost> {
   const dataDirectory = canonicalDirectory(options.dataDirectory);
   const paths = registryPaths(dataDirectory);
   const backendFactory = options.backendFactory ?? defaultBackendFactory;
-  const availabilityProbe =
-    options.availabilityProbe ?? defaultAvailabilityProbe;
+  const availabilityProbe = boundedProjectAvailabilityProbe(
+    options.availabilityProbe ?? defaultAvailabilityProbe,
+    resolveAvailabilityProbeTimeoutMilliseconds(
+      options.availabilityProbeTimeoutMilliseconds,
+    ),
+  );
   const atomicReplace = options.atomicReplace ?? rename;
   const preferencePath =
     options.preferencePath ??
@@ -465,6 +474,12 @@ function createHostController(options: {
   // discovery names nothing and therefore authorises nothing.
   const historyRecords = new Map<string, PrivateHistoryTarget>();
   const listeners = new Set<WorkbenchHostedProjectListener>();
+  const userInputListeners = new Set<() => void>();
+  const publishUserInput = () => {
+    for (const listener of userInputListeners) {
+      try { listener(); } catch { userInputListeners.delete(listener); }
+    }
+  };
   const actionPromises = new Set<Promise<unknown>>();
   let switchPromise: Promise<unknown> | undefined;
   let projectionTail: Promise<void> = Promise.resolve();
@@ -494,6 +509,23 @@ function createHostController(options: {
     if (closed) return;
     lastResult = deepFreeze(result);
     for (const listener of [...listeners]) emit(listener, lastResult);
+  };
+
+  const publishEmptyRegistry = (
+    observedGeneration: number,
+    firstProjection?: FirstProjectionCompletion,
+  ): void => {
+    const successful =
+      !closed &&
+      observedGeneration === generation &&
+      registry?.records.length === 0;
+    if (successful) {
+      selectionRecords.clear();
+      publish(publicEmptyProjectRegistry());
+    }
+    if (firstProjection?.generation === observedGeneration) {
+      firstProjection.complete(successful);
+    }
   };
 
   const projectResult = (
@@ -546,7 +578,12 @@ function createHostController(options: {
     const listener: WorkbenchProjectListener = (result) =>
       projectResult(result, observedGeneration, firstProjection);
     try {
-      opened.disposeObservation = opened.backend.observeProject(listener);
+      const disposeProject = opened.backend.observeProject(listener);
+      const disposeUserInput = opened.backend.observeUserInput?.(() => {
+        if (!closed && active === opened) publishUserInput();
+      });
+      opened.disposeObservation = () => { disposeProject(); disposeUserInput?.(); };
+      publishUserInput();
     } catch {
       projectResult(
         publicProjectFailure(),
@@ -561,22 +598,26 @@ function createHostController(options: {
   } else if (active !== undefined) {
     attachObservation(active);
   } else if (registry !== undefined) {
-    const selected = selectedRecord(registry);
-    if (selected !== undefined) {
-      projectResult(
-        {
-          ok: true,
-          view: {
-            project: { label: deriveProjectLabel(selected.canonicalDirectory) },
-            observation: { cursor: 0, live: true },
-            commands: [],
-            initialSelectionKey: null,
-          },
-        },
-        generation,
-      );
+    if (registry.records.length === 0) {
+      publishEmptyRegistry(generation);
     } else {
-      projectResult(publicProjectFailure(), generation);
+      const selected = selectedRecord(registry);
+      if (selected === undefined) {
+        projectResult(publicProjectFailure(), generation);
+      } else {
+        projectResult(
+          {
+            ok: true,
+            view: {
+              project: { label: deriveProjectLabel(selected.canonicalDirectory) },
+              observation: { cursor: 0, live: true },
+              commands: [],
+              initialSelectionKey: null,
+            },
+          },
+          generation,
+        );
+      }
     }
   } else {
     projectResult(publicProjectFailure(), generation);
@@ -585,6 +626,7 @@ function createHostController(options: {
   const closeActiveProject = async (): Promise<boolean> => {
     const closing = active;
     active = undefined;
+    publishUserInput();
     if (closing === undefined) return true;
     try {
       closing.disposeObservation();
@@ -904,7 +946,7 @@ function createHostController(options: {
   };
 
   const republishCurrentProject = (): void => {
-    if (lastResult?.ok !== true) {
+    if (lastResult?.ok !== true || !("view" in lastResult)) {
       projectResult(publicProjectFailure(), generation);
       return;
     }
@@ -1158,22 +1200,30 @@ function createHostController(options: {
         if (removingActive) {
           const successor = selectedRecord(nextRegistry);
           if (successor === undefined) {
-            projectResult(
-              publicProjectFailure(),
-              removalGeneration,
-              removalProjection,
-            );
+            if (nextRegistry.records.length === 0) {
+              publishEmptyRegistry(removalGeneration, removalProjection);
+            } else {
+              projectResult(
+                publicProjectFailure(),
+                removalGeneration,
+                removalProjection,
+              );
+            }
           } else {
             await reopenPriorProject(successor, removalProjection);
           }
         } else {
           const current = active;
           if (current === undefined) {
-            projectResult(
-              publicProjectFailure(),
-              removalGeneration,
-              removalProjection,
-            );
+            if (nextRegistry.records.length === 0) {
+              publishEmptyRegistry(removalGeneration, removalProjection);
+            } else {
+              projectResult(
+                publicProjectFailure(),
+                removalGeneration,
+                removalProjection,
+              );
+            }
           } else {
             try {
               current.disposeObservation();
@@ -1456,6 +1506,21 @@ function createHostController(options: {
         publicInterruptUnavailable(),
       );
     },
+    observeUserInput(listener: () => void): () => void {
+      userInputListeners.add(listener);
+      return () => { userInputListeners.delete(listener); };
+    },
+    async readUserInput(request: WorkbenchUserInputReadRequest): Promise<WorkbenchUserInputResult> {
+      if (closed || switching || teardownBlocked || !active?.backend.readUserInput) return { ok: false };
+      const selected = active;
+      const result = await selected.backend.readUserInput!(request);
+      return active === selected && !closed && !switching ? result : { ok: false };
+    },
+    async respondToUserInput(request: WorkbenchUserInputResponse): Promise<WorkbenchUserInputResponseResult> {
+      if (closed || switching || teardownBlocked || !active?.backend.respondToUserInput) return { status: "unavailable" };
+      // Do not hold Project switching/close behind a Runtime waiting for user input.
+      return active.backend.respondToUserInput(request);
+    },
     steerActiveTurn(
       request: WorkbenchSteerRequest,
     ): Promise<WorkbenchSteerResult> {
@@ -1479,6 +1544,8 @@ function createHostController(options: {
       selectionRecords.clear();
       historyRecords.clear();
       listeners.clear();
+      publishUserInput();
+      userInputListeners.clear();
       closePromise ??= (async () => {
         switching = true;
         await projectionTail;
@@ -2042,6 +2109,46 @@ async function probeProjectAvailability(
   } catch {
     return "unreadable";
   }
+}
+
+function boundedProjectAvailabilityProbe(
+  probe: WorkbenchProjectAvailabilityProbe,
+  timeoutMilliseconds: number,
+): WorkbenchProjectAvailabilityProbe {
+  return async (canonical) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<WorkbenchProjectAvailability>((resolvePromise) => {
+      timer = setTimeout(
+        resolvePromise,
+        timeoutMilliseconds,
+        "unreadable" satisfies WorkbenchProjectAvailability,
+      );
+    });
+    try {
+      return await Promise.race([
+        Promise.resolve().then(() => probe(canonical)),
+        deadline,
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+}
+
+function resolveAvailabilityProbeTimeoutMilliseconds(
+  requested: number | undefined,
+): number {
+  const timeout = requested ?? projectAvailabilityProbeTimeoutMilliseconds;
+  if (
+    !Number.isFinite(timeout) ||
+    timeout <= 0 ||
+    timeout > projectAvailabilityProbeTimeoutMilliseconds
+  ) {
+    throw new TypeError(
+      `Project availability timeout must be greater than zero and at most ${projectAvailabilityProbeTimeoutMilliseconds} milliseconds.`,
+    );
+  }
+  return timeout;
 }
 
 async function defaultAvailabilityProbe(

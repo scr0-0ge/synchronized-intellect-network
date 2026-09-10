@@ -13,7 +13,7 @@ export const CLAUDE_DIAGNOSTIC_DETAIL_MAXIMUM_BYTES = 65_536;
 
 const productionDiagnosticFilePath = join(
   tmpdir(),
-  `unified-agent-workbench-claude-diagnostics-${process.pid}.jsonl`,
+  `synchronized-intellect-network-claude-diagnostics-${process.pid}.jsonl`,
 );
 
 interface ClaudeDiagnosticBase {
@@ -23,6 +23,16 @@ interface ClaudeDiagnosticBase {
 }
 
 export type ClaudeRuntimeDiagnostic =
+  | (ClaudeDiagnosticBase & {
+      readonly kind: "optional-data-unavailable";
+      readonly gate: "context-usage" | "interrupt-and-steer" | "catalog-settings" | "notification" | "control-response";
+      readonly row: null;
+    })
+  | (ClaudeDiagnosticBase & {
+      readonly kind: "correlation-rejected";
+      readonly gate: "session-frame";
+      readonly row: number;
+    })
   | (ClaudeDiagnosticBase & {
       readonly kind: "authentication-status";
       readonly state: SubscriptionAuthenticationState;
@@ -82,7 +92,11 @@ export function formatClaudeDiagnosticSummary(
     `kind=${diagnostic.kind}`,
     `category=${diagnostic.category}`,
   ];
-  if (diagnostic.kind === "authentication-status") {
+  if (diagnostic.kind === "optional-data-unavailable") {
+    parts.push(`gate=${diagnostic.gate}`);
+  } else if (diagnostic.kind === "correlation-rejected") {
+    parts.push(`gate=${diagnostic.gate}`, `row=${diagnostic.row}`);
+  } else if (diagnostic.kind === "authentication-status") {
     parts.push(`state=${diagnostic.state}`);
   } else if (diagnostic.kind === "child-stderr") {
     parts.push(`capturedBytes=${diagnostic.capturedBytes}`);

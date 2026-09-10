@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import type { Interface as ReadLineInterface } from "node:readline";
 
 import { RuntimeAdapterError } from "../index.ts";
+import type { SessionProfile } from "../index.ts";
 import { configuredRuntimeExecutable } from "../configured-executable.ts";
 import { CLAUDE_RUNTIME_LOOKUP_SURFACE } from "../runtime-lookup-surface.ts";
 import {
@@ -19,9 +20,20 @@ import {
 } from "../windows-executable-admission.ts";
 import type { ProviderRequestBudget } from "../provider-request-budget.ts";
 import {
-  classifyClaudeSubscriptionAuthentication,
   readOfficialClaudeAuthenticationStatus,
 } from "./authentication-status.ts";
+import {
+  classifyClaudeAuthenticationForMode,
+  type ClaudeApiKeyStaticHealthyAuthMethod,
+  type ClaudeEndpointAuthenticationMode,
+} from "./endpoint-authentication.ts";
+import {
+  CLAUDE_DEPLOYMENT_SELECTOR_KEYS,
+  ClaudeEndpointEnvironmentError,
+  createClaudeOAuthEnvironment,
+  createEndpointProcessEnvironment,
+  type ClaudeEndpointEnvironmentSource,
+} from "./endpoint-env-factory.ts";
 import {
   CLAUDE_DIAGNOSTIC_DETAIL_MAXIMUM_BYTES,
   ClaudeDiagnosticError,
@@ -33,27 +45,24 @@ import type {
   ClaudeSessionTransportRequest,
 } from "./transport.ts";
 
+// The environment key lists and OAuth cleansing moved to the per-endpoint
+// environment factory; they are re-exported here so existing importers keep
+// their single source of truth.
+export {
+  CLAUDE_CREDENTIAL_ENVIRONMENT_KEYS,
+  CLAUDE_PROFILE_OVERRIDE_ENVIRONMENT_KEYS,
+  CLAUDE_DEPLOYMENT_SELECTOR_KEYS,
+  createClaudeOAuthEnvironment,
+} from "./endpoint-env-factory.ts";
+
 const maximumPathLookupBytes = 16_384;
 const maximumPathCandidates = 16;
+// main-resync: main defined the three env-key lists inline here; the lane had
+// already moved them, byte-identical, into endpoint-env-factory.ts and
+// re-exports them above. The factory stays the single source of truth so only
+// main's managed-version scan bounds are kept from this hunk.
 const maximumManagedVersionEntries = 256;
 const managedVersionPattern = /^(\d{1,9})\.(\d{1,9})\.(\d{1,9})$/u;
-export const CLAUDE_CREDENTIAL_ENVIRONMENT_KEYS = Object.freeze([
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BEARER_TOKEN",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-] as const);
-export const CLAUDE_PROFILE_OVERRIDE_ENVIRONMENT_KEYS = Object.freeze([
-  "CLAUDECODE",
-  "ANTHROPIC_MODEL",
-  "CLAUDE_CODE_EFFORT_LEVEL",
-  "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT",
-] as const);
-export const CLAUDE_DEPLOYMENT_SELECTOR_KEYS = Object.freeze([
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CODE_USE_FOUNDRY",
-] as const);
 
 export type ClaudeDeploymentMode =
   | "subscription"
@@ -122,25 +131,44 @@ export interface ClaudeCatalogProcessDependencies {
   readonly environment?: NodeJS.ProcessEnv;
   readonly deploymentMode?: ClaudeDeploymentMode | "auto";
   readonly recordDiagnostic?: ClaudeDiagnosticObserver;
+  /**
+   * Per-endpoint spawn environment (spec section A). When set, every spawn
+   * (and the auth-status preflight) is env-built through the generic
+   * endpoint factory instead of the historical subscription/selector logic;
+   * the historical path stays byte-identical when this is undefined.
+   */
+  readonly endpointEnvironment?: ClaudeEndpointEnvironmentSource;
+  /** Per-endpoint authentication semantics for the auth-status gate. */
+  readonly authenticationMode?: ClaudeEndpointAuthenticationMode;
+  /**
+   * api-key-static endpoints: which `authMethod` the healthy auth-status
+   * shape carries (GLM/Kimi/DeepSeek: `oauth_token`; claude-api: `api_key`).
+   */
+  readonly apiKeyStaticHealthyAuthMethod?: ClaudeApiKeyStaticHealthyAuthMethod;
 }
 
-const productionDependencies: ClaudeCatalogProcessDependencies = Object.freeze({
-  discoverExecutable: discoverClaudeLaunch,
-  readAuthenticationStatus: readOfficialClaudeAuthenticationStatus,
-  spawnProcess: (
-    executable: string,
-    arguments_: readonly string[],
-    options: Parameters<ClaudeCatalogProcessDependencies["spawnProcess"]>[2],
-  ) =>
-    spawn(executable, [...arguments_], options),
-  environment: process.env,
-  deploymentMode: "auto",
-  recordDiagnostic: productionClaudeDiagnosticObserver,
-});
+// main-resync: the lane exports this bundle (tests reference it by name);
+// main's identical-but-unexported `productionDependencies` was the same bundle
+// wired to the launch-based discovery the merged interface now requires, so
+// the exported name is kept and pointed at `discoverClaudeLaunch`.
+export const productionClaudeCatalogProcessDependencies: ClaudeCatalogProcessDependencies =
+  Object.freeze({
+    discoverExecutable: discoverClaudeLaunch,
+    readAuthenticationStatus: readOfficialClaudeAuthenticationStatus,
+    spawnProcess: (
+      executable: string,
+      arguments_: readonly string[],
+      options: Parameters<ClaudeCatalogProcessDependencies["spawnProcess"]>[2],
+    ) =>
+      spawn(executable, [...arguments_], options),
+    environment: process.env,
+    deploymentMode: "auto",
+    recordDiagnostic: productionClaudeDiagnosticObserver,
+  });
 
 export async function createOfficialClaudeCatalogTransport(
   projectDirectory: string,
-  dependencies: ClaudeCatalogProcessDependencies = productionDependencies,
+  dependencies: ClaudeCatalogProcessDependencies = productionClaudeCatalogProcessDependencies,
   providerRequestBudget?: ProviderRequestBudget,
 ): Promise<ClaudeCatalogTransport> {
   if (!isSafeProcessArgument(projectDirectory)) {
@@ -153,7 +181,7 @@ export async function createOfficialClaudeCatalogTransport(
     if (error instanceof RuntimeAdapterError) throw error;
     throw new RuntimeAdapterError("runtime-not-located");
   }
-  const environment = environmentForClaudeProcess(dependencies);
+  const environment = resolveClaudeProcessEnvironment(dependencies);
   await requireClaudeSubscriptionAuthentication(
     launch,
     dependencies,
@@ -177,7 +205,7 @@ export async function createOfficialClaudeCatalogTransport(
 
 export async function createOfficialClaudeSessionTransport(
   request: ClaudeSessionTransportRequest,
-  dependencies: ClaudeCatalogProcessDependencies = productionDependencies,
+  dependencies: ClaudeCatalogProcessDependencies = productionClaudeCatalogProcessDependencies,
   providerRequestBudget?: ProviderRequestBudget,
 ): Promise<ClaudeCatalogTransport> {
   const ultracode = request.profile.executionMode === "ultracode";
@@ -203,7 +231,10 @@ export async function createOfficialClaudeSessionTransport(
     if (error instanceof RuntimeAdapterError) throw error;
     throw new RuntimeAdapterError("runtime-not-located");
   }
-  const environment = environmentForClaudeProcess(dependencies);
+  const environment = resolveClaudeProcessEnvironment(
+    dependencies,
+    request.profile,
+  );
   await requireClaudeSubscriptionAuthentication(
     launch,
     dependencies,
@@ -235,6 +266,7 @@ export function createClaudeSessionArguments(
     "--output-format",
     "stream-json",
     "--verbose",
+    "--include-partial-messages",
     "--input-format",
     "stream-json",
     "--model",
@@ -605,7 +637,11 @@ async function requireClaudeSubscriptionAuthentication(
       detail: privateErrorDetail(error),
     });
   }
-  const authentication = classifyClaudeSubscriptionAuthentication(output);
+  const authentication = classifyClaudeAuthenticationForMode(
+    output,
+    dependencies.authenticationMode ?? "subscription-oauth",
+    dependencies.apiKeyStaticHealthyAuthMethod ?? "oauth_token",
+  );
   if (authentication === "unknown") {
     throw new ClaudeDiagnosticError("protocol-invalid", {
       kind: "authentication-status",
@@ -622,20 +658,6 @@ async function requireClaudeSubscriptionAuthentication(
       detail: output,
     });
   }
-}
-
-export function createClaudeOAuthEnvironment(
-  source: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-  const environment = { ...source };
-  for (const key of [
-    ...CLAUDE_CREDENTIAL_ENVIRONMENT_KEYS,
-    ...CLAUDE_PROFILE_OVERRIDE_ENVIRONMENT_KEYS,
-    ...CLAUDE_DEPLOYMENT_SELECTOR_KEYS,
-  ]) {
-    delete environment[key];
-  }
-  return environment;
 }
 
 export function createClaudeProcessEnvironment(
@@ -674,10 +696,46 @@ export function resolveClaudeDeploymentMode(
   return "foundry";
 }
 
-function environmentForClaudeProcess(
+/**
+ * The one spawn-environment resolution point. Endpoints that carry their own
+ * environment descriptor (GLM, api-key) build through the generic factory;
+ * every other caller keeps the historical subscription/selector semantics
+ * byte-identically. Missing/malformed endpoint tokens surface as
+ * `authentication-required`; other descriptor defects stay `invalid-input`.
+ */
+export function resolveClaudeProcessEnvironment(
   dependencies: ClaudeCatalogProcessDependencies,
+  profile?: SessionProfile,
 ): NodeJS.ProcessEnv {
   const source = dependencies.environment ?? process.env;
+  const endpointEnvironment = dependencies.endpointEnvironment;
+  if (endpointEnvironment !== undefined) {
+    const descriptor =
+      typeof endpointEnvironment === "function"
+        ? endpointEnvironment(
+            Object.freeze(
+              profile === undefined ? {} : { profile },
+            ),
+          )
+        : endpointEnvironment;
+    try {
+      return Object.freeze(
+        createEndpointProcessEnvironment(source, descriptor),
+      );
+    } catch (error) {
+      if (error instanceof ClaudeEndpointEnvironmentError) {
+        throw new RuntimeAdapterError(
+          error.reason === "token-missing" ||
+            error.reason === "token-malformed" ||
+            error.reason === "api-key-missing" ||
+            error.reason === "api-key-malformed"
+            ? "authentication-required"
+            : "invalid-input",
+        );
+      }
+      throw new RuntimeAdapterError("invalid-input");
+    }
+  }
   const configuredMode = dependencies.deploymentMode ?? "subscription";
   const mode = configuredMode === "auto"
     ? resolveClaudeDeploymentMode(source)
@@ -755,6 +813,7 @@ class ClaudeProcessTransport implements ClaudeCatalogTransport {
   readonly #lines: AsyncIterator<string>;
   readonly #flushStderr: () => void;
   #stopPromise: Promise<void> | undefined;
+  #inputFinished = false;
 
   constructor(child: ChildProcessWithoutNullStreams, flushStderr: () => void) {
     this.#child = child;
@@ -776,6 +835,12 @@ class ClaudeProcessTransport implements ClaudeCatalogTransport {
     return result.done ? null : result.value;
   }
 
+  finishInput(): void {
+    if (this.#inputFinished) return;
+    this.#inputFinished = true;
+    this.#child.stdin.end();
+  }
+
   stop(): Promise<void> {
     this.#stopPromise ??= this.#stopOnce();
     return this.#stopPromise;
@@ -784,7 +849,7 @@ class ClaudeProcessTransport implements ClaudeCatalogTransport {
   async #stopOnce(): Promise<void> {
     try {
       try {
-        this.#child.stdin.end();
+        this.finishInput();
       } catch {
         // Termination escalation below is authoritative.
       }

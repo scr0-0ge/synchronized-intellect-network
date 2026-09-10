@@ -1147,12 +1147,13 @@ function exactArray(value: unknown, maximumLength: number): readonly unknown[] |
 }
 
 function isPlainDataGraph(value: unknown): boolean {
-  const pending: unknown[] = [value];
+  const pending: Array<readonly [value: unknown, exiting: boolean]> = [[value, false]];
   const seen = new Set<object>();
+  const active = new Set<object>();
   let propertyCount = 0;
   try {
     while (pending.length > 0) {
-      const current = pending.pop();
+      const [current, exiting] = pending.pop()!;
       if (
         current === null ||
         current === undefined ||
@@ -1162,9 +1163,19 @@ function isPlainDataGraph(value: unknown): boolean {
       ) {
         continue;
       }
-      if (typeof current !== "object" || seen.has(current)) return false;
+      if (typeof current !== "object") return false;
+      if (exiting) {
+        active.delete(current);
+        continue;
+      }
+      // Only an ancestor on this DFS path is a cycle. IPC can legitimately
+      // share counts between the source snapshot and the committed generation.
+      if (active.has(current)) return false;
+      if (seen.has(current)) continue;
       if (seen.size >= maximumGraphInspectionNodes) return false;
       seen.add(current);
+      active.add(current);
+      pending.push([current, true]);
       const array = Array.isArray(current);
       if (
         Object.getPrototypeOf(current) !==
@@ -1184,7 +1195,7 @@ function isPlainDataGraph(value: unknown): boolean {
           continue;
         }
         if (!descriptor.enumerable) return false;
-        pending.push(descriptor.value);
+        pending.push([descriptor.value, false]);
       }
     }
     structuredClone(value);

@@ -21,13 +21,28 @@ test("endpoint status presentation keeps fixed order, exact copy, and ready-only
     [
       ["codex-desktop", "Not inspected", null],
       ["claude-code-desktop", "Not inspected", null],
+      ["glm-coding-plan", "Not inspected", null],
+      ["kimi-code", "Not inspected", null],
+      ["deepseek-api", "Not inspected", null],
+      ["kimi-platform", "Not inspected", null],
+      ["claude-api", "Not inspected", null],
+      ["codex-api", "Not inspected", null],
     ],
   );
 
   const loading = beginDirectSessionProfileLoad(initialRendererState);
   assert.deepEqual(
     directEndpointStatusRows(loading.profile).map((row) => row.statusLabel),
-    ["Not inspected", "Not inspected"],
+    [
+      "Not inspected",
+      "Not inspected",
+      "Not inspected",
+      "Not inspected",
+      "Not inspected",
+      "Not inspected",
+      "Not inspected",
+      "Not inspected",
+    ],
   );
 
   const mixed = completeDirectSessionProfileLoad(
@@ -49,13 +64,14 @@ test("endpoint status presentation keeps fixed order, exact copy, and ready-only
     [
       {
         endpointId: "codex-desktop",
-        endpointLabel: "Codex desktop",
+        // Ticket 25 facade naming: short segment name, family carries brand.
+        endpointLabel: "Subscription",
         statusLabel: "Runtime not located",
         selectableKey: null,
       },
       {
         endpointId: "claude-code-desktop",
-        endpointLabel: "Claude Code desktop",
+        endpointLabel: "Subscription",
         statusLabel: "Catalog ready",
         selectableKey: "endpoint:claude",
       },
@@ -66,10 +82,10 @@ test("endpoint status presentation keeps fixed order, exact copy, and ready-only
     beginDirectSessionProfileLoad(initialRendererState),
     {
       ok: false,
-      endpointDiscovery: publicRuntimeEndpointDiscovery(
-        "authentication-required",
-        "inspection-failed",
-      ),
+      endpointDiscovery: publicRuntimeEndpointDiscovery([
+        { endpointId: "codex-desktop", category: "authentication-required" },
+        { endpointId: "claude-code-desktop", category: "inspection-failed" },
+      ]),
       error: {
         category: "profile-unavailable",
         message:
@@ -94,10 +110,10 @@ test("endpoint status presentation never renders a contradictory ready claim", (
     ...initialRendererState.profile,
     result: {
       ok: true,
-      endpointDiscovery: publicRuntimeEndpointDiscovery(
-        "catalog-ready",
-        "not-inspected",
-      ),
+      endpointDiscovery: publicRuntimeEndpointDiscovery([
+        { endpointId: "codex-desktop", category: "catalog-ready" },
+        { endpointId: "claude-code-desktop", category: "not-inspected" },
+      ]),
       profile: {
         snapshotKey: "snapshot:contradictory",
         endpoints: [],
@@ -122,10 +138,10 @@ function successfulResult(
 ): WorkbenchPublicDirectSessionProfileResult {
   return {
     ok: true,
-    endpointDiscovery: publicRuntimeEndpointDiscovery(
-      codexCategory,
-      claudeCategory,
-    ),
+    endpointDiscovery: publicRuntimeEndpointDiscovery([
+      { endpointId: "codex-desktop", category: codexCategory },
+      { endpointId: "claude-code-desktop", category: claudeCategory },
+    ]),
     profile: {
       snapshotKey: "snapshot:status-fidelity",
       endpoints,
@@ -138,7 +154,7 @@ const claudeEndpoint: WorkbenchRuntimeEndpointOption = Object.freeze({
   endpointId: "claude-code-desktop",
   key: "endpoint:claude",
   runtimeFamilyLabel: "Claude",
-  endpointLabel: "Claude Code desktop",
+  endpointLabel: "Subscription",
   models: Object.freeze([]),
   executionModes: Object.freeze([]),
   accessModes: Object.freeze([]),

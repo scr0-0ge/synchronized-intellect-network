@@ -370,7 +370,7 @@ test("light histories readability stays in ink without thickening the modal", as
 
   const lightDialogRules = [
     ...acrylicStyles.matchAll(
-      /:root\[data-skin~="acrylic"\]\[data-tone="light"\] \.project-histories-dialog[^\{]*\{([^}]*)\}/gu,
+      /:root\[data-skin~="acrylic"\]\[data-tone="light"\] \.removal-dialog[^\{]*\{([^}]*)\}/gu,
     ),
   ];
   assert.equal(lightDialogRules.length, 4);
@@ -423,11 +423,23 @@ test(
           exact: true,
         });
         await panel.waitFor({ state: "visible", timeout: 1_000 });
+        const expectedNotice =
+          scenario === "history-zero"
+            ? "No recorded conversation histories were found for this Project."
+            : "This Project has only the history it is showing now.";
         await panel
-          .getByText("This Project has only the history it is showing now.", {
-            exact: true,
-          })
+          .getByText(expectedNotice, { exact: true })
           .waitFor({ state: "visible", timeout: 1_000 });
+        assert.equal(
+          await panel
+            .getByText(
+              "This Project folder has more than one recorded conversation history. Choose the one this Project should show; every other history stays available here.",
+              { exact: true },
+            )
+            .count(),
+          0,
+          `${scenario} must not claim that multiple histories were found`,
+        );
         assert.deepEqual(
           await page.evaluate(() => ({
             noticeCount: Array.from(
@@ -527,7 +539,7 @@ test(
     const { application, page } = await openHarness("scenario=history-stale");
     try {
       await page.waitForTimeout(100);
-      await page.locator(".registered-project-button").nth(1).click();
+      await page.locator(".project-switch-trigger:not([hidden])").first().click();
       await page.waitForFunction(
         () =>
           document.documentElement.dataset.qaProjectSelectionCalls === "1",
@@ -552,12 +564,25 @@ test(
           selectedProjectIndex: Array.from(
             document.querySelectorAll(".proj"),
           ).findIndex((project) => project.classList.contains("is-open")),
+          projects: Array.from(document.querySelectorAll<HTMLElement>(".proj"))
+            .map((project) => ({
+              expanded: project.dataset.open,
+              sessionRows: project.querySelectorAll(".session-row").length,
+              enabledSessionRows: Array.from(
+                project.querySelectorAll<HTMLButtonElement>(".session-row"),
+              ).filter((row) => !row.disabled).length,
+            })),
         })),
         {
           discoveryCalls: "0",
           adoptionCalls: "0",
           noticeCount: 0,
           selectedProjectIndex: 1,
+          projects: [
+            { expanded: "true", sessionRows: 3, enabledSessionRows: 0 },
+            { expanded: "true", sessionRows: 2, enabledSessionRows: 2 },
+            { expanded: "false", sessionRows: 0, enabledSessionRows: 0 },
+          ],
         },
       );
     } finally {

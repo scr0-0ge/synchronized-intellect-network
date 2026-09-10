@@ -11,9 +11,14 @@ import type {
   SessionProfile,
 } from "../agent-runtime/index.ts";
 import { RuntimeAdapterError } from "../agent-runtime/index.ts";
+import type { WorkbenchUserInputBridge, WorkbenchUserInputReadRequest, WorkbenchUserInputResponse, WorkbenchUserInputResult, WorkbenchUserInputResponseResult } from "./contract.ts";
+import { reconstructUserInputRead, reconstructUserInputResponse, sanitizeUserInputResult } from "./user-input-sanitizer.ts";
 import {
   CoordinatorError,
   createWorkbenchCoordinator,
+  createSessionContinuationPlan,
+  parseSessionContinuationPlan,
+  sessionContinuationStepInput,
 } from "../coordinator/index.ts";
 import type {
   ProjectChannel,
@@ -22,6 +27,7 @@ import type {
 } from "../coordinator/index.ts";
 import type { WorkLedgerAuthGenerationModule } from "../coordinator/index.ts";
 import { resolveSessionProfile } from "../session-profile/index.ts";
+import { WORKBENCH_RUNTIME_ENDPOINT_IDS } from "./runtime-endpoint-identity.ts";
 import {
   createDirectSessionProfilePreferenceStore,
   LEGACY_CODEX_DIRECT_SESSION_PROFILE_ENDPOINT_KEY,
@@ -29,6 +35,7 @@ import {
   type DirectSessionProfilePreferenceStore,
 } from "./preference-store.ts";
 import {
+  isValidWorkbenchDirectInput,
   publicInvalidProfileSelection,
   publicInvalidProfileDefaultSelection,
   publicInvalidSubmission,
@@ -41,6 +48,8 @@ import {
   publicProfileUnavailable,
   publicRuntimeEndpointDiscovery,
   publicRuntimeNotLocated,
+  publicSingleInspectedRuntimeEndpointDiscovery,
+  publicUniformRuntimeEndpointDiscovery,
   publicProfileDefaultSaved,
   publicPreferenceUnavailable,
   publicSubmissionAccepted,
@@ -102,7 +111,7 @@ import {
   type WorkbenchDirectRuntimeEndpointSnapshot,
 } from "./runtime-endpoint-adapter.ts";
 
-export interface WorkbenchBackend {
+export interface WorkbenchBackend extends Partial<WorkbenchUserInputBridge> {
   observeProject(listener: WorkbenchProjectListener): () => void;
   readTurnActivity(): ProjectTurnActivity;
   interruptActiveTurn?(
@@ -206,6 +215,10 @@ export async function createWorkbenchBackend(options: {
     databasePath: options.databasePath,
     adapter,
     authGeneration: options.authGeneration,
+    // The shell admits its full registered endpoint roster (including the
+    // api-key endpoints GLM/Kimi/DeepSeek); the coordinator's own default
+    // stays narrower.
+    endpointIds: [...WORKBENCH_RUNTIME_ENDPOINT_IDS],
   });
   const channel = await coordinator.openProject(options.projectDirectory);
   const liveView = createWorkbenchLiveView({
@@ -283,9 +296,24 @@ function createBackend(
   const runtimeResumeIdentityResolver =
     readWorkbenchRuntimeResumeIdentityResolver(adapter);
   let closing = false;
+  const continuationPlan = createSessionContinuationPlan(channel, (commandId, stop) => {
+    liveView.reportContinuationStop(commandId, stop);
+  });
   return Object.freeze({
     observeProject: (listener: WorkbenchProjectListener) =>
       liveView.observe(listener),
+    observeUserInput: (listener: () => void) => channel.observeUserInput?.(listener) ?? (() => undefined),
+    async readUserInput(request: WorkbenchUserInputReadRequest): Promise<WorkbenchUserInputResult> {
+      const parsed = reconstructUserInputRead(request);
+      const target = parsed && !closing ? liveView.resolveSessionMetadata(parsed.sessionKey) : undefined;
+      if (!target) return { ok: false };
+      return sanitizeUserInputResult({ ok: true, requests: channel.readUserInput?.(target.sessionId) ?? [] });
+    },
+    async respondToUserInput(request: WorkbenchUserInputResponse): Promise<WorkbenchUserInputResponseResult> {
+      const parsed = reconstructUserInputResponse(request);
+      if (closing || !parsed || !channel.respondToUserInput) return { status: "unavailable" };
+      return channel.respondToUserInput(parsed);
+    },
     readTurnActivity(): ProjectTurnActivity {
       if (closing) return "unknown";
       try {
@@ -299,6 +327,7 @@ function createBackend(
     ): Promise<WorkbenchInterruptResult> {
       const reconstructed = reconstructWorkbenchInterruptRequest(request);
       if (!reconstructed.ok) return Promise.resolve(publicInvalidInterrupt());
+      continuationPlan.cancel();
       if (closing) return Promise.resolve(publicInterruptUnavailable());
       const resolved = liveView.resolveInterrupt(
         reconstructed.request.interruptKey,
@@ -329,6 +358,7 @@ function createBackend(
     steerActiveTurn(request: WorkbenchSteerRequest): Promise<WorkbenchSteerResult> {
       const reconstructed = reconstructWorkbenchSteerRequest(request);
       if (!reconstructed.ok) return Promise.resolve(publicInvalidSteer());
+      continuationPlan.cancel();
       if (closing) return Promise.resolve(publicSteerUnavailable());
       const resolved = liveView.resolveSteer(reconstructed.request.steerKey);
       if (resolved === undefined) return Promise.resolve(publicInvalidSteer());
@@ -423,6 +453,9 @@ function createBackend(
         .mutateSessionMetadata({
           sessionId: resolved.sessionId,
           operation: reconstructed.request.operation,
+          ...(reconstructed.request.acknowledgedUnknownOutcome === true
+            ? { acknowledgedUnknownOutcome: true as const }
+            : {}),
         })
         .then(async (result) => {
           if (
@@ -454,8 +487,7 @@ function createBackend(
       const exactRequest = reconstructed.request;
       const loadGeneration = ++profileLoadGeneration;
       const operation = (async () => {
-        let endpointDiscovery = publicRuntimeEndpointDiscovery(
-          "not-inspected",
+        let endpointDiscovery = publicUniformRuntimeEndpointDiscovery(
           "not-inspected",
         );
         try {
@@ -508,14 +540,28 @@ function createBackend(
               : profileLoadFailureForDiscovery(endpointDiscovery);
           }
           const preferences = await preferenceStore.read();
+          const recordedContinuationEndpointId =
+            exactRequest.kind === "continuation-session" &&
+            endpointLoader !== undefined
+              ? continuationEndpointId(
+                  initialContinuationRuntimeResumeIdentities!,
+                  initialContinuationSource!.profile,
+                )
+              : undefined;
+          const continuationEndpointSources =
+            exactRequest.kind === "continuation-session" &&
+            recordedContinuationEndpointId !== undefined
+              ? endpointSnapshot.endpoints.filter(
+                  (source) =>
+                    source.endpointId === recordedContinuationEndpointId,
+                )
+              : endpointSnapshot.endpoints;
           const continuationCandidate =
             exactRequest.kind === "continuation-session"
-              ? await resolveContinuationCatalogCandidate({
-                  endpointSources: endpointSnapshot.endpoints,
+              ? resolveContinuationCatalogCandidate({
+                  endpointSources: continuationEndpointSources,
                   preferences,
                   includeLegacyGlobalPreferences: endpointLoader === undefined,
-                  liveView,
-                  selectionKey: exactRequest.selectionKey,
                   recordedProfile: initialContinuationSource!.profile,
                 })
               : undefined;
@@ -523,13 +569,15 @@ function createBackend(
             exactRequest.kind === "continuation-session" &&
             continuationCandidate === undefined
           ) {
-            /* F214. Reaching here means the provider WAS located and its catalog
-               WAS read (endpoints.length > 0 was checked above), yet no endpoint
-               could prefill the recorded profile — the recorded model has left
-               the catalog. Name that cause instead of the generic
-               continuation-unavailable, which would deny the Session's (true)
-               resumability and misattribute the cause. */
-            return publicContinuationModelUnavailable(endpointDiscovery);
+            /* A model-retirement claim needs the recorded endpoint's catalog.
+               The legacy adapter is one known Codex endpoint; the endpoint
+               directory instead uses the durable resume route. A catalog from
+               another endpoint says nothing about this Session's provider. */
+            return endpointLoader === undefined ||
+              (recordedContinuationEndpointId !== undefined &&
+                continuationEndpointSources.length === 1)
+              ? publicContinuationModelUnavailable(endpointDiscovery)
+              : publicContinuationProfileUnavailable(endpointDiscovery);
           }
           const snapshot = continuationCandidate?.snapshot ??
             createCatalogSnapshot(
@@ -683,6 +731,9 @@ function createBackend(
       request: WorkbenchDirectInputRequest,
     ): Promise<WorkbenchSubmissionResult> {
       const submittedWhileOpen = !closing;
+      // A human submission takes over this Project immediately, even while an
+      // older catalog/acceptance request is awaiting its serialized turn.
+      const continuationIntent = continuationPlan.cancel();
       const operation = submissionTail.then(async (): Promise<WorkbenchSubmissionResult> => {
         const reconstructed = reconstructWorkbenchDirectInputRequest(request);
         if (!reconstructed.ok) {
@@ -694,6 +745,11 @@ function createBackend(
             : publicInvalidProfileSelection();
         }
         if (!submittedWhileOpen) return publicUnavailableSubmission();
+        const plan = parseSessionContinuationPlan(reconstructed.request.input);
+        if (plan === null || (plan !== undefined &&
+            !isValidWorkbenchDirectInput(sessionContinuationStepInput(plan, plan.steps)))) {
+          return publicInvalidSubmission();
+        }
         if (reconstructed.request.kind === "continue") {
           const continuationRequest = reconstructed.request;
           const snapshot = activeSnapshot;
@@ -738,7 +794,7 @@ function createBackend(
             ) {
               return publicContinuationUnavailable();
             }
-            await channel.act(
+            await continuationPlan.submit(
               Object.freeze({
                 kind: "direct" as const,
                 commandKind: "continue" as const,
@@ -756,6 +812,8 @@ function createBackend(
                 input: continuationRequest.input,
               }),
               Object.freeze({ endpointId: resolvedEndpoint.endpointId }),
+              plan,
+              continuationIntent,
             );
             if (activeSnapshot === snapshot) {
               activeSnapshot = undefined;
@@ -820,7 +878,7 @@ function createBackend(
           ) {
             return publicUnavailableSubmission();
           }
-          await channel.act(
+          await continuationPlan.submit(
             Object.freeze({
               kind: "direct" as const,
               commandKind: "start" as const,
@@ -836,6 +894,8 @@ function createBackend(
               input: startRequest.input,
             }),
             Object.freeze({ endpointId: resolvedEndpoint.endpointId }),
+            plan,
+            continuationIntent,
           );
           if (activeSnapshot === snapshot) {
             activeSnapshot = undefined;
@@ -860,6 +920,7 @@ function createBackend(
     },
     close(): Promise<void> {
       closing = true;
+      continuationPlan.cancel();
       closePromise ??= (async () => {
         await Promise.all([...profileLoadPromises.values()]);
         await Promise.all([...preferenceSavePromises]);
@@ -874,6 +935,7 @@ function createBackend(
         await preferenceStore.close();
         await liveView.close();
         await channel.close();
+        await continuationPlan.close();
       })();
       return closePromise;
     },
@@ -1010,14 +1072,12 @@ interface ContinuationCatalogCandidate {
   readonly resolvedProfile: SessionProfile;
 }
 
-async function resolveContinuationCatalogCandidate(options: {
+function resolveContinuationCatalogCandidate(options: {
   readonly endpointSources: readonly WorkbenchDirectRuntimeEndpointCatalog[];
   readonly preferences: DirectSessionProfilePreferenceSnapshot;
   readonly includeLegacyGlobalPreferences: boolean;
-  readonly liveView: WorkbenchLiveView;
-  readonly selectionKey: string;
   readonly recordedProfile: SessionProfile;
-}): Promise<ContinuationCatalogCandidate | undefined> {
+}): ContinuationCatalogCandidate | undefined {
   const candidates: ContinuationCatalogCandidate[] = [];
   for (const source of options.endpointSources) {
     let snapshot: CatalogSnapshot;
@@ -1045,15 +1105,7 @@ async function resolveContinuationCatalogCandidate(options: {
         accessModeKey: prefill.accessModeKey,
       }),
     );
-    if (
-      resolved === undefined ||
-      await options.liveView.resolveContinuationProfile(
-        options.selectionKey,
-        resolved.profile,
-      ) === undefined
-    ) {
-      continue;
-    }
+    if (resolved === undefined) continue;
     candidates.push(
       Object.freeze({
         snapshot,
@@ -1068,9 +1120,10 @@ async function resolveContinuationCatalogCandidate(options: {
 function continuationEndpointDiscovery(
   endpointId: WorkbenchDirectRuntimeEndpointCatalog["endpointId"],
 ): WorkbenchRuntimeEndpointDiscovery {
-  return endpointId === "codex-desktop"
-    ? publicRuntimeEndpointDiscovery("catalog-ready", "not-inspected")
-    : publicRuntimeEndpointDiscovery("not-inspected", "catalog-ready");
+  return publicSingleInspectedRuntimeEndpointDiscovery(
+    endpointId,
+    "catalog-ready",
+  );
 }
 
 async function inspectLegacyRuntimeEndpoint(
@@ -1092,17 +1145,17 @@ async function inspectLegacyRuntimeEndpoint(
           directStart: "supported" as const,
         }),
       ]),
-      endpointDiscovery: publicRuntimeEndpointDiscovery(
+      endpointDiscovery: publicSingleInspectedRuntimeEndpointDiscovery(
+        "codex-desktop",
         "catalog-ready",
-        "not-inspected",
       ),
     });
   } catch (error) {
     return Object.freeze({
       endpoints: Object.freeze([]),
-      endpointDiscovery: publicRuntimeEndpointDiscovery(
+      endpointDiscovery: publicSingleInspectedRuntimeEndpointDiscovery(
+        "codex-desktop",
         legacyDiscoveryCategory(error),
-        "not-inspected",
       ),
     });
   }
@@ -1129,9 +1182,9 @@ function profileLoadFailureForDiscovery(
   endpointDiscovery: WorkbenchRuntimeEndpointDiscovery,
 ): WorkbenchAnyDirectSessionProfileResult {
   const coherentDiscovery = downgradeCatalogReadyDiscovery(endpointDiscovery);
-  const [codex, claude] = coherentDiscovery.statuses;
-  return codex.category === "runtime-not-located" &&
-    claude.category === "runtime-not-located"
+  return coherentDiscovery.statuses.every(
+    (status) => status.category === "runtime-not-located",
+  )
     ? publicRuntimeNotLocated(coherentDiscovery)
     : publicProfileUnavailable(coherentDiscovery);
 }
@@ -1139,12 +1192,14 @@ function profileLoadFailureForDiscovery(
 function downgradeCatalogReadyDiscovery(
   endpointDiscovery: WorkbenchRuntimeEndpointDiscovery,
 ): WorkbenchRuntimeEndpointDiscovery {
-  const [codex, claude] = endpointDiscovery.statuses;
   return publicRuntimeEndpointDiscovery(
-    codex.category === "catalog-ready" ? "inspection-failed" : codex.category,
-    claude.category === "catalog-ready"
-      ? "inspection-failed"
-      : claude.category,
+    endpointDiscovery.statuses.map((status) => ({
+      endpointId: status.endpointId,
+      category:
+        status.category === "catalog-ready"
+          ? ("inspection-failed" as const)
+          : status.category,
+    })),
   );
 }
 
@@ -1260,6 +1315,26 @@ function samePrivateProfile(left: SessionProfile, right: SessionProfile): boolea
     left.executionMode === right.executionMode &&
     left.accessMode === right.accessMode
   );
+}
+
+function continuationEndpointId(
+  mappings: readonly {
+    readonly endpointId: WorkbenchDirectRuntimeEndpointCatalog["endpointId"];
+    readonly selectionProfile: SessionProfile;
+  }[],
+  recordedProfile: SessionProfile,
+): WorkbenchDirectRuntimeEndpointCatalog["endpointId"] | undefined {
+  const matching = mappings.find((mapping) =>
+    samePrivateProfile(mapping.selectionProfile, recordedProfile),
+  );
+  const anchor = matching ?? mappings[0];
+  if (
+    anchor === undefined ||
+    mappings.some((mapping) => mapping.endpointId !== anchor.endpointId)
+  ) {
+    return undefined;
+  }
+  return anchor.endpointId;
 }
 
 function completeLegacyDefaultRequest(

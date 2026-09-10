@@ -195,7 +195,7 @@ test("instrumented real preparation discovers once before start and never rescan
 
 test("production discovery is a fixed closed provider set and never enumerates an app-data parent", async () => {
   const appDataDirectory = resolve("X:/synthetic-app-data");
-  const currentUserDataDirectory = join(appDataDirectory, "unified-agent-workbench");
+  const currentUserDataDirectory = join(appDataDirectory, "synchronized-intellect-network");
   const discovery = createProductionHistoryRecoverySourceDiscovery({
     appDataDirectory,
     currentUserDataDirectory,
@@ -266,11 +266,28 @@ test("main composition keeps recovery before every mutation-capable Project Host
   assert.equal(source.includes("recovery.sourceDiscovery"), false);
 });
 
+test("the window is on screen before the recovery barrier, not behind it", async () => {
+  const source = await readFile(
+    new URL("../../src/workbench-shell/electron/main.ts", import.meta.url),
+    "utf8",
+  );
+  const recoveryBarrier = source.indexOf("startProjectHostAfterRecoveryPreparation({");
+  const windowCreation = source.indexOf("createdWindow = new BrowserWindow({");
+  const firstShow = source.indexOf('if (windowPlacement.kind === "offscreen") createdWindow.showInactive();');
+  assert.equal(windowCreation >= 0, true);
+  assert.equal(firstShow >= 0, true);
+  // Establishing owner-only ACLs costs seconds. Behind the barrier, the window
+  // was created after them and the launch was that many seconds of nothing at
+  // all. The Project host still waits; the window does not.
+  assert.equal(windowCreation < recoveryBarrier, true);
+  assert.equal(firstShow < recoveryBarrier, true);
+});
+
 test("the deferred production discovery keeps the guard and moves it off the startup path", async () => {
   const appDataDirectory = resolve("X:/synthetic-app-data");
   const containedUserDataDirectory = join(
     appDataDirectory,
-    "unified-agent-workbench",
+    "synchronized-intellect-network",
   );
   const escapingUserDataDirectory = resolve("Y:/outside");
 

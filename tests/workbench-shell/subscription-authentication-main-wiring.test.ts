@@ -58,9 +58,17 @@ test("Electron main shares one durable auth-generation authority across Project 
     source,
     /subscriptionAuthenticationIpc\s*=\s*installWorkbenchSubscriptionAuthenticationActionIpc\(\{\s*ipcMain,\s*window:\s*createdWindow,\s*source:\s*subscriptionAuthenticationService,\s*\}\)/u,
   );
+  // The dispose promise is still captured at teardown and still awaited before
+  // the durable close. Issue 172 changed only how it is awaited: sequentially
+  // and outside the try, where a rejection skipped the entire flush, to settled
+  // alongside the other listener shutdown, where it cannot.
   assert.match(
     source,
-    /subscriptionAuthenticationShutdown\s*=\s*closingSubscriptionAuthenticationIpc\?\.dispose\(\)[\s\S]*await subscriptionAuthenticationShutdown/u,
+    /const closing = subscriptionAuthenticationIpc;\s+subscriptionAuthenticationIpc = null;\s+subscriptionAuthenticationShutdown =\s+closing\?\.dispose\(\) \?\? subscriptionAuthenticationShutdown;/u,
+  );
+  assert.match(
+    source,
+    /listenerShutdowns: \[\s+subscriptionAuthenticationShutdown,[\s\S]*?closeDurableState: closeWorkbenchDurableState,/u,
   );
   assert.doesNotMatch(
     source,

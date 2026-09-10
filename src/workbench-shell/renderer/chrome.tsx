@@ -3,12 +3,15 @@ import type {
   WorkbenchCommandView,
   WorkbenchHostedProjectView,
   WorkbenchProjectView,
+  WorkbenchFamilyEndpointPreferences,
 } from "../contract.ts";
+import { defaultWorkbenchFamilyEndpointPreferences } from "../contract.ts";
 import type { WorkbenchWindowRendererBridge } from "../window-control-bridge.ts";
 import {
-  directEndpointStatusRows,
+  directFacadeEndpointStatusRows,
   directWorkIntensityPresentationLabel,
   type WorkbenchDirectProfileState,
+  type WorkbenchFacadeSubscriptionAuthenticationInput,
 } from "./view-model.ts";
 import { type WorkbenchSurface } from "./settings-view-model.ts";
 
@@ -125,12 +128,19 @@ export const WorkbenchStatusbar: Component<{
   readonly surface: WorkbenchSurface;
   readonly runtimeUnavailable: boolean;
   readonly startingNewSession: boolean;
+  readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
+  readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
 }> = (props) => {
   const endpoints = () =>
     props.profile.phase === "ready" && props.profile.result?.ok
       ? props.profile.result.profile.endpoints
       : [];
-  const endpointRows = () => directEndpointStatusRows(props.profile);
+  const endpointRows = () =>
+    directFacadeEndpointStatusRows(
+      props.profile,
+      props.endpointPreferences ?? defaultWorkbenchFamilyEndpointPreferences,
+      props.subscriptionAuthentication,
+    );
   const selectedEndpoint = () =>
     endpoints().find(
       (endpoint) => endpoint.key === props.profile.selectedEndpointKey,

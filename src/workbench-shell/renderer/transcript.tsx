@@ -13,12 +13,15 @@ import {
 } from "solid-js";
 import type {
   WorkbenchCommandView,
+  WorkbenchFileChangeSummary,
   WorkbenchSessionProfileProjection,
 } from "../contract.ts";
 
 import {
   filterTranscriptGroups,
   groupTimelineEvents,
+  splitTranscriptSearchText,
+  transcriptEventMetadataMatchesQuery,
   type RuntimeTimelineEvent,
   type TimelineEventGroup,
 } from "./transcript-search.ts";
@@ -38,13 +41,18 @@ import { EmptyState } from "./states.tsx";
 import { CommandWithoutSession } from "./composer.tsx";
 import {
   transcriptCopy,
+  transcriptFailureBodyCopy,
+  turnRecoveryBodyCopy,
   turnStateCopy,
   transcriptSearchCountCopy,
   turnOrdinalCopy,
+  guidanceTurnOrdinalCopy,
   eventsDisclosureCopy,
   effectiveNotRecordedCopy,
-  effectiveUnknownCopy,
-  effectiveUnknownRequestedCopy,
+  effectivePendingObservationCopy,
+  effectivePendingObservationRequestedCopy,
+  effectiveUnobservedCopy,
+  effectiveUnobservedRequestedCopy,
   differsFromRequestedWithFallbackCopy,
 } from "./copy/transcript-copy.ts";
 import { composerControlCopy } from "./copy/composer-copy.ts";
@@ -54,8 +62,13 @@ import {
   recordedProfileSummaryCopy,
 } from "./copy/runtime-profile-copy.ts";
 import { dynamicCopy } from "./copy/dynamic-copy.ts";
+import { failureCopy } from "./copy/session-status-copy.ts";
 
 type TranscriptSession = NonNullable<WorkbenchCommandView["session"]>;
+type ProgressTimelineEvent = Extract<
+  RuntimeTimelineEvent,
+  { readonly kind: "progress" }
+>;
 
 const TRANSCRIPT_ESTIMATED_GROUP_HEIGHT = 128;
 const TRANSCRIPT_INITIAL_VISIBLE_GROUPS = 6;
@@ -199,8 +212,8 @@ const SessionTranscriptBody: Component<{
       return groupTimelineEvents(props.session.timeline);
     }
     return Object.freeze(
-      props.session.turns.flatMap((turn) =>
-        groupTimelineEvents(turn.timeline, turn.profile),
+      props.session.turns.flatMap((turn, index) =>
+        groupTimelineEvents(turn.timeline, turn.profile, index + 1),
       ),
     );
   });
@@ -227,6 +240,7 @@ const SessionTranscriptBody: Component<{
   let scrollFrame: number | undefined;
   let scrollTimeout: number | undefined;
   let measureFrame: number | undefined;
+  let searchMatchScrollFrame: number | undefined;
   let latestScrollFrame: number | undefined;
   let latestScrollTimeout: number | undefined;
   let pendingLatestScroll = false;
@@ -575,6 +589,35 @@ const SessionTranscriptBody: Component<{
     });
   };
 
+  const queueScrollToFirstSearchMatch = (): void => {
+    if (typeof window === "undefined") return;
+    if (searchMatchScrollFrame !== undefined) {
+      window.cancelAnimationFrame(searchMatchScrollFrame);
+      searchMatchScrollFrame = undefined;
+    }
+    if (!mounted || searchQuery().trim().length === 0) return;
+    searchMatchScrollFrame = window.requestAnimationFrame(() => {
+      searchMatchScrollFrame = undefined;
+      const scroller = props.scrollContainer();
+      const match = timelineWindowElement?.querySelector<HTMLElement>(
+        "mark[data-transcript-search-match]",
+      );
+      if (scroller === undefined || match === undefined || match === null) return;
+      const scrollerRect = scroller.getBoundingClientRect();
+      const matchRect = match.getBoundingClientRect();
+      if (
+        matchRect.top < scrollerRect.top ||
+        matchRect.bottom > scrollerRect.bottom
+      ) {
+        scroller.scrollTop +=
+          matchRect.top -
+          scrollerRect.top -
+          (scroller.clientHeight - matchRect.height) / 2;
+        updateViewportFromScroll();
+      }
+    });
+  };
+
   createEffect(() => {
     renderWindow().startIndex;
     renderWindow().endIndex;
@@ -622,6 +665,7 @@ const SessionTranscriptBody: Component<{
       );
       const scroller = props.scrollContainer();
       if (scroller !== undefined) scroller.scrollTop = 0;
+      queueScrollToFirstSearchMatch();
       return;
     }
     if (timelineChanged && followingLatest) queueScrollToLatest();
@@ -660,6 +704,9 @@ const SessionTranscriptBody: Component<{
       if (scrollFrame !== undefined) window.cancelAnimationFrame(scrollFrame);
       if (scrollTimeout !== undefined) window.clearTimeout(scrollTimeout);
       if (measureFrame !== undefined) window.cancelAnimationFrame(measureFrame);
+      if (searchMatchScrollFrame !== undefined) {
+        window.cancelAnimationFrame(searchMatchScrollFrame);
+      }
     }
     cancelLatestScroll();
   });
@@ -686,7 +733,10 @@ const SessionTranscriptBody: Component<{
         />
         <span class="transcript-search-count" role="status">
           {searching()
-            ? transcriptSearchCountCopy(visibleGroups().length, groups().length)
+            ? transcriptSearchCountCopy(
+                new Set(visibleGroups().map((group) => group.turnOrdinal)).size,
+                new Set(groups().map((group) => group.turnOrdinal)).size,
+              )
             : ""}
         </span>
       </div>
@@ -696,9 +746,16 @@ const SessionTranscriptBody: Component<{
           style={{ height: `${topSpacerHeight()}px` }}
           aria-hidden="true"
         />
+        <Show when={searching() && visibleGroups().length === 0}>
+          <EmptyState
+            title={transcriptCopy.noSearchResultsTitle}
+            body={transcriptCopy.noSearchResultsBody}
+          />
+        </Show>
         <TimelineTurns
           command={props.command}
           groups={windowedGroups()}
+          searchQuery={searchQuery()}
           startIndex={renderWindow().startIndex}
           totalGroupCount={visibleGroups().length}
           disclosureStore={timelineDisclosureStore}
@@ -721,7 +778,8 @@ const SessionTranscriptBody: Component<{
         <div class="failure-block">
           <h3>{transcriptCopy.failedTitle}</h3>
           <p>
-            {transcriptCopy.failedBody}
+            {props.command.failureCategory === "quota-expired"
+              ? failureCopy["quota-expired"] : transcriptFailureBodyCopy(props.session)}
           </p>
         </div>
       </Show>
@@ -736,7 +794,15 @@ const SessionTranscriptBody: Component<{
           </p>
         </div>
       </Show>
-      <Show when={props.command.status === "recovery-required"}>
+      <For each={props.session.turns}>
+        {(turn, index) => <Show when={turn.recovery}>
+          {(recovery) => <div class="failure-block recovery-block">
+            <h3>{turnOrdinalCopy(index() + 1)} · {transcriptCopy.outcomeUnknownRule}</h3>
+            <p>{turnRecoveryBodyCopy(recovery())}</p>
+          </div>}
+        </Show>}
+      </For>
+      <Show when={props.command.status === "recovery-required" && !props.session.turns?.at(-1)?.recovery}>
         <div class="rule rule-fail">
           <span class="rule-label">{transcriptCopy.outcomeUnknownRule}</span>
         </div>
@@ -850,7 +916,25 @@ function agentMessageBlocks(text: string): readonly AgentMessageBlock[] {
   return Object.freeze(blocks);
 }
 
-const AgentInlineText: Component<{ readonly text: string }> = (props) => {
+const SearchHighlightedText: Component<{
+  readonly text: string;
+  readonly query: string;
+}> = (props) => (
+  <For each={splitTranscriptSearchText(props.text, props.query)}>
+    {(segment) =>
+      segment.match ? (
+        <mark data-transcript-search-match>{segment.text}</mark>
+      ) : (
+        segment.text
+      )
+    }
+  </For>
+);
+
+const AgentInlineText: Component<{
+  readonly text: string;
+  readonly searchQuery: string;
+}> = (props) => {
   const tokens = () =>
     props.text
       .split(/(`[^`\n]+`|\*\*[^*\n]+\*\*)/u)
@@ -859,18 +943,31 @@ const AgentInlineText: Component<{ readonly text: string }> = (props) => {
     <For each={tokens()}>
       {(token) =>
         token.startsWith("`") ? (
-          <code>{token.slice(1, -1)}</code>
+          <code>
+            <SearchHighlightedText
+              text={token.slice(1, -1)}
+              query={props.searchQuery}
+            />
+          </code>
         ) : token.startsWith("**") ? (
-          <strong>{token.slice(2, -2)}</strong>
+          <strong>
+            <SearchHighlightedText
+              text={token.slice(2, -2)}
+              query={props.searchQuery}
+            />
+          </strong>
         ) : (
-          token
+          <SearchHighlightedText text={token} query={props.searchQuery} />
         )
       }
     </For>
   );
 };
 
-const AgentCodeBlock: Component<{ readonly text: string }> = (props) => {
+const AgentCodeBlock: Component<{
+  readonly text: string;
+  readonly searchQuery: string;
+}> = (props) => {
   const bridge = useContext(WorkbenchRendererBridgeContext);
   const [copyState, setCopyState] = createSignal<
     "idle" | "copying" | "copied" | "failed"
@@ -921,7 +1018,9 @@ const AgentCodeBlock: Component<{ readonly text: string }> = (props) => {
         <span aria-live="polite">{copyLabel()}</span>
       </button>
       <pre class="codeblock">
-        <code>{props.text}</code>
+        <code>
+          <SearchHighlightedText text={props.text} query={props.searchQuery} />
+        </code>
       </pre>
     </div>
   );
@@ -930,6 +1029,7 @@ const AgentCodeBlock: Component<{ readonly text: string }> = (props) => {
 const AgentMessageBlockView: Component<{
   readonly block: AgentMessageBlock;
   readonly streaming: boolean;
+  readonly searchQuery: string;
 }> = (props) => {
   const caret = () => (
     <Show when={props.streaming}>
@@ -940,14 +1040,20 @@ const AgentMessageBlockView: Component<{
     case "paragraph":
       return (
         <p>
-          <AgentInlineText text={props.block.text} />
+          <AgentInlineText
+            text={props.block.text}
+            searchQuery={props.searchQuery}
+          />
           {caret()}
         </p>
       );
     case "heading":
       return (
         <h3 class="agent-heading">
-          <AgentInlineText text={props.block.text} />
+          <AgentInlineText
+            text={props.block.text}
+            searchQuery={props.searchQuery}
+          />
           {caret()}
         </h3>
       );
@@ -958,7 +1064,7 @@ const AgentMessageBlockView: Component<{
           <For each={items}>
             {(item, index) => (
               <li>
-                <AgentInlineText text={item} />
+                <AgentInlineText text={item} searchQuery={props.searchQuery} />
                 <Show when={index() === items.length - 1}>
                   {caret()}
                 </Show>
@@ -975,7 +1081,7 @@ const AgentMessageBlockView: Component<{
           <For each={items}>
             {(item, index) => (
               <li>
-                <AgentInlineText text={item} />
+                <AgentInlineText text={item} searchQuery={props.searchQuery} />
                 <Show when={index() === items.length - 1}>
                   {caret()}
                 </Show>
@@ -988,7 +1094,10 @@ const AgentMessageBlockView: Component<{
     case "code":
       return (
         <>
-          <AgentCodeBlock text={props.block.text} />
+          <AgentCodeBlock
+            text={props.block.text}
+            searchQuery={props.searchQuery}
+          />
           {caret()}
         </>
       );
@@ -998,6 +1107,7 @@ const AgentMessageBlockView: Component<{
 const AgentMessageText: Component<{
   readonly text: string;
   readonly streaming: boolean;
+  readonly searchQuery: string;
 }> = (props) => {
   const blocks = createMemo(() => agentMessageBlocks(props.text));
   return (
@@ -1016,6 +1126,7 @@ const AgentMessageText: Component<{
           <AgentMessageBlockView
             block={block}
             streaming={props.streaming && index() === blocks().length - 1}
+            searchQuery={props.searchQuery}
           />
         )}
       </For>
@@ -1023,16 +1134,57 @@ const AgentMessageText: Component<{
   );
 };
 
+// A long user prompt clamps to four visible lines by default with an
+// explicit toggle (issue #6 case 5): the stored text is always complete —
+// the timeline persists the full input verbatim — so the affordance is a
+// reading aid, never a truncation. The threshold mirrors the clamp: below
+// it the text cannot overflow, so no toggle is offered.
+const USER_PROMPT_CLAMP_LINES = 4;
+const USER_PROMPT_CLAMP_THRESHOLD = 4 * 90;
+
+const isLongUserPrompt = (text: string): boolean =>
+  text.length > USER_PROMPT_CLAMP_THRESHOLD || text.split("\n").length > USER_PROMPT_CLAMP_LINES;
+
 const UserMessageTurn: Component<{
   readonly text: string;
-}> = (props) => (
-  <article class="turn turn-user">
-    <header class="turn-head">
-      <span class="turn-actor actor-user">{transcriptCopy.actorUser}</span>
-    </header>
-    <div class="turn-body user-message-text">{props.text}</div>
-  </article>
-);
+  readonly searchQuery: string;
+}> = (props) => {
+  const [expanded, setExpanded] = createSignal(false);
+  const long = () => isLongUserPrompt(props.text);
+  return (
+    <article class="turn turn-user">
+      <header class="turn-head">
+        <span class="turn-actor actor-user">{transcriptCopy.actorUser}</span>
+      </header>
+      <div
+        class={`turn-body user-message-text${
+          long() && !expanded() && props.searchQuery.trim().length === 0
+            ? " is-clamped"
+            : ""
+        }`}
+        aria-label={
+          long() && !expanded() && props.searchQuery.trim().length === 0
+            ? transcriptCopy.longPromptAria
+            : undefined
+        }
+      >
+        <SearchHighlightedText text={props.text} query={props.searchQuery} />
+      </div>
+      <Show when={long()}>
+        <button
+          type="button"
+          class="user-message-toggle"
+          aria-expanded={expanded()}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded()
+            ? transcriptCopy.longPromptCollapse
+            : transcriptCopy.longPromptExpand}
+        </button>
+      </Show>
+    </article>
+  );
+};
 
 interface TimelineDisclosureState {
   readonly turnKey: string;
@@ -1138,12 +1290,17 @@ function rawTimelineEventDetail(
     case "session-started":
     case "turn-started":
     case "failed":
+    case "turn-paused":
       return "";
     case "item-started":
     case "item-completed":
       return dynamicCopy.timelineToken[event.itemType];
     case "agent-message":
       return streaming ? event.text : "";
+    case "reasoning":
+      return event.text;
+    case "progress":
+      return progressActivityDetail(event);
     case "turn-completed":
       return dynamicCopy.timelineToken[event.status];
     case "turn-interrupted":
@@ -1151,9 +1308,59 @@ function rawTimelineEventDetail(
   }
 }
 
+function progressActivityDetail(event: ProgressTimelineEvent): string {
+  if (event.activity !== "tool" || event.tool === undefined) {
+    return transcriptCopy.progressActivity[event.activity];
+  }
+  const tool = event.tool;
+  const name =
+    tool.name.trim().length === 0 || tool.name === "未知工具"
+      ? transcriptCopy.unknownToolName
+      : tool.name;
+  const parts = [name];
+  if (tool.parameter !== undefined) {
+    parts.push(tool.parameter.value);
+    if (tool.parameter.truncated) {
+      parts.push(transcriptCopy.toolParameterTruncated);
+    }
+  }
+  if (tool.type === "unknown" && tool.sourceType !== undefined) {
+    parts.push(transcriptCopy.unknownToolType(tool.sourceType));
+  }
+  return parts.join(" ");
+}
+
+function fileChangeSummaryDetail(summary: WorkbenchFileChangeSummary): string {
+  const details = summary.files.map((file) => {
+    const parts = [file.path];
+    if (file.truncated) parts.push(transcriptCopy.toolParameterTruncated);
+    if (file.lines !== undefined) {
+      parts.push(
+        transcriptCopy.fileChangeLineCounts(
+          file.lines.additions,
+          file.lines.deletions,
+        ),
+      );
+    }
+    return parts.join(" ");
+  });
+  if (summary.truncated) {
+    details.push(
+      transcriptCopy.fileChangesOmitted(
+        summary.totalFiles - summary.files.length,
+      ),
+    );
+  }
+  return transcriptCopy.fileChangeSummary(
+    summary.totalFiles,
+    details.join(transcriptCopy.fileChangeSeparator),
+  );
+}
+
 const TimelineTurns: Component<{
   readonly command: WorkbenchCommandView;
   readonly groups: readonly TimelineEventGroup[];
+  readonly searchQuery?: string;
   readonly startIndex?: number;
   readonly totalGroupCount?: number;
   readonly disclosureStore: TimelineDisclosureStore;
@@ -1161,35 +1368,64 @@ const TimelineTurns: Component<{
   const startIndex = (): number => props.startIndex ?? 0;
   const totalGroupCount = (): number =>
     props.totalGroupCount ?? props.groups.length;
+  const groupKeys = createMemo(() => props.groups.map((group) => group.key));
+  const groupsByKey = createMemo(
+    () => new Map(props.groups.map((group) => [group.key, group] as const)),
+  );
   const groupStatus = (
     group: TimelineEventGroup,
     index: number,
   ): WorkbenchCommandView["status"] => {
+    if (
+      props.command.session?.turns?.[group.turnOrdinal - 1]?.recovery !== undefined
+    ) {
+      return "recovery-required";
+    }
     if (group.events.some((event) => event.kind === "failed")) return "failed";
     if (group.events.some((event) => event.kind === "turn-completed")) {
       return "completed";
+    }
+    if (group.events.some((event) => event.kind === "turn-paused")) {
+      return index === totalGroupCount() - 1 && props.command.failureCategory === "quota-expired" ? "failed" : "quota-paused";
     }
     return index === totalGroupCount() - 1
       ? props.command.status
       : "completed";
   };
   return (
-    <Index each={props.groups}>
-      {(group, index) => {
-        const groupIndex = () => startIndex() + index;
+    <For each={groupKeys()}>
+      {(groupKey, index) => {
+        const group = createMemo<TimelineEventGroup>(() => {
+          const current = groupsByKey().get(groupKey);
+          if (current === undefined) {
+            throw new Error("timeline-group-key-unavailable");
+          }
+          return current;
+        });
+        const groupIndex = () => startIndex() + index();
         const status = () => groupStatus(group(), groupIndex());
+        const turnLabel = () =>
+          !group().guidance &&
+          (status() === "failed" || status() === "recovery-required") &&
+          !group().events.some((event) => event.kind === "turn-started")
+            ? transcriptCopy.turnNotStarted
+            : group().guidance
+              ? guidanceTurnOrdinalCopy(group().turnOrdinal)
+              : turnOrdinalCopy(group().turnOrdinal);
         const active = () =>
           (status() === "accepted" || status() === "in-flight") &&
           !group().events.some(
             (event) =>
               event.kind === "turn-completed" ||
               event.kind === "turn-interrupted" ||
+              event.kind === "turn-paused" ||
               event.kind === "failed",
           );
         return (
           <section
             class="timeline-group"
             data-transcript-group-index={groupIndex()}
+            data-transcript-group-key={groupKey}
           >
             <Show
               when={group().events.some(
@@ -1205,15 +1441,21 @@ const TimelineTurns: Component<{
                 </span>
               </div>            </Show>
             <Show when={group().userMessage}>
-              {(userMessage) => <UserMessageTurn text={userMessage().text} />}
+              {(userMessage) => (
+                <UserMessageTurn
+                  text={userMessage().text}
+                  searchQuery={props.searchQuery ?? ""}
+                />
+              )}
             </Show>
             <div class="rule rule-end">
-              <span class="rule-label">{turnOrdinalCopy(groupIndex() + 1)}</span>
+              <span class="rule-label">{turnLabel()}</span>
             </div>
             <TimelineTurn
               command={props.command}
+              searchQuery={props.searchQuery ?? ""}
               profile={group().profile}
-              turnKey={`${props.command.key}:${groupIndex()}`}
+              turnKey={`${props.command.key}:${groupKey}`}
               events={group().events}
               status={status()}
               interrupted={group().events.some(
@@ -1225,12 +1467,13 @@ const TimelineTurns: Component<{
           </section>
         );
       }}
-    </Index>
+    </For>
   );
 };
 
 const TimelineTurn: Component<{
   readonly command: WorkbenchCommandView;
+  readonly searchQuery?: string;
   readonly profile?: WorkbenchSessionProfileProjection;
   readonly turnKey: string;
   readonly events: readonly RuntimeTimelineEvent[];
@@ -1247,6 +1490,12 @@ const TimelineTurn: Component<{
   });
   const disclosure = () =>
     props.disclosureStore.state(props.turnKey, props.active);
+  const eventLogRevealedBySearch = () =>
+    (props.searchQuery?.trim().length ?? 0) > 0 &&
+    props.events.some((event) =>
+      transcriptEventMetadataMatchesQuery(event, props.searchQuery ?? ""),
+    );
+  const eventLogOpen = () => disclosure().open || eventLogRevealedBySearch();
   const messages = () =>
     props.events.filter(
       (
@@ -1255,6 +1504,42 @@ const TimelineTurn: Component<{
         event.kind === "agent-message",
     );
   const streaming = () => props.active && messages().length > 0;
+  const content = () => {
+    const entries: Array<{ kind: "agent-message" | "reasoning"; text: string }> = [];
+    for (const event of props.events) {
+      if (event.kind !== "agent-message" && event.kind !== "reasoning") continue;
+      const last = entries.at(-1);
+      if (event.kind === "reasoning" && last?.kind === "reasoning") last.text += event.text;
+      else entries.push({ kind: event.kind, text: event.text });
+    }
+    return entries;
+  };
+  // Issue #6 case 4: while a turn is alive, the newest progress note names
+  // what the runtime is doing right now, so a thinking or retrying turn no
+  // longer reads as a dead one. Ended turns keep their plain states.
+  const latestProgress = (): string | null => {
+    if (!props.active) return null;
+    let latest: ProgressTimelineEvent | undefined;
+    for (const event of props.events) {
+      if (event.kind === "progress") latest = event;
+    }
+    return latest === undefined
+      ? null
+      : progressActivityDetail(latest);
+  };
+  const fileChangeSummaries = (): readonly WorkbenchFileChangeSummary[] => {
+    const summaries: WorkbenchFileChangeSummary[] = [];
+    for (const event of props.events) {
+      if (
+        event.kind === "progress" &&
+        event.tool?.type === "fileChange" &&
+        event.tool.fileChanges !== undefined
+      ) {
+        summaries.push(event.tool.fileChanges);
+      }
+    }
+    return summaries;
+  };
   return (
     <article class="turn">
       <header class="turn-head">
@@ -1275,7 +1560,7 @@ const TimelineTurn: Component<{
             "turn-model " + runtimeClass(runtimeFamily())
           }
         >
-          {turnEffectiveProfileLabel(props.profile, "model")}
+          {turnEffectiveProfileLabel(props.profile, "model", props.active)}
         </span>
         <span
           class={
@@ -1283,7 +1568,11 @@ const TimelineTurn: Component<{
           }
         >
           {prefixedProfileValueCopy(
-            turnEffectiveProfileLabel(props.profile, "workIntensity"),
+            turnEffectiveProfileLabel(
+              props.profile,
+              "workIntensity",
+              props.active,
+            ),
           )}
         </span>
         <span
@@ -1304,57 +1593,99 @@ const TimelineTurn: Component<{
         <button
           type="button"
           class="disclosure"
-          aria-expanded={disclosure().open}
+          aria-expanded={eventLogOpen()}
           aria-controls={eventLogId}
           onClick={() =>
             props.disclosureStore.toggle(props.turnKey, props.active)
           }
         >
           {eventsDisclosureCopy(props.events.length)}{" "}
-          <span aria-hidden="true">{disclosure().open ? "▴" : "▾"}</span>
+          <span aria-hidden="true">{eventLogOpen() ? "▴" : "▾"}</span>
         </button>
       </header>
       <div class="turn-body prose">
         <Show
-          when={messages().length > 0}
+          when={content().length > 0}
           fallback={
-            <p>
+            <p aria-live="polite">
               {props.active
                 ? transcriptCopy.runtimeWorking
                 : props.interrupted
                   ? transcriptCopy.interruptedBeforeMessage
                   : transcriptCopy.noAgentMessageRecorded}
-              <Show when={props.active}>
-                <span class="caret" aria-hidden="true" />
-              </Show>
             </p>
           }
         >
-          <For each={messages()}>
-            {(message, index) => (
-              <AgentMessageText
-                text={message.text}
-                streaming={streaming() && index() === messages().length - 1}
-              />
+          <Index each={content()}>
+            {(entry, index) => (
+              <Show when={entry().kind === "reasoning"} fallback={
+                <AgentMessageText
+                  text={entry().text}
+                  streaming={streaming() && index === content().length - 1}
+                  searchQuery={props.searchQuery ?? ""}
+                />
+              }>
+                <details class="turn-reasoning" open>
+                  <summary>{transcriptCopy.reasoning}</summary>
+                  <p style={{ "white-space": "pre-wrap" }}>
+                    <SearchHighlightedText
+                      text={entry().text}
+                      query={props.searchQuery ?? ""}
+                    />
+                  </p>
+                </details>
+              </Show>
             )}
-          </For>
+          </Index>
+        </Show>
+        <For each={fileChangeSummaries()}>
+          {(summary) => (
+            <p class="turn-file-changes">
+              {fileChangeSummaryDetail(summary)}
+            </p>
+          )}
+        </For>
+        <Show when={props.active}>
+          <p class="turn-progress" aria-live="polite">
+            {latestProgress() ?? (content().length > 0 ? transcriptCopy.runtimeWorking : "")}
+            <span class="caret" aria-hidden="true" />
+          </p>
         </Show>
       </div>
       <ol
         id={eventLogId}
         class="event-log"
         aria-label={transcriptCopy.eventLogAria}
-        hidden={!disclosure().open}
+        hidden={!eventLogOpen()}
       >
-        <For each={props.events}>
-          {(event, index) => (
-            <li>
-              <span>{String(index() + 1).padStart(2, "0")}</span>
-              <span class="ev-kind">{dynamicCopy.timelineToken[event.kind]}</span>
-              <span>{rawTimelineEventDetail(event, streaming())}</span>
-            </li>
-          )}
-        </For>
+        <Show when={eventLogOpen()}>
+          <For each={props.events}>
+            {(event, index) => (
+              <li>
+                <span>{String(index() + 1).padStart(2, "0")}</span>
+                <span class="ev-kind">
+                  <Show
+                    when={transcriptEventMetadataMatchesQuery(
+                      event,
+                      props.searchQuery ?? "",
+                    )}
+                    fallback={dynamicCopy.timelineToken[event.kind]}
+                  >
+                    <mark data-transcript-search-match>
+                      {dynamicCopy.timelineToken[event.kind]}
+                    </mark>
+                  </Show>
+                </span>
+                <span>
+                  <SearchHighlightedText
+                    text={rawTimelineEventDetail(event, streaming())}
+                    query={props.searchQuery ?? ""}
+                  />
+                </span>
+              </li>
+            )}
+          </For>
+        </Show>
       </ol>
     </article>
   );
@@ -1374,9 +1705,19 @@ function turnRuntimeFamily(
   return recordedRequestedTurnProfile(profile)?.runtimeFamilyLabel ?? fallbackRuntime;
 }
 
+/**
+ * Issue #6 case 2. The effective projection's `unknown` arm carries no
+ * per-field data, so it can only ever describe both nouns at once, and what it
+ * describes is the *observation*: the coordinator records it for a turn that
+ * ended before the Runtime reported an effective profile, and the live view
+ * supplies it for every turn that has not ended yet. Neither state makes the
+ * selection unknown -- the requested value is printed in the same line -- so
+ * the label says which of the two it is instead of asserting a lost model.
+ */
 function turnEffectiveProfileLabel(
   profile: WorkbenchSessionProfileProjection | undefined,
   field: "model" | "workIntensity",
+  observationPending: boolean,
 ): string {
   const noun = field === "model" ? composerControlCopy.model : composerControlCopy.workIntensity;
   const requested = recordedRequestedTurnProfile(profile);
@@ -1387,9 +1728,14 @@ function turnEffectiveProfileLabel(
     return effectiveNotRecordedCopy(noun);
   }
   if (effective.kind === "unknown") {
+    if (observationPending) {
+      return requestedLabel === undefined
+        ? effectivePendingObservationCopy(noun)
+        : effectivePendingObservationRequestedCopy(noun, requestedLabel);
+    }
     return requestedLabel === undefined
-      ? effectiveUnknownCopy(noun)
-      : effectiveUnknownRequestedCopy(noun, requestedLabel);
+      ? effectiveUnobservedCopy(noun)
+      : effectiveUnobservedRequestedCopy(noun, requestedLabel);
   }
   const value = effective[field];
   return value.comparison === "matches-requested"
@@ -1417,6 +1763,8 @@ export function turnStateClass(status: WorkbenchCommandView["status"]): string {
       return "is-running";
     case "completed":
       return "is-done";
+    case "quota-paused":
+      return "is-recovery";
     case "failed":
       return "is-failed";
     case "recovery-required":

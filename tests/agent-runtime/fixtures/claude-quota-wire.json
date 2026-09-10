@@ -1,0 +1,87 @@
+{
+  "source": ".scratch/unified-ai-workbench/evidence/w9-context-accounting/glm-bare.json; .scratch/unified-ai-workbench/evidence/w9-context-accounting/claude-deferred.json",
+  "note": "Projected existing 2026-09-08 Claude 2.1.263 captures; identities replaced, unconsumed fields omitted, and the four rate-limit window numbers replaced with synthetic values -- the capture kept the account's real utilisation and reset times, which are not wire shape and have no business shipping. No new provider call. The allowed rate event comes from a DIFFERENT successful Claude turn, not the GLM turn.",
+  "usageCaptureModels": {
+    "claude-web": "claude-haiku-4-5-20251001",
+    "claude-web-allowed": "claude-haiku-4-5-20251001",
+    "claude-deferred": "claude-sonnet-5",
+    "claude-deferred-resume": "claude-sonnet-5"
+  },
+  "glmQuotaFrames": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "session_id": "captured-session",
+      "model": "glm-5.3",
+      "permissionMode": "default",
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "claude_code_version": "2.1.263"
+    },
+    {
+      "type": "assistant",
+      "session_id": "captured-session",
+      "parent_tool_use_id": null,
+      "error": "rate_limit",
+      "is_api_error_message": true,
+      "message": {
+        "role": "assistant",
+        "model": "<synthetic>",
+        "content": [
+          {
+            "type": "text",
+            "text": "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-11 10:33:17][redacted-request-id]"
+          }
+        ],
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0
+        }
+      }
+    },
+    {
+      "type": "result",
+      "session_id": "captured-session",
+      "subtype": "success",
+      "is_error": true,
+      "terminal_reason": "api_error",
+      "api_error_status": 429,
+      "result": "API Error: Request rejected (429) · [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-09-11 10:33:17][redacted-request-id]",
+      "num_turns": 1,
+      "queued_turn_count": 0,
+      "usage": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      }
+    }
+  ],
+  "allowedRateEvent": {
+    "type": "rate_limit_event",
+    "session_id": "captured-session",
+    "rate_limit_info": {
+      "status": "allowed",
+      "resetsAt": 1800000000,
+      "rateLimitType": "five_hour",
+      "overageStatus": "rejected",
+      "overageDisabledReason": "org_level_disabled",
+      "isUsingOverage": false,
+      "unifiedWindows": {
+        "five_hour": {
+          "utilization": 0.5,
+          "resetsAt": 1800000000
+        },
+        "seven_day": {
+          "utilization": 0.25,
+          "resetsAt": 1800432000
+        }
+      }
+    }
+  }
+}

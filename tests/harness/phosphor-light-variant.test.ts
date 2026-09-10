@@ -53,15 +53,17 @@ const lightProfiles: Readonly<Record<Tier, Readonly<Record<Phosphor, Profile>>>>
     }),
   });
 
-let measurement: Promise<readonly MeasuredSurface[]> | undefined;
+const measurements: Partial<Record<Tone, Promise<readonly MeasuredSurface[]>>> = {};
 let contrastMeasurement: Promise<readonly MeasuredSurface[]> | undefined;
 
-function measurePhosphorMatrix(): Promise<readonly MeasuredSurface[]> {
-  measurement ??= (async () => {
+function measurePhosphorTone(tone: Tone): Promise<readonly MeasuredSurface[]> {
+  measurements[tone] ??= (async () => {
     const server = await startSurfaceServer();
     try {
       const surfaces: MeasuredSurface[] = [];
-      for (const request of PHOSPHOR_SURFACES) {
+      for (const request of PHOSPHOR_SURFACES.filter((candidate) =>
+        candidate.surfaceId.includes(`-${tone}-`),
+      )) {
         surfaces.push(await measureSurface(server, request));
       }
       return surfaces;
@@ -69,12 +71,12 @@ function measurePhosphorMatrix(): Promise<readonly MeasuredSurface[]> {
       await server.close();
     }
   })();
-  return measurement;
+  return measurements[tone];
 }
 
 function measureLightContrastMatrix(): Promise<readonly MeasuredSurface[]> {
   contrastMeasurement ??= (async () => {
-    await measurePhosphorMatrix();
+    await measurePhosphorTone("light");
     const server = await startSurfaceServer();
     try {
       const surfaces: MeasuredSurface[] = [];
@@ -97,33 +99,34 @@ function measureLightContrastMatrix(): Promise<readonly MeasuredSurface[]> {
 }
 
 after(async () => {
-  if (measurement !== undefined) await measurement.catch(() => undefined);
+  for (const measurement of Object.values(measurements)) {
+    await measurement.catch(() => undefined);
+  }
   if (contrastMeasurement !== undefined) {
     await contrastMeasurement.catch(() => undefined);
   }
 });
 
-test("F177 reaches every A/B/C × tone × normal/fullscreen × Green/Amber product state", async () => {
-  const surfaces = await measurePhosphorMatrix();
-  assert.equal(surfaces.length, 24);
-  assert.deepEqual(
-    surfaces.map((surface) => ({ id: surface.surfaceId, root: surface.root })),
-    (["a", "b", "c"] as const).flatMap((tier) =>
-      (["dark", "light"] as const).flatMap((tone) =>
+for (const tone of ["dark", "light"] as const) {
+  test(`F177 reaches every A/B/C × ${tone} × normal/fullscreen × Green/Amber product state`, async () => {
+    const surfaces = await measurePhosphorTone(tone);
+    assert.equal(PHOSPHOR_SURFACES.length, 24);
+    assert.equal(surfaces.length, 12);
+    assert.deepEqual(
+      surfaces.map((surface) => ({ id: surface.surfaceId, root: surface.root })),
+      (["a", "b", "c"] as const).flatMap((tier) =>
         (["normal", "fullscreen"] as const).flatMap((crt) =>
           (["green", "amber"] as const).map((phosphor) =>
             root({ tier, tone, crt, phosphor }),
           ),
         ),
       ),
-    ),
-  );
-});
+    );
+  });
+}
 
 test("the praised dark Phosphor computed and painted render is invariant across A/B/C", async () => {
-  const surfaces = (await measurePhosphorMatrix()).filter((surface) =>
-    surface.surfaceId.includes("-dark-"),
-  );
+  const surfaces = await measurePhosphorTone("dark");
   for (const surface of surfaces) {
     const identity = parseIdentity(surface.surfaceId);
     assert.deepEqual(
@@ -149,9 +152,7 @@ test("the praised dark Phosphor computed and painted render is invariant across 
 });
 
 test("A/B/C light tiers expose their recorded computed ink, glow, and compositor-painted glyphs", async () => {
-  const surfaces = (await measurePhosphorMatrix()).filter((surface) =>
-    surface.surfaceId.includes("-light-"),
-  );
+  const surfaces = await measurePhosphorTone("light");
   assert.equal(surfaces.length, 12);
   for (const surface of surfaces) {
     const identity = parseIdentity(surface.surfaceId);

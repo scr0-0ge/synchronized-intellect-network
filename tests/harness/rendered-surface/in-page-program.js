@@ -69,6 +69,18 @@ globalThis.__uawMeasure = {
         phosphorTier: document.documentElement.getAttribute("data-phosphor-tier"),
         material: document.documentElement.getAttribute("data-material"),
       },
+      /* Separate from `root` on purpose: `root` is the product's own `data-*`
+         attributes, and a test is entitled to compare that set whole. What the
+         OS asked for is not one of them. It is read back rather than assumed
+         because the transparency preference is emulated from outside the page,
+         so a measurement of that configuration has to carry proof it engaged. */
+      mediaEnvironment: {
+        reducedTransparency: window.matchMedia(
+          "(prefers-reduced-transparency: reduce)",
+        ).matches
+          ? "reduce"
+          : "no-preference",
+      },
       /* The `F51`/`F54`/`F78` question, read directly rather than inferred from
          a selector: with native material signalled on, does the acrylic skin's
          own fallback backdrop still paint? `content: "none"` means the
@@ -83,6 +95,7 @@ globalThis.__uawMeasure = {
       texts,
       grounds: describeGrounds(),
       extents: describeExtents(),
+      clippedControls: describeClippedControls(),
       paintedEdges: describePaintedEdges(),
       seams: describeSeams(),
       verticalSeams: describeVerticalSeams(),
@@ -329,6 +342,98 @@ function describeExtents() {
     });
   }
   return extents;
+}
+
+/**
+ * Interactive controls that an ancestor has clipped out of reach.
+ *
+ * Why this exists as its own observation rather than as more `extents`: an
+ * extent is a named box compared against another named box, and a grid child
+ * measured against its own grid can never be reported as overflowing, because
+ * a stretched track child is bounded by the track by construction (w61 asserted
+ * exactly that shape and was therefore green at every width). The thing a
+ * person actually loses is a CONTROL, several levels below any named box, so
+ * this walks controls upward to whatever clips them instead of walking
+ * containers downward one level.
+ *
+ * "Out of reach" and "overflowing" are not the same, and the difference is the
+ * whole point. Content that overflows a scroll container is still reachable —
+ * the person scrolls. Content that overflows an `overflow: hidden` / `clip`
+ * ancestor is gone, with no gesture that recovers it. So the search stops at
+ * the FIRST ancestor that establishes either behaviour: scrollable means
+ * reachable and nothing is reported; clipping means the hidden width is.
+ *
+ * Comparison is against the clipper's PADDING box, because that is the edge
+ * `overflow` actually cuts at — a border-box comparison would under-report by
+ * the border width and let a one-pixel loss through.
+ *
+ * This reports numbers only. Whether any loss at all is acceptable is the
+ * consuming test's decision, per this file's contract.
+ */
+function describeClippedControls() {
+  const clipped = [];
+  const signatures = new Map();
+  const controls = document.querySelectorAll(
+    'button, a[href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+  );
+  for (const control of controls) {
+    const style = getComputedStyle(control);
+    if (style.display === "none" || style.visibility === "hidden") continue;
+    /* A subtree the product has declared not-presented cannot be "lost": the
+       Stage sets aria-hidden="true" on itself whenever Settings is the live
+       surface (stage.tsx), and its controls are then covered on purpose.
+       Honouring that declaration here — rather than letting each test carve
+       the same case out by selector — keeps the exclusion in one place, tied
+       to the product's own statement about what it is showing. Measured: with
+       Settings open at 360px the covered composer reports a clipped button;
+       on the Project surface at every width from 360 to 1280 it reports none. */
+    if (control.closest('[aria-hidden="true"], [inert]') !== null) continue;
+    const rect = control.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+
+    let node = control.parentElement;
+    while (node !== null) {
+      const nodeStyle = getComputedStyle(node);
+      const overflowX = nodeStyle.overflowX;
+      const overflowY = nodeStyle.overflowY;
+      if (overflowX === "auto" || overflowX === "scroll") break;
+      if (overflowX === "hidden" || overflowX === "clip") {
+        const box = node.getBoundingClientRect();
+        const left =
+          box.left + Number.parseFloat(nodeStyle.borderLeftWidth || "0");
+        const right =
+          box.right - Number.parseFloat(nodeStyle.borderRightWidth || "0");
+        const hiddenLeft = Math.max(0, left - rect.left);
+        const hiddenRight = Math.max(0, rect.right - right);
+        const hidden = hiddenLeft + hiddenRight;
+        if (hidden > 0.5) {
+          clipped.push({
+            signature: identify(control, signatures),
+            label: (control.getAttribute("aria-label") ?? control.textContent ?? "")
+              .trim()
+              .slice(0, 60),
+            clipper: signatureOf(node),
+            clipperOverflowX: overflowX,
+            clipperOverflowY: overflowY,
+            /* Overflowing content EXISTS here — but this ancestor clips, so
+               there is no gesture that brings it back. Named for what it is,
+               not "scrollable", which would read as though it were reachable. */
+            clipperHasOverflowContent: node.scrollWidth - node.clientWidth > 1,
+            rect: boxOf(rect),
+            clipperRect: boxOf(box),
+            hiddenLeft: round(hiddenLeft),
+            hiddenRight: round(hiddenRight),
+            hiddenTotal: round(hidden),
+            /* Nothing of the control remains inside the clipper. */
+            fullyHidden: rect.left >= right || rect.right <= left,
+          });
+        }
+        break;
+      }
+      node = node.parentElement;
+    }
+  }
+  return clipped;
 }
 
 /**

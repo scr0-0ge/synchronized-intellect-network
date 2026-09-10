@@ -16,6 +16,10 @@ import type {
   WorkbenchClaudePermissionHandling,
   WorkbenchDirectSessionProfileLoadRequest,
   WorkbenchAppearancePreference,
+  WorkbenchEndpointCatalogFreshnessReport,
+  WorkbenchEndpointKeyEndpointId,
+  WorkbenchFamilyEndpointPreference,
+  WorkbenchFamilyEndpointPreferences,
   WorkbenchHostedProjectResult,
   WorkbenchHostedProjectView,
   WorkbenchProjectHistoryDiscoveryResult,
@@ -27,6 +31,8 @@ import type {
 } from "../contract.ts";
 import type { WorkbenchWindowRendererBridge } from "../window-control-bridge.ts";
 import type { HistoryRecoverySnapshotResult } from "../history-recovery-contract.ts";
+import { notificationActivationCommandKey } from "../notification-bridge.ts";
+import type { WorkbenchRendererTransferBridge } from "../preload-bridge.ts";
 import {
   defaultWorkbenchAppearancePreference,
   isValidWorkbenchDirectInput,
@@ -37,7 +43,9 @@ import {
   type WorkbenchConfigurableRuntime,
   type WorkbenchRuntimeExecutablePaths,
   publicCreateProjectResult,
+  publicEndpointKeyUnavailable,
   publicInterruptUnavailable,
+  publicEndpointPreferenceUnavailable,
   publicSteerUnavailable,
   publicPreferenceUnavailable,
   publicProjectOpenCancelled,
@@ -45,6 +53,7 @@ import {
   publicProjectOpenUnavailable,
   publicProjectSwitchUnavailable,
   publicUnavailableSubmission,
+  WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS,
 } from "../contract.ts";
 import {
   beginWorkbenchAppearancePreferenceChange,
@@ -61,6 +70,28 @@ import {
   initialWorkbenchClaudePermissionHandlingPersistenceState,
   type WorkbenchClaudePermissionHandlingPersistencePhase,
 } from "./claude-permission-handling-state.ts";
+import {
+  beginWorkbenchEndpointPreferenceChange,
+  completeWorkbenchEndpointPreferenceHydration,
+  completeWorkbenchEndpointPreferenceSave,
+  initialWorkbenchEndpointPreferencePersistenceState,
+} from "./endpoint-preference-state.ts";
+import {
+  beginWorkbenchEndpointKeyProbe,
+  beginWorkbenchEndpointKeyRemove,
+  beginWorkbenchEndpointKeyReveal,
+  beginWorkbenchEndpointKeySave,
+  changeWorkbenchEndpointKeyDraft,
+  completeWorkbenchEndpointKeyHydration,
+  completeWorkbenchEndpointKeyProbe,
+  completeWorkbenchEndpointKeyRemove,
+  completeWorkbenchEndpointKeyReveal,
+  completeWorkbenchEndpointKeySave,
+  hideWorkbenchEndpointKeyReveal,
+  initialWorkbenchEndpointKeyState,
+  type WorkbenchEndpointKeyPanel,
+  type WorkbenchEndpointKeyState,
+} from "./endpoint-key-state.ts";
 import {
   initialWorkbenchComposerHistoryState,
   navigateComposerHistory,
@@ -93,6 +124,7 @@ import {
   completeProjectSelection,
   directInputMode,
   enterNewAgentSessionMode,
+  hasHostedProjectView,
   initialRendererState,
   isNewAgentSessionShortcut,
   isInterruptShortcut,
@@ -121,6 +153,7 @@ import {
   type WorkbenchRendererState,
 } from "./view-model.ts";
 import {
+  SUBSCRIPTION_AUTHENTICATION_ENDPOINT_IDS,
   beginSettingsSubscriptionAuthenticationInspection,
   beginSettingsSubscriptionAuthenticationAction,
   beginSettingsSubscriptionAuthenticationPreparation,
@@ -145,9 +178,16 @@ import {
 } from "./session-metadata-presentation.ts";
 import { historyRecoveryNeedsAttention } from "./history-recovery-settings.tsx";
 import { isTranscriptSearchShortcut } from "./transcript-search.ts";
+import { observeProjectThroughStartup } from "./startup-project-observation.ts";
+import { observeWorkbenchProjectTransfers } from "./project-transfer.ts";
 
 import { WorkbenchRendererBridgeContext } from "./view-types.ts";
-import { LoadingState, FailureState } from "./states.tsx";
+import {
+  FailureState,
+  LoadingState,
+  NoProjectsState,
+  NoProjectsTitlebar,
+} from "./states.tsx";
 import { RemovalConfirmationDialog, ProjectHistoriesDialog } from "./dialogs.tsx";
 import { nextProjectScopeEpoch, ProjectRail } from "./project-rail.tsx";
 import { WorkbenchStage } from "./stage.tsx";
@@ -156,6 +196,7 @@ import { SettingsScreen } from "./settings.tsx";
 import { Titlebar, WorkbenchStatusbar } from "./chrome.tsx";
 import { shellCopy } from "./copy/shell-copy.ts";
 import { dynamicCopy } from "./copy/dynamic-copy.ts";
+import { notificationActivationCopy } from "./copy/turn-notification-copy.ts";
 import {
   presentationText,
   workbenchLocalizedText,
@@ -166,12 +207,36 @@ const catalogDefaultProfileLoadRequest = Object.freeze({
   kind: "catalog-default" as const,
 });
 
-const subscriptionAuthenticationEndpointIds = Object.freeze([
-  "codex-desktop",
-  "claude-code-desktop",
-] as const);
+// Subscription-authentication participants; static-key endpoints (GLM) are
+// deliberately absent — single source of truth in the settings view model.
+const subscriptionAuthenticationEndpointIds =
+  SUBSCRIPTION_AUTHENTICATION_ENDPOINT_IDS;
 
 const initialWorkbenchAppearance = defaultWorkbenchAppearancePreference;
+
+/**
+ * Issue #6 comment 3.2: a project open/switch/create whose main-process
+ * promise never settles was observed wedging the whole rail ("Opening 2…"
+ * forever, every other action gated) until an app restart. The deadline
+ * resolves to the same honest unavailable result a rejection produces, so
+ * the rail unblocks and says why; the acquisition state machines' phase
+ * guards ignore the real result if it eventually lands.
+ */
+const PROJECT_BRIDGE_DEADLINE_MILLISECONDS = 120_000;
+
+function withProjectBridgeDeadline<T>(
+  bridgeCall: Promise<T>,
+  deadlineResult: () => T,
+): Promise<T> {
+  return Promise.race([
+    bridgeCall,
+    new Promise<T>((resolve) => {
+      setTimeout(() => {
+        resolve(deadlineResult());
+      }, PROJECT_BRIDGE_DEADLINE_MILLISECONDS);
+    }),
+  ]);
+}
 
 function applyWorkbenchAppearance(
   appearance: WorkbenchAppearancePreference,
@@ -197,7 +262,7 @@ function applyWorkbenchAppearance(
 
 export function mountWorkbench(
   root: HTMLElement,
-  bridge: WorkbenchRendererBridge,
+  bridge: WorkbenchRendererTransferBridge,
   windowBridge: WorkbenchWindowRendererBridge,
 ): () => void {
   applyWorkbenchAppearance(initialWorkbenchAppearance);
@@ -212,7 +277,7 @@ export function mountWorkbench(
 }
 
 const WorkbenchApp: Component<{
-  readonly bridge: WorkbenchRendererBridge;
+  readonly bridge: WorkbenchRendererTransferBridge;
   readonly windowBridge: WorkbenchWindowRendererBridge;
 }> = (props) => {
   const [state, setState] = createSignal(initialRendererState);
@@ -220,12 +285,55 @@ const WorkbenchApp: Component<{
     initialWorkbenchComposerHistoryState,
   );
   const [projectScopeEpoch, setProjectScopeEpoch] = createSignal(0);
+  const rendererInstanceKey = `renderer-instance:${crypto.randomUUID()}`;
+  const differentProjectNotificationFeedback: WorkbenchRemovalFeedback =
+    Object.freeze({
+      tone: "status",
+      message: workbenchLocalizedText(
+        "notification.activation-different-project",
+        () => notificationActivationCopy.differentProject,
+      ),
+    });
+  const unavailableInCurrentProjectNotificationFeedback: WorkbenchRemovalFeedback =
+    Object.freeze({
+      tone: "status",
+      message: workbenchLocalizedText(
+        "notification.activation-unavailable-in-current-project",
+        () => notificationActivationCopy.unavailableInCurrentProject,
+      ),
+    });
+  const archivedNotificationFeedback: WorkbenchRemovalFeedback = Object.freeze({
+    tone: "status",
+    message: workbenchLocalizedText(
+      "notification.activation-archived",
+      () => notificationActivationCopy.archived,
+    ),
+  });
   const [surface, setSurface] = createSignal<WorkbenchSurface>("project");
   const [appearancePersistence, setAppearancePersistence] = createSignal(
     initialWorkbenchAppearancePersistenceState,
   );
   const [claudePermissionHandlingPersistence, setClaudePermissionHandlingPersistence] =
     createSignal(initialWorkbenchClaudePermissionHandlingPersistenceState);
+  const [endpointPreferencePersistence, setEndpointPreferencePersistence] =
+    createSignal(initialWorkbenchEndpointPreferencePersistenceState);
+  // One independent endpoint-key state machine per static-key endpoint (GLM,
+  // Kimi, DeepSeek share the WO16 Part 1 parameterized machine).
+  const [endpointKeyStates, setEndpointKeyStates] = createSignal<
+    Record<WorkbenchEndpointKeyEndpointId, WorkbenchEndpointKeyState>
+  >(
+    Object.freeze(
+      Object.fromEntries(
+        WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS.map((endpointId) => [
+          endpointId,
+          initialWorkbenchEndpointKeyState,
+        ]),
+      ),
+    ) as Record<
+      WorkbenchEndpointKeyEndpointId,
+      WorkbenchEndpointKeyState
+    >,
+  );
   const [runtimeExecutables, setRuntimeExecutables] =
     createSignal<WorkbenchRuntimeExecutablePaths>(
       defaultWorkbenchRuntimeExecutablePaths,
@@ -239,6 +347,17 @@ const WorkbenchApp: Component<{
     createSignal<SettingsSubscriptionAuthenticationState>(
       initialSettingsSubscriptionAuthenticationState(),
     );
+  // Catalog freshness (ticket 14): hydrated once on mount, refreshed by the
+  // Settings manual button. Failure phases degrade to the known catalog.
+  const [endpointCatalogFreshness, setEndpointCatalogFreshness] = createSignal<
+    | { readonly phase: "hydrating" }
+    | {
+        readonly phase: "ready";
+        readonly reports: readonly WorkbenchEndpointCatalogFreshnessReport[];
+        readonly refreshing: boolean;
+      }
+    | { readonly phase: "unavailable" }
+  >({ phase: "hydrating" });
   const [removalConfirmation, setRemovalConfirmation] =
     createSignal<WorkbenchRemovalConfirmation | null>(null);
   const [removalPending, setRemovalPending] = createSignal(false);
@@ -263,12 +382,21 @@ const WorkbenchApp: Component<{
   let projectHistoriesGeneration = 0;
   let profileLoadGeneration = 0;
   let historyRecoveryLoadGeneration = 0;
+  // Keyed by every registered endpoint because the refresh entry points take
+  // one; only subscription-authentication participants ever advance a
+  // generation, so the static-key row stays at zero for the app's lifetime.
   const subscriptionAuthenticationRefreshGenerations: Record<
     WorkbenchRuntimeEndpointId,
     number
   > = {
     "codex-desktop": 0,
     "claude-code-desktop": 0,
+    "glm-coding-plan": 0,
+    "kimi-code": 0,
+    "deepseek-api": 0,
+    "kimi-platform": 0,
+    "claude-api": 0,
+    "codex-api": 0,
   };
   let submissionPending = false;
   let trackedTurnStatuses = new Map<string, WorkbenchCommandView["status"]>();
@@ -367,14 +495,14 @@ const WorkbenchApp: Component<{
         if (
           current.selectedKey !== selectedKey ||
           (request.kind === "replacement-session" &&
-            (!current.result?.ok ||
+            (!hasHostedProjectView(current.result) ||
               current.result.view.observation.cursor !==
                 request.sourceSnapshotCursor ||
               !current.result.view.commands.some(
                 (command) => command.key === request.sourceSelectionKey,
               ))) ||
           (request.kind === "continuation-session" &&
-            (!current.result?.ok ||
+            (!hasHostedProjectView(current.result) ||
               current.result.view.commands.find(
                 (command) => command.key === current.selectedKey,
               )?.session?.selectionKey !== request.selectionKey))
@@ -414,6 +542,9 @@ const WorkbenchApp: Component<{
     for (const targetEndpointId of targets) {
       const target = subscriptionAuthentication()[targetEndpointId];
       if (
+        // A non-participant endpoint (GLM Coding Plan) has no row at all; its
+        // authentication state is presented through endpoint discovery.
+        target === undefined ||
         target.inspectionPending ||
         target.preparationPending !== null ||
         (!allowPendingAction && target.pendingAction !== null)
@@ -527,6 +658,8 @@ const WorkbenchApp: Component<{
   ): void => {
     const current = subscriptionAuthentication()[endpointId];
     if (
+      // Static-key endpoints carry no subscription binding to act on.
+      current === undefined ||
       current.inspectionPending ||
       current.preparationPending !== null ||
       current.pendingAction !== null
@@ -610,7 +743,7 @@ const WorkbenchApp: Component<{
     result: WorkbenchHostedProjectResult,
     resetTracking: boolean,
   ): void => {
-    if (!result.ok) return;
+    if (!result.ok || !("view" in result)) return;
     if (resetTracking) {
       trackedTurnStatuses = new Map(
         result.view.commands.map((command) => [command.key, command.status]),
@@ -632,27 +765,24 @@ const WorkbenchApp: Component<{
     }
     for (const notice of progression.notices) {
       void notifyTurnCompleted(
-        Object.freeze({ title: notice.title, body: notice.body }),
+        Object.freeze({
+          title: notice.title,
+          body: notice.body,
+          commandKey: notice.commandKey,
+          projectScopeEpoch: projectScopeEpoch(),
+          rendererInstanceKey,
+        }),
       ).catch(() => undefined);
     }
   };
 
-  onMount(() => {
-    const dispose = props.bridge.observeProject((result) => {
-      const current = state();
-      const projectScopeMayBeChanging =
-        current.projectSwitch.phase === "pending" ||
-        current.projectOpen.phase === "pending";
-      applyProjectStateTransition((current) =>
-        replaceProjectResult(current, result),
-      );
-      announceFinishedTurns(result, projectScopeMayBeChanging);
-    });
-    onCleanup(dispose);
-  });
-  onMount(refreshHistoryRecovery);
-  onMount(() => {
-    const capturedIntentRevision = appearancePersistence().intentRevision;
+  let startupHydrationStarted = false;
+  const hydrateAfterProjectIpcIsReady = (): void => {
+    if (startupHydrationStarted) return;
+    startupHydrationStarted = true;
+    refreshHistoryRecovery();
+    const capturedAppearanceIntentRevision =
+      appearancePersistence().intentRevision;
     void props.bridge
       .loadAppearancePreference()
       .catch(() => publicAppearancePreferenceUnavailable())
@@ -661,14 +791,12 @@ const WorkbenchApp: Component<{
         setAppearancePersistence((current) =>
           completeWorkbenchAppearancePreferenceHydration(
             current,
-            capturedIntentRevision,
+            capturedAppearanceIntentRevision,
             result,
           ),
         );
       });
-  });
-  onMount(() => {
-    const capturedIntentRevision =
+    const capturedClaudePermissionIntentRevision =
       claudePermissionHandlingPersistence().intentRevision;
     void props.bridge
       .loadClaudePermissionHandling()
@@ -678,13 +806,61 @@ const WorkbenchApp: Component<{
         setClaudePermissionHandlingPersistence((current) =>
           completeWorkbenchClaudePermissionHandlingHydration(
             current,
-            capturedIntentRevision,
+            capturedClaudePermissionIntentRevision,
             result,
           ),
         );
       });
-  });
-  onMount(() => {
+    const loadEndpointPreferences = props.bridge.loadEndpointPreferences;
+    if (loadEndpointPreferences !== undefined) {
+      const capturedEndpointPreferenceIntentRevision =
+        endpointPreferencePersistence().intentRevision;
+      void loadEndpointPreferences
+        .call(props.bridge)
+        .catch(() => publicEndpointPreferenceUnavailable())
+        .then((result) => {
+          if (!active) return;
+          setEndpointPreferencePersistence((current) =>
+            completeWorkbenchEndpointPreferenceHydration(
+              current,
+              capturedEndpointPreferenceIntentRevision,
+              result,
+            ),
+          );
+        });
+    }
+    const loadEndpointKeyStatus = props.bridge.loadEndpointKeyStatus;
+    if (loadEndpointKeyStatus !== undefined) {
+      for (const endpointId of WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS) {
+        void loadEndpointKeyStatus
+          .call(props.bridge, endpointId)
+          .catch(() => publicEndpointKeyUnavailable())
+          .then((result) => {
+            if (!active) return;
+            setEndpointKeyStates((current) => ({
+              ...current,
+              [endpointId]: completeWorkbenchEndpointKeyHydration(
+                current[endpointId],
+                result,
+              ),
+            }));
+          });
+      }
+    }
+    const loadFreshness = props.bridge.loadEndpointCatalogFreshness;
+    if (loadFreshness !== undefined) {
+      void loadFreshness
+        .call(props.bridge)
+        .then((result) => {
+          if (!active || !result.ok) return;
+          setEndpointCatalogFreshness({
+            phase: "ready",
+            reports: result.reports,
+            refreshing: false,
+          });
+        })
+        .catch(() => undefined);
+    }
     void props.bridge
       .loadRuntimeExecutables()
       .catch(() => publicRuntimeExecutableUnavailable())
@@ -692,6 +868,27 @@ const WorkbenchApp: Component<{
         if (!active || !result.ok) return;
         setRuntimeExecutables(result.executables);
       });
+  };
+
+  onMount(() => {
+    const dispose = observeProjectThroughStartup(
+      {
+        observeProject: (listener) =>
+          observeWorkbenchProjectTransfers(props.bridge, listener),
+      },
+      (result) => {
+        hydrateAfterProjectIpcIsReady();
+        const current = state();
+        const projectScopeMayBeChanging =
+          current.projectSwitch.phase === "pending" ||
+          current.projectOpen.phase === "pending";
+        applyProjectStateTransition((current) =>
+          replaceProjectResult(current, result),
+        );
+        announceFinishedTurns(result, projectScopeMayBeChanging);
+      },
+    );
+    onCleanup(dispose);
   });
   createEffect(() =>
     applyWorkbenchAppearance(appearancePersistence().appearance),
@@ -798,6 +995,52 @@ const WorkbenchApp: Component<{
     setSurface("project");
   };
 
+  onMount(() => {
+    const observeNotificationActivation =
+      props.bridge.observeNotificationActivation;
+    if (observeNotificationActivation === undefined) return;
+    const dispose = observeNotificationActivation((activation) => {
+      if (
+        activation.rendererInstanceKey === rendererInstanceKey &&
+        activation.projectScopeEpoch !== projectScopeEpoch()
+      ) {
+        setRemovalNotice(differentProjectNotificationFeedback);
+        return;
+      }
+      if (activation.rendererInstanceKey !== rendererInstanceKey) return;
+      const current = state();
+      if (!current.result?.ok || !("view" in current.result)) return;
+      const commandKey = notificationActivationCommandKey(
+        activation,
+        {
+          projectScopeEpoch: projectScopeEpoch(),
+          rendererInstanceKey,
+          commands: current.result.view.commands,
+        },
+      );
+      if (commandKey !== undefined) {
+        setRemovalNotice((notice) =>
+          notice === differentProjectNotificationFeedback ||
+          notice === unavailableInCurrentProjectNotificationFeedback ||
+          notice === archivedNotificationFeedback
+            ? null
+            : notice,
+        );
+        selectCommand(commandKey);
+      } else {
+        const target = current.result.view.commands.find(
+          (command) => command.key === activation.commandKey,
+        );
+        setRemovalNotice(
+          target?.session?.archived === true
+            ? archivedNotificationFeedback
+            : unavailableInCurrentProjectNotificationFeedback,
+        );
+      }
+    });
+    onCleanup(dispose);
+  });
+
   const cancelNewSession = (): void => {
     const current = state();
     const cancelled = cancelNewAgentSessionMode(current);
@@ -862,10 +1105,15 @@ const WorkbenchApp: Component<{
   const selectHostedProject = (targetIndex: number): void => {
     const attempt = beginProjectSelection(state(), targetIndex);
     if (attempt.request === null) return;
-    setSurface("project");
-    setState(attempt.state);
-    void props.bridge
-      .selectProject(attempt.request)
+    batch(() => {
+      setSurface("project");
+      setState(attempt.state);
+      setRemovalNotice(null);
+    });
+    void withProjectBridgeDeadline(
+      props.bridge.selectProject(attempt.request),
+      () => publicProjectSwitchUnavailable(),
+    )
       .catch(() => publicProjectSwitchUnavailable())
       .then((result) => {
         if (!active) return;
@@ -879,8 +1127,14 @@ const WorkbenchApp: Component<{
     const current = state();
     const opening = beginOpenProject(current);
     if (opening === current) return;
-    setState(opening);
-    void props.bridge.openProject()
+    batch(() => {
+      setState(opening);
+      setRemovalNotice(null);
+    });
+    void withProjectBridgeDeadline(
+      props.bridge.openProject(),
+      () => publicProjectOpenUnavailable(),
+    )
       .catch(() => publicProjectOpenUnavailable())
       .then((result) => {
         if (!active) return;
@@ -908,8 +1162,14 @@ const WorkbenchApp: Component<{
     const current = state();
     const creating = beginCreateProject(current);
     if (creating === current) return;
-    setState(creating);
-    void props.bridge.createProject()
+    batch(() => {
+      setState(creating);
+      setRemovalNotice(null);
+    });
+    void withProjectBridgeDeadline(
+      props.bridge.createProject(),
+      () => publicCreateProjectResult("unavailable"),
+    )
       .catch(() => publicCreateProjectResult("unavailable"))
       .then((result) => {
         if (!active) return;
@@ -1124,8 +1384,13 @@ const WorkbenchApp: Component<{
   const mutateSessionMetadata = async (
     command: WorkbenchCommandView,
     operation: SessionMetadataOperation,
+    acknowledgedUnknownOutcome?: true,
   ): Promise<WorkbenchSessionMetadataMutationResult> => {
-    const request = sessionMetadataRequest(command, operation);
+    const request = sessionMetadataRequest(
+      command,
+      operation,
+      acknowledgedUnknownOutcome,
+    );
     if (
       request === null ||
       sessionMetadataPending() ||
@@ -1198,6 +1463,33 @@ const WorkbenchApp: Component<{
       });
   };
 
+  const changeEndpointPreference = (
+    preference: WorkbenchFamilyEndpointPreference,
+  ): void => {
+    const save = props.bridge.saveEndpointPreference;
+    if (save === undefined) return;
+    const attempt = beginWorkbenchEndpointPreferenceChange(
+      endpointPreferencePersistence(),
+      preference,
+    );
+    const request = attempt.request;
+    if (request === null) return;
+    setEndpointPreferencePersistence(attempt.state);
+    void save
+      .call(props.bridge, request.preference)
+      .catch(() => publicEndpointPreferenceUnavailable())
+      .then((result) => {
+        if (!active) return;
+        setEndpointPreferencePersistence((current) =>
+          completeWorkbenchEndpointPreferenceSave(
+            current,
+            request.revision,
+            result,
+          ),
+        );
+      });
+  };
+
   const saveRuntimeExecutable = (
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
@@ -1225,9 +1517,218 @@ const WorkbenchApp: Component<{
       });
   };
 
+  const changeEndpointKeyDraft =
+    (endpointId: WorkbenchEndpointKeyEndpointId) =>
+    (draft: string): void => {
+      setEndpointKeyStates((current) => ({
+        ...current,
+        [endpointId]: changeWorkbenchEndpointKeyDraft(
+          current[endpointId],
+          draft,
+        ),
+      }));
+    };
+
+  const saveEndpointKey =
+    (endpointId: WorkbenchEndpointKeyEndpointId) => (): void => {
+      const save = props.bridge.saveEndpointKey;
+      if (save === undefined) return;
+      const attempt = beginWorkbenchEndpointKeySave(
+        endpointKeyStates()[endpointId],
+      );
+      setEndpointKeyStates((current) => ({
+        ...current,
+        [endpointId]: attempt.state,
+      }));
+      if (attempt.keyValue === null) return;
+      void save
+        .call(props.bridge, endpointId, { keyValue: attempt.keyValue })
+        .catch(() => publicEndpointKeyUnavailable())
+        .then((result) => {
+          if (!active) return;
+          setEndpointKeyStates((current) => ({
+            ...current,
+            [endpointId]: completeWorkbenchEndpointKeySave(
+              current[endpointId],
+              result,
+            ),
+          }));
+        });
+    };
+
+  const revealEndpointKey =
+    (endpointId: WorkbenchEndpointKeyEndpointId) => (): void => {
+      const reveal = props.bridge.revealEndpointKey;
+      if (reveal === undefined) return;
+      const current = endpointKeyStates()[endpointId];
+      const next = beginWorkbenchEndpointKeyReveal(current);
+      if (next === current) return;
+      setEndpointKeyStates((states) => ({
+        ...states,
+        [endpointId]: next,
+      }));
+      void reveal
+        .call(props.bridge, endpointId)
+        .catch(() => publicEndpointKeyUnavailable())
+        .then((result) => {
+          if (!active) return;
+          setEndpointKeyStates((states) => ({
+            ...states,
+            [endpointId]: completeWorkbenchEndpointKeyReveal(
+              states[endpointId],
+              result,
+            ),
+          }));
+        });
+    };
+
+  const hideEndpointKeyReveal =
+    (endpointId: WorkbenchEndpointKeyEndpointId) => (): void => {
+      setEndpointKeyStates((current) => ({
+        ...current,
+        [endpointId]: hideWorkbenchEndpointKeyReveal(current[endpointId]),
+      }));
+    };
+
+  const removeEndpointKey =
+    (endpointId: WorkbenchEndpointKeyEndpointId) => (): void => {
+      const remove = props.bridge.removeEndpointKey;
+      if (remove === undefined) return;
+      const current = endpointKeyStates()[endpointId];
+      const next = beginWorkbenchEndpointKeyRemove(current);
+      if (next === current) return;
+      setEndpointKeyStates((states) => ({
+        ...states,
+        [endpointId]: next,
+      }));
+      void remove
+        .call(props.bridge, endpointId)
+        .catch(() => publicEndpointKeyUnavailable())
+        .then((result) => {
+          if (!active) return;
+          setEndpointKeyStates((states) => ({
+            ...states,
+            [endpointId]: completeWorkbenchEndpointKeyRemove(
+              states[endpointId],
+              result,
+            ),
+          }));
+        });
+    };
+
+  const probeEndpointKey =
+    (endpointId: WorkbenchEndpointKeyEndpointId) => (): void => {
+      const probe = props.bridge.probeEndpointKey;
+      if (probe === undefined) return;
+      const current = endpointKeyStates()[endpointId];
+      const next = beginWorkbenchEndpointKeyProbe(current);
+      if (next === current) return;
+      setEndpointKeyStates((states) => ({
+        ...states,
+        [endpointId]: next,
+      }));
+      void probe
+        .call(props.bridge, endpointId)
+        .catch(() => publicEndpointKeyUnavailable())
+        .then((result) => {
+          if (!active) return;
+          setEndpointKeyStates((states) => ({
+            ...states,
+            [endpointId]: completeWorkbenchEndpointKeyProbe(
+              states[endpointId],
+              result,
+            ),
+          }));
+        });
+    };
+
+  const endpointKeyPanels = ():
+    | Partial<
+        Record<WorkbenchEndpointKeyEndpointId, WorkbenchEndpointKeyPanel>
+      >
+    | undefined =>
+    props.bridge.loadEndpointKeyStatus === undefined
+      ? undefined
+      : Object.freeze(
+          Object.fromEntries(
+            WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS.map((endpointId) => {
+              const state = endpointKeyStates()[endpointId];
+              return [
+                endpointId,
+                Object.freeze({
+                  phase: state.phase,
+                  snapshot: state.snapshot,
+                  draft: state.draft,
+                  busy: state.busy,
+                  revealed: state.revealed,
+                  revealedValue: state.revealedValue,
+                  probeOutcome: state.probeOutcome,
+                  feedback: state.feedback,
+                  onDraft: changeEndpointKeyDraft(endpointId),
+                  onSave: saveEndpointKey(endpointId),
+                  onReveal: revealEndpointKey(endpointId),
+                  onHideReveal: hideEndpointKeyReveal(endpointId),
+                  onRemove: removeEndpointKey(endpointId),
+                  onProbe: probeEndpointKey(endpointId),
+                } satisfies WorkbenchEndpointKeyPanel),
+              ];
+            }),
+          ),
+        );
+
+  const refreshEndpointCatalogFreshness = (): void => {
+    const refresh = props.bridge.refreshEndpointCatalogFreshness;
+    if (refresh === undefined) return;
+    setEndpointCatalogFreshness((current) =>
+      current.phase === "ready"
+        ? { ...current, refreshing: true }
+        : current,
+    );
+    void refresh
+      .call(props.bridge)
+      .then((result) => {
+        if (!active || !result.ok) return;
+        setEndpointCatalogFreshness({
+          phase: "ready",
+          reports: result.reports,
+          refreshing: false,
+        });
+      })
+      .catch(() => {
+        if (!active) return;
+        setEndpointCatalogFreshness((current) =>
+          current.phase === "ready"
+            ? { ...current, refreshing: false }
+            : current,
+        );
+      });
+  };
+
+  const endpointCatalogFreshnessPanel = ():
+    | {
+        readonly unavailable: boolean;
+        readonly reports:
+          | readonly WorkbenchEndpointCatalogFreshnessReport[]
+          | null;
+        readonly refreshing: boolean;
+        readonly onRefresh: () => void;
+      }
+    | undefined =>
+    props.bridge.loadEndpointCatalogFreshness === undefined
+      ? undefined
+      : (() => {
+          const current = endpointCatalogFreshness();
+          return Object.freeze({
+            unavailable: current.phase === "unavailable",
+            reports: current.phase === "ready" ? current.reports : null,
+            refreshing: current.phase === "ready" && current.refreshing,
+            onRefresh: refreshEndpointCatalogFreshness,
+          });
+        })();
+
   const view = createMemo(() => {
     const current = state().result;
-    return current?.ok ? current.view : undefined;
+    return hasHostedProjectView(current) ? current.view : undefined;
   });
   const selected = createMemo(() => {
     const currentView = view();
@@ -1345,7 +1846,7 @@ const WorkbenchApp: Component<{
             ),
           );
           setState((current) => {
-            const currentView = current.result?.ok
+            const currentView = hasHostedProjectView(current.result)
               ? current.result.view
               : undefined;
             const currentSelection = currentView === undefined
@@ -1455,6 +1956,12 @@ const WorkbenchApp: Component<{
             claudePermissionHandlingPersistence().phase
           }
           onClaudePermissionHandling={changeClaudePermissionHandling}
+          endpointPreferences={
+            endpointPreferencePersistence().preferences
+          }
+          onEndpointPreference={changeEndpointPreference}
+          endpointKeyPanels={endpointKeyPanels()}
+          catalogFreshness={endpointCatalogFreshnessPanel()}
           newSession={state().newSession}
           projectSwitch={state().projectSwitch}
           projectOpen={state().projectOpen}
@@ -1567,7 +2074,7 @@ const ResolvedWorkbench: Component<{
   readonly profile: WorkbenchDirectProfileState;
   readonly subscriptionAuthentication: SettingsSubscriptionAuthenticationState;
   readonly historyRecoveryResult: HistoryRecoverySnapshotResult | null;
-  readonly historyRecoveryBridge: WorkbenchRendererBridge;
+  readonly historyRecoveryBridge: Omit<WorkbenchRendererBridge, "observeProject">;
   readonly onHistoryRecoverySnapshot: (
     result: HistoryRecoverySnapshotResult,
   ) => void;
@@ -1600,6 +2107,21 @@ const ResolvedWorkbench: Component<{
   readonly onClaudePermissionHandling: (
     permissionHandling: WorkbenchClaudePermissionHandling,
   ) => void;
+  readonly endpointPreferences: WorkbenchFamilyEndpointPreferences;
+  readonly onEndpointPreference: (
+    preference: WorkbenchFamilyEndpointPreference,
+  ) => void;
+  readonly endpointKeyPanels?: Partial<
+    Record<WorkbenchEndpointKeyEndpointId, WorkbenchEndpointKeyPanel>
+  >;
+  readonly catalogFreshness?: {
+    readonly unavailable: boolean;
+    readonly reports:
+      | readonly WorkbenchEndpointCatalogFreshnessReport[]
+      | null;
+    readonly refreshing: boolean;
+    readonly onRefresh: () => void;
+  };
   readonly newSession: WorkbenchNewSessionState;
   readonly projectSwitch: WorkbenchProjectSwitchState;
   readonly projectOpen: WorkbenchProjectOpenState;
@@ -1629,6 +2151,7 @@ const ResolvedWorkbench: Component<{
   readonly onMutateSessionMetadata: (
     command: WorkbenchCommandView,
     operation: SessionMetadataOperation,
+    acknowledgedUnknownOutcome?: true,
   ) => Promise<WorkbenchSessionMetadataMutationResult>;
   readonly removalPending: boolean;
   readonly removalNotice: WorkbenchRemovalFeedback | null;
@@ -1646,7 +2169,20 @@ const ResolvedWorkbench: Component<{
   readonly onSteer: (() => void) | undefined;
   readonly onSubmit: () => void;
 }> = (props) => {
-  const liveView = () => (props.result.ok ? props.result.view : undefined);
+  const emptyProjectRegistry = () =>
+    props.result.ok && "empty" in props.result;
+  const liveView = () =>
+    emptyProjectRegistry()
+      ? Object.freeze({
+          project: Object.freeze({ label: shellCopy.appTitle }),
+          observation: Object.freeze({ cursor: 0, live: true as const }),
+          commands: Object.freeze([]),
+          initialSelectionKey: null,
+          projectSelection: Object.freeze({ projects: Object.freeze([]) }),
+        })
+      : hasHostedProjectView(props.result)
+        ? props.result.view
+        : undefined;
   return (
     <Show
       when={liveView()}
@@ -1696,6 +2232,10 @@ const ResolvedWorkbench: Component<{
             props.claudePermissionHandlingPersistencePhase
           }
           onClaudePermissionHandling={props.onClaudePermissionHandling}
+          endpointPreferences={props.endpointPreferences}
+          onEndpointPreference={props.onEndpointPreference}
+          endpointKeyPanels={props.endpointKeyPanels}
+          catalogFreshness={props.catalogFreshness}
           newSession={props.newSession}
           projectSwitch={props.projectSwitch}
           projectOpen={props.projectOpen}
@@ -1725,6 +2265,7 @@ const ResolvedWorkbench: Component<{
           onMutateSessionMetadata={props.onMutateSessionMetadata}
           removalPending={props.removalPending}
           removalNotice={props.removalNotice}
+          emptyProjectRegistry={emptyProjectRegistry()}
           onRequestSessionRemoval={props.onRequestSessionRemoval}
           onRequestProjectRemoval={props.onRequestProjectRemoval}
           projectHistoriesPending={props.projectHistoriesPending}
@@ -1758,7 +2299,7 @@ interface WorkbenchScreenProps {
   readonly profile: WorkbenchDirectProfileState;
   readonly subscriptionAuthentication?: SettingsSubscriptionAuthenticationState;
   readonly historyRecoveryResult?: HistoryRecoverySnapshotResult | null;
-  readonly historyRecoveryBridge?: WorkbenchRendererBridge;
+  readonly historyRecoveryBridge?: Omit<WorkbenchRendererBridge, "observeProject">;
   readonly onHistoryRecoverySnapshot?: (
     result: HistoryRecoverySnapshotResult,
   ) => void;
@@ -1791,6 +2332,21 @@ interface WorkbenchScreenProps {
   readonly onClaudePermissionHandling: (
     permissionHandling: WorkbenchClaudePermissionHandling,
   ) => void;
+  readonly endpointPreferences: WorkbenchFamilyEndpointPreferences;
+  readonly onEndpointPreference: (
+    preference: WorkbenchFamilyEndpointPreference,
+  ) => void;
+  readonly endpointKeyPanels?: Partial<
+    Record<WorkbenchEndpointKeyEndpointId, WorkbenchEndpointKeyPanel>
+  >;
+  readonly catalogFreshness?: {
+    readonly unavailable: boolean;
+    readonly reports:
+      | readonly WorkbenchEndpointCatalogFreshnessReport[]
+      | null;
+    readonly refreshing: boolean;
+    readonly onRefresh: () => void;
+  };
   readonly newSession: WorkbenchNewSessionState;
   readonly projectSwitch: WorkbenchProjectSwitchState;
   readonly projectOpen: WorkbenchProjectOpenState;
@@ -1820,9 +2376,11 @@ interface WorkbenchScreenProps {
   readonly onMutateSessionMetadata?: (
     command: WorkbenchCommandView,
     operation: SessionMetadataOperation,
+    acknowledgedUnknownOutcome?: true,
   ) => Promise<WorkbenchSessionMetadataMutationResult>;
   readonly removalPending?: boolean;
   readonly removalNotice?: WorkbenchRemovalFeedback | null;
+  readonly emptyProjectRegistry?: boolean;
   readonly onRequestSessionRemoval?: (command: WorkbenchCommandView) => void;
   readonly onRequestProjectRemoval?: (project: WorkbenchProjectOption) => void;
   readonly projectHistoriesPending?: boolean;
@@ -1840,6 +2398,7 @@ interface WorkbenchScreenProps {
 
 const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
   const [inspectorCollapsed, setInspectorCollapsed] = createSignal(false);
+  const emptyProjectRegistry = () => props.emptyProjectRegistry === true;
   const freshStartPresentation = () => props.newSession.phase !== "inactive";
   const rendererState = () => ({
     result: { ok: true as const, view: props.view },
@@ -1867,18 +2426,26 @@ const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
     <div class="app">
       <Show when={locale()} keyed>
         {(_currentLocale) => (
-          <Titlebar
-            view={props.view}
-            windowBridge={props.windowBridge}
-            surface={props.surface}
-            onSurface={props.onSurface}
-          />
+          <Show
+            when={!emptyProjectRegistry()}
+            fallback={<NoProjectsTitlebar windowBridge={props.windowBridge} />}
+          >
+            <Titlebar
+              view={props.view}
+              windowBridge={props.windowBridge}
+              surface={props.surface}
+              onSurface={props.onSurface}
+            />
+          </Show>
         )}
       </Show>
       <div
         class="body-grid"
         classList={{
-          "no-inspector": runtimeUnavailable() || freshStartPresentation(),
+          "no-inspector":
+            emptyProjectRegistry() ||
+            runtimeUnavailable() ||
+            freshStartPresentation(),
           "inspector-collapsed":
             !runtimeUnavailable() &&
             !freshStartPresentation() &&
@@ -1889,84 +2456,113 @@ const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
           {(_currentLocale) => (
             <>
               <ProjectRail
-          view={props.view}
-          selectedKey={
-            freshStartPresentation() ? null : (props.selected?.key ?? null)
-          }
-          surface={props.surface}
-          onSurface={props.onSurface}
-          runtimeUnavailable={runtimeUnavailable()}
-          historyRecoveryAttention={historyRecoveryNeedsAttention(
-            props.historyRecoveryResult ?? null,
-          )}
-          projectSwitch={props.projectSwitch}
-          projectOpen={props.projectOpen}
-          projectScopeEpoch={props.projectScopeEpoch ?? 0}
-          canCreateProject={props.canCreateProject}
-          onCreateProject={props.onCreateProject}
-          canOpenProject={props.canOpenProject}
-          onOpenProject={props.onOpenProject}
-          canSelectProject={props.canSelectProject}
-          onSelectProject={props.onSelectProject}
-          onSelect={props.onSelect}
-          onEnterNewSession={props.onEnterNewSession}
-          draftBlocked={draftBlocked()}
-          actionBlocked={actionBlocked()}
-          sessionMetadataPending={props.sessionMetadataPending ?? false}
-          onMutateSessionMetadata={
-            props.onMutateSessionMetadata ??
-            (() => Promise.resolve(Object.freeze({ status: "unavailable" })))
-          }
-          removalPending={props.removalPending ?? false}
-          removalNotice={props.removalNotice ?? null}
-          onRequestSessionRemoval={
-            props.onRequestSessionRemoval ?? (() => undefined)
-          }
-          onRequestProjectRemoval={
-            props.onRequestProjectRemoval ?? (() => undefined)
-          }
-          projectHistoriesPending={props.projectHistoriesPending ?? false}
-          onRequestProjectHistories={props.onRequestProjectHistories}
+                view={props.view}
+                selectedKey={
+                  freshStartPresentation()
+                    ? null
+                    : (props.selected?.key ?? null)
+                }
+                surface={props.surface}
+                onSurface={props.onSurface}
+                runtimeUnavailable={runtimeUnavailable()}
+                historyRecoveryAttention={historyRecoveryNeedsAttention(
+                  props.historyRecoveryResult ?? null,
+                )}
+                projectSwitch={props.projectSwitch}
+                projectOpen={props.projectOpen}
+                projectScopeEpoch={props.projectScopeEpoch ?? 0}
+                canCreateProject={props.canCreateProject}
+                onCreateProject={props.onCreateProject}
+                canOpenProject={props.canOpenProject}
+                onOpenProject={props.onOpenProject}
+                canSelectProject={props.canSelectProject}
+                onSelectProject={props.onSelectProject}
+                onSelect={props.onSelect}
+                onEnterNewSession={props.onEnterNewSession}
+                draftBlocked={draftBlocked()}
+                actionBlocked={actionBlocked()}
+                sessionMetadataPending={props.sessionMetadataPending ?? false}
+                onMutateSessionMetadata={
+                  props.onMutateSessionMetadata ??
+                  (() =>
+                    Promise.resolve(Object.freeze({ status: "unavailable" })))
+                }
+                removalPending={props.removalPending ?? false}
+                removalNotice={props.removalNotice ?? null}
+                onRequestSessionRemoval={
+                  props.onRequestSessionRemoval ?? (() => undefined)
+                }
+                onRequestProjectRemoval={
+                  props.onRequestProjectRemoval ?? (() => undefined)
+                }
+                projectHistoriesPending={
+                  props.projectHistoriesPending ?? false
+                }
+                onRequestProjectHistories={props.onRequestProjectHistories}
               />
-              <WorkbenchStage
-          active={props.surface === "project"}
-          view={props.view}
-          selected={props.selected}
-          composer={props.composer}
-          profile={props.profile}
-          newSession={props.newSession}
-          projectSwitch={props.projectSwitch}
-          projectOpen={props.projectOpen}
-          runtimeUnavailable={runtimeUnavailable()}
-          inspectorCollapsed={inspectorCollapsed()}
-          onShowInspector={() => setInspectorCollapsed(false)}
-          canCreateProject={props.canCreateProject}
-          onCreateProject={props.onCreateProject}
-          canOpenProject={props.canOpenProject}
-          onOpenProject={props.onOpenProject}
-          onDraft={props.onDraft}
-          onNavigateComposerHistory={props.onNavigateComposerHistory}
-          onLoadProfile={props.onLoadProfile}
-          onOpenProviders={() => props.onSurface("settings")}
-          onEnterNewSession={props.onEnterNewSession}
-          replacementSessionRefusal={props.replacementSessionRefusal}
-          onEnterReplacementSession={props.onEnterReplacementSession}
-          onCancelNewSession={props.onCancelNewSession}
-          onEndpoint={props.onEndpoint}
-          onModel={props.onModel}
-          onWorkIntensity={props.onWorkIntensity}
-          onExecutionMode={props.onExecutionMode}
-          onAccessMode={props.onAccessMode}
-          onUseAsDefault={props.onUseAsDefault}
-          interruptPending={props.interruptPending ?? false}
-          interruptFeedback={props.interruptFeedback ?? null}
-          onInterrupt={props.onInterrupt}
-          steerPending={props.steerPending ?? false}
-          steerFeedback={props.steerFeedback ?? null}
-          onSteer={props.onSteer}
-          onSubmit={props.onSubmit}
-              />
-              <Show when={!runtimeUnavailable() && !freshStartPresentation()}>
+              <Show
+                when={!emptyProjectRegistry()}
+                fallback={
+                  <Show when={props.surface === "project"}>
+                    <NoProjectsState
+                      projectOpen={props.projectOpen}
+                      canCreateProject={props.canCreateProject}
+                      onCreateProject={props.onCreateProject}
+                      canOpenProject={props.canOpenProject}
+                      onOpenProject={props.onOpenProject}
+                    />
+                  </Show>
+                }
+              >
+                <WorkbenchStage
+                  active={props.surface === "project"}
+                  projectScopeEpoch={props.projectScopeEpoch}
+                  view={props.view}
+                  selected={props.selected}
+                  composer={props.composer}
+                  profile={props.profile}
+                  newSession={props.newSession}
+                  projectSwitch={props.projectSwitch}
+                  projectOpen={props.projectOpen}
+                  runtimeUnavailable={runtimeUnavailable()}
+                  inspectorCollapsed={inspectorCollapsed()}
+                  onShowInspector={() => setInspectorCollapsed(false)}
+                  canCreateProject={props.canCreateProject}
+                  onCreateProject={props.onCreateProject}
+                  canOpenProject={props.canOpenProject}
+                  onOpenProject={props.onOpenProject}
+                  onDraft={props.onDraft}
+                  onNavigateComposerHistory={props.onNavigateComposerHistory}
+                  onLoadProfile={props.onLoadProfile}
+                  onOpenProviders={() => props.onSurface("settings")}
+                  onEnterNewSession={props.onEnterNewSession}
+                  replacementSessionRefusal={props.replacementSessionRefusal}
+                  onEnterReplacementSession={props.onEnterReplacementSession}
+                  onCancelNewSession={props.onCancelNewSession}
+                  onEndpoint={props.onEndpoint}
+                  onModel={props.onModel}
+                  onWorkIntensity={props.onWorkIntensity}
+                  onExecutionMode={props.onExecutionMode}
+                  onAccessMode={props.onAccessMode}
+                  onUseAsDefault={props.onUseAsDefault}
+                  interruptPending={props.interruptPending ?? false}
+                  interruptFeedback={props.interruptFeedback ?? null}
+                  onInterrupt={props.onInterrupt}
+                  steerPending={props.steerPending ?? false}
+                  steerFeedback={props.steerFeedback ?? null}
+                  onSteer={props.onSteer}
+                  onSubmit={props.onSubmit}
+                  endpointPreferences={props.endpointPreferences}
+                  subscriptionAuthentication={props.subscriptionAuthentication}
+                />
+              </Show>
+              <Show
+                when={
+                  !emptyProjectRegistry() &&
+                  !runtimeUnavailable() &&
+                  !freshStartPresentation()
+                }
+              >
                 <SessionInspector
                   active={props.surface === "project"}
                   command={props.selected}
@@ -2006,6 +2602,10 @@ const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
               props.claudePermissionHandlingPersistencePhase
             }
             onClaudePermissionHandling={props.onClaudePermissionHandling}
+            endpointPreferences={props.endpointPreferences}
+            onEndpointPreference={props.onEndpointPreference}
+            endpointKeyPanels={props.endpointKeyPanels}
+          catalogFreshness={props.catalogFreshness}
             canRead={canRefreshDirectSessionProfileFromProviders(
               rendererState(),
             )}
@@ -2022,6 +2622,8 @@ const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
             surface={props.surface}
             runtimeUnavailable={runtimeUnavailable()}
             startingNewSession={freshStartPresentation()}
+            endpointPreferences={props.endpointPreferences}
+            subscriptionAuthentication={props.subscriptionAuthentication}
           />
         )}
       </Show>

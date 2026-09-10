@@ -28,11 +28,37 @@ const englishCopy = {
   endpointIdentityCopy: {
     codex: {
       runtimeFamilyLabel: "Codex",
-      endpointLabel: "Codex desktop",
+      // Ticket 25 facade: the family carries the brand ("Codex ·
+      // Subscription"); the label is the short segment name.
+      endpointLabel: "Subscription",
     },
     claude: {
       runtimeFamilyLabel: "Claude",
-      endpointLabel: "Claude Code desktop",
+      endpointLabel: "Subscription",
+    },
+    glm: {
+      runtimeFamilyLabel: "GLM",
+      endpointLabel: "GLM Coding Plan",
+    },
+    kimi: {
+      runtimeFamilyLabel: "Kimi",
+      endpointLabel: "Code",
+    },
+    deepseek: {
+      runtimeFamilyLabel: "DeepSeek",
+      endpointLabel: "DeepSeek API",
+    },
+    kimiPlatform: {
+      runtimeFamilyLabel: "Kimi",
+      endpointLabel: "Platform",
+    },
+    claudeApi: {
+      runtimeFamilyLabel: "Claude",
+      endpointLabel: "API",
+    },
+    codexApi: {
+      runtimeFamilyLabel: "Codex",
+      endpointLabel: "API",
     },
   },
   endpointStatusRowCopy: {
@@ -57,6 +83,21 @@ const englishCopy = {
       detail: "No catalog read has completed.",
     },
   },
+  /**
+   * Ticket 20: the official-provider-flow sentence above is true only where a
+   * real login action exists (the subscription faces). Every API-key face
+   * carries this sentence instead, so the copy and the available action can
+   * never disagree.
+   */
+  apiKeyAuthenticationDetail:
+    "Add this endpoint's API key on its settings card.",
+  /** Ticket 20/25 facades: the single family entry when neither backend is usable. */
+  kimiFacadeUnconfiguredDetail:
+    "No Kimi key is saved. Add the Kimi Code or Kimi Platform API key on the Kimi card in Settings.",
+  claudeFacadeUnconfiguredDetail:
+    "Claude has no signed-in subscription and no saved API key. Sign in, or add a Claude API key, on the Claude card in Settings.",
+  codexFacadeUnconfiguredDetail:
+    "Codex has no signed-in subscription and no saved API key. Sign in, or add a Codex API key, on the Codex card in Settings.",
   contextWindowTitleCopy: (
     remaining: string,
     windowTokens: string,
@@ -95,11 +136,35 @@ const simplifiedChineseCopy = {
   endpointIdentityCopy: {
     codex: {
       runtimeFamilyLabel: "Codex",
-      endpointLabel: "Codex 桌面版",
+      endpointLabel: "订阅",
     },
     claude: {
       runtimeFamilyLabel: "Claude",
-      endpointLabel: "Claude Code 桌面版",
+      endpointLabel: "订阅",
+    },
+    glm: {
+      runtimeFamilyLabel: "GLM",
+      endpointLabel: "GLM Coding Plan",
+    },
+    kimi: {
+      runtimeFamilyLabel: "Kimi",
+      endpointLabel: "Code",
+    },
+    deepseek: {
+      runtimeFamilyLabel: "DeepSeek",
+      endpointLabel: "DeepSeek API",
+    },
+    kimiPlatform: {
+      runtimeFamilyLabel: "Kimi",
+      endpointLabel: "平台",
+    },
+    claudeApi: {
+      runtimeFamilyLabel: "Claude",
+      endpointLabel: "API",
+    },
+    codexApi: {
+      runtimeFamilyLabel: "Codex",
+      endpointLabel: "API",
     },
   },
   endpointStatusRowCopy: {
@@ -124,6 +189,13 @@ const simplifiedChineseCopy = {
       detail: "尚未完成目录读取。",
     },
   },
+  apiKeyAuthenticationDetail: "在此端点的设置卡片上添加 API 密钥。",
+  kimiFacadeUnconfiguredDetail:
+    "尚未保存 Kimi 密钥。请在设置的 Kimi 卡片上添加 Kimi Code 或 Kimi 平台的 API 密钥。",
+  claudeFacadeUnconfiguredDetail:
+    "Claude 尚未登录订阅，也未保存 API 密钥。请在设置的 Claude 卡片上完成订阅登录，或添加 Claude API 密钥。",
+  codexFacadeUnconfiguredDetail:
+    "Codex 尚未登录订阅，也未保存 API 密钥。请在设置的 Codex 卡片上完成订阅登录，或添加 Codex API 密钥。",
   contextWindowTitleCopy: (
     remaining: string,
     windowTokens: string,
@@ -168,13 +240,62 @@ export const endpointStatusRowCopy: Readonly<
   >
 > = localizedCopy.endpointStatusRowCopy;
 
+/**
+ * The authentication-required detail for API-key faces (no login action
+ * exists there, so the official-provider-flow sentence must not appear).
+ */
+export function endpointApiKeyAuthenticationDetail(): string {
+  return localizedCopy.apiKeyAuthenticationDetail;
+}
+
+/** The merged Kimi entry's detail when neither Kimi key is present. */
+export function kimiFacadeUnconfiguredDetail(): string {
+  return localizedCopy.kimiFacadeUnconfiguredDetail;
+}
+
+/** The merged Claude entry's detail when neither backend is usable. */
+export function claudeFacadeUnconfiguredDetail(): string {
+  return localizedCopy.claudeFacadeUnconfiguredDetail;
+}
+
+/** The merged Codex entry's detail when neither backend is usable. */
+export function codexFacadeUnconfiguredDetail(): string {
+  return localizedCopy.codexFacadeUnconfiguredDetail;
+}
+
+/** One family facade's unconfigured detail (total over the families). */
+export function endpointFamilyUnconfiguredDetail(
+  family: "claude" | "codex" | "kimi",
+): string {
+  switch (family) {
+    case "claude":
+      return claudeFacadeUnconfiguredDetail();
+    case "codex":
+      return codexFacadeUnconfiguredDetail();
+    default:
+      return kimiFacadeUnconfiguredDetail();
+  }
+}
+
 export type EndpointRuntimeFamilyLabelText =
   | (typeof endpointIdentityCopy)["codex"]["runtimeFamilyLabel"]
-  | (typeof endpointIdentityCopy)["claude"]["runtimeFamilyLabel"];
+  | (typeof endpointIdentityCopy)["claude"]["runtimeFamilyLabel"]
+  | (typeof endpointIdentityCopy)["glm"]["runtimeFamilyLabel"]
+  | (typeof endpointIdentityCopy)["kimi"]["runtimeFamilyLabel"]
+  | (typeof endpointIdentityCopy)["deepseek"]["runtimeFamilyLabel"]
+  | (typeof endpointIdentityCopy)["kimiPlatform"]["runtimeFamilyLabel"]
+  | (typeof endpointIdentityCopy)["claudeApi"]["runtimeFamilyLabel"]
+  | (typeof endpointIdentityCopy)["codexApi"]["runtimeFamilyLabel"];
 
 export type EndpointLabelText =
   | (typeof endpointIdentityCopy)["codex"]["endpointLabel"]
-  | (typeof endpointIdentityCopy)["claude"]["endpointLabel"];
+  | (typeof endpointIdentityCopy)["claude"]["endpointLabel"]
+  | (typeof endpointIdentityCopy)["glm"]["endpointLabel"]
+  | (typeof endpointIdentityCopy)["kimi"]["endpointLabel"]
+  | (typeof endpointIdentityCopy)["deepseek"]["endpointLabel"]
+  | (typeof endpointIdentityCopy)["kimiPlatform"]["endpointLabel"]
+  | (typeof endpointIdentityCopy)["claudeApi"]["endpointLabel"]
+  | (typeof endpointIdentityCopy)["codexApi"]["endpointLabel"];
 
 export type EndpointStatusRowLabelText = (typeof endpointStatusRowCopy)[WorkbenchRuntimeEndpointDiscoveryCategory]["statusLabel"];
 

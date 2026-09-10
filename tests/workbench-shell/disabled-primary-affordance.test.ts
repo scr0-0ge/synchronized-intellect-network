@@ -432,12 +432,12 @@ test("F215 the correction reaches every primary button and leaves the acrylic le
   process.stdout.write(`F215_PRIMARY_SITES ${JSON.stringify(primaryButtons)}\n`);
   assert.equal(
     primaryButtons.length,
-    4,
+    5,
     "the renderer's primary-button inventory moved; re-measure before trusting the coverage claim",
   );
-  assert.equal(primaryButtons.filter((button) => button.disableable).length, 3);
+  assert.equal(primaryButtons.filter((button) => button.disableable).length, 4);
 
-  /* The correction is class-scoped, so it reaches all three disableable sites
+  /* The correction is class-scoped, so it reaches all four disableable sites
      and any future one, rather than the single control F207 named. */
   assert.match(
     legibility,

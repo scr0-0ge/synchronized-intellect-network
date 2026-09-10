@@ -16,9 +16,9 @@ const englishCopy = {
     readingCatalogs: "Reading catalogs…",
     readCatalogs: "Read catalogs",
     recheckAll: "Re-check all",
-    credentialHeading: "The Workbench never handles credentials",
+    credentialHeading: "Subscription credentials never pass through the Workbench",
     credentialSentence:
-      "This page never asks for a password, API key or token, never reads a credential file, and never stores credentials. None of those controls may be added.",
+      "Subscription sign-in happens in each provider's own app. This page never asks for a subscription password or token, never reads a subscription credential file, and never stores subscription credentials. The exceptions — the API keys of the API-key endpoints — are each disclosed in that provider's API key section below.",
     catalogAvailableHeading: "Catalog available",
     catalogUnavailableHeading: "Catalog unavailable",
     notCheckedHeading: "Not checked",
@@ -75,11 +75,191 @@ const englishCopy = {
     confirmLogout: "Ask the provider CLI to log out",
     continueWithLogin: "Continue with Login",
   },
+  /**
+   * One API-key management block per static-key endpoint (WO16 Part 1
+   * generalized the GLM-only copy). The shared machine sentences live once;
+   * each provider record carries its own heading, lede, placeholder, env
+   * fallback sentence, and any provider-specific key-handling warning.
+   */
+  endpointKeyCopy: {
+    shared: {
+      storageSentence:
+        "A saved key is encrypted with this OS user account (DPAPI on Windows) and stored in a local Workbench file.",
+      protectionSentence:
+        "That protects the key against offline disk inspection (reading the ciphertext offline after the disk is removed or copied). It does not protect the key against processes already running as your user account.",
+      keyValueLabel: "API key",
+      saveAction: "Save key",
+      revealAction: "Reveal key",
+      hideRevealAction: "Hide key",
+      removeAction: "Remove key",
+      probeAction: "Test connection",
+      statusLoadingLabel: "Checking stored key…",
+      notConfiguredLabel: "No key saved",
+      configuredLabel: "Key saved",
+      persistentLabel: "Stored durably for this OS user account.",
+      sessionOnlyLabel:
+        "Valid for this session only — the stored key will be gone after a restart.",
+      probeSuccessLabel: "Connection succeeded: the endpoint accepted the key.",
+      probeUnauthorizedLabel:
+        "Connection failed: the endpoint rejected the key (unauthorized).",
+      probeEndpointErrorLabel: "Connection failed: the endpoint refused the request.",
+      probeServerErrorLabel:
+        "Connection failed: the endpoint reported a server error, so the key was not validated.",
+      probeNetworkLabel: "Connection failed: the endpoint could not be reached.",
+      probeTimeoutLabel: "Connection failed: the endpoint did not answer in time.",
+      probeTokenMissingLabel: "No key is available to test. Save a key first.",
+      probeInvalidBaseUrlLabel:
+        "Connection not attempted: the endpoint address is invalid.",
+      saveInvalidSentence:
+        "Enter a non-empty API key of at most 4,096 characters with no line breaks or control characters.",
+      unavailableSentence:
+        "Key management is unavailable in this window. Keep the current key and try again.",
+    },
+    providers: {
+      "glm-coding-plan": {
+        heading: "GLM Coding Plan API key",
+        lede: "The GLM Coding Plan endpoint authenticates with an API key instead of a provider login.",
+        keyValuePlaceholder: "Paste your GLM API key",
+        environmentFallbackLabel:
+          "Sessions currently fall back to the GLM_ANTHROPIC_AUTH_TOKEN environment variable.",
+      },
+      "kimi-code": {
+        heading: "Kimi Code API key",
+        lede: "The Kimi Code endpoint authenticates with an API key instead of a provider login.",
+        keyValuePlaceholder: "Paste your Kimi API key",
+        environmentFallbackLabel:
+          "Sessions currently fall back to the KIMI_CODE_ANTHROPIC_AUTH_TOKEN environment variable.",
+        keyHandlingWarning:
+          "The Kimi console shows each key exactly once when it is created and allows at most 5 keys: a lost key can only be recreated, never recovered.",
+      },
+      "deepseek-api": {
+        heading: "DeepSeek API key",
+        lede: "The DeepSeek API endpoint authenticates with an API key instead of a provider login.",
+        keyValuePlaceholder: "Paste your DeepSeek API key",
+        environmentFallbackLabel:
+          "Sessions currently fall back to the DEEPSEEK_ANTHROPIC_AUTH_TOKEN environment variable.",
+      },
+      "kimi-platform": {
+        heading: "Kimi Platform API key",
+        lede: "The Kimi Platform endpoint authenticates with an API key instead of a provider login.",
+        keyValuePlaceholder: "Paste your Kimi Platform API key",
+        environmentFallbackLabel:
+          "Sessions currently fall back to the KIMI_PLATFORM_API_KEY environment variable.",
+      },
+      "claude-api": {
+        heading: "Claude API key",
+        lede: "The Claude API endpoint authenticates with an API key instead of a provider login.",
+        keyValuePlaceholder: "Paste your Claude API key",
+        environmentFallbackLabel:
+          "Sessions currently fall back to the CLAUDE_API_KEY environment variable.",
+      },
+      "codex-api": {
+        heading: "Codex API key",
+        lede: "The Codex API endpoint authenticates with an API key instead of a provider login.",
+        keyValuePlaceholder: "Paste your Codex API key",
+        environmentFallbackLabel:
+          "Sessions currently fall back to the CODEX_API_KEY environment variable.",
+      },
+    },
+  },
+  /** Ticket 25: the merged family card's segment-switch group label. */
+  familyFacadeCopy: {
+    segmentsLabel: (runtimeFamilyLabel: string): string =>
+      `${runtimeFamilyLabel} backend`,
+  },
   bindingStatusAriaCopy: (
     runtimeFamilyLabel: string,
     stateLabel: string,
   ): string =>
     `${runtimeFamilyLabel} subscription authentication: ${stateLabel}`,
+  endpointCatalogFreshnessCopy: {
+    newModelsHeading: (count: number): string =>
+      count === 1
+        ? "1 new model available"
+        : `${count} new models available`,
+    newModelsItem: (entry: {
+      readonly id: string;
+      readonly displayName?: string;
+      readonly createdAt?: string;
+    }): string =>
+      `${entry.displayName ?? entry.id} · new (untiered)` +
+      (entry.createdAt === undefined ? "" : ` · listed ${entry.createdAt}`),
+    enrolledListLabel: "Recently added by the automatic catalog check (untiered until curated):",
+    refreshAction: "Check for new models",
+    refreshingAction: "Checking…",
+    silentFailureSentence:
+      "The automatic catalog check could not reach this provider just now. The known catalog stays in effect.",
+    unavailableSentence:
+      "Catalog freshness is unavailable in this window. The known catalog stays in effect.",
+  },
+  /**
+   * CLI update block (ticket 18). claude's button appears only when the
+   * read-only check found a newer version; codex has no read-only check,
+   * so its button is the explicit "check and update" action. Failure states
+   * stay distinct so the renderer can state only what actually happened.
+   *
+   * Issue 184 adds the two sentences a failure used to swallow. A failed
+   * check now says so and offers "Check for updates again" instead of removing the
+   * control and leaving the row blank, and the optional "Restart now" action
+   * stays beside "Not now". If the app cannot restart itself, its status says
+   * it can keep running and new sessions will use the new version.
+   */
+  cliUpdateCopy: {
+    updateAvailableSentence: (
+      currentVersion: string,
+      availableVersion: string,
+    ): string => `A new version is available: ${currentVersion} → ${availableVersion}.`,
+    checkAndUpdateAction: "Check and update",
+    updateAction: "Update",
+    runningAction: "Updating…",
+    succeededSentence:
+      "The update finished. The next new session will start with the new version; existing sessions will not switch versions.",
+    restartNowAction: "Restart now",
+    restartingAction: "Restarting…",
+    restartLaterAction: "Not now",
+    relaunchFailedSentence:
+      "The app could not restart itself. You can keep using it; new sessions will use the new version.",
+    checkFailedSentence:
+      "Could not check whether a newer version is available. Check again for current version information.",
+    checkAgainAction: "Check for updates again",
+    checkingAction: "Checking…",
+    failedTimeoutSentence:
+      "The update did not finish in time. Nothing was changed.",
+    failedLaunchSentence:
+      "The update command could not be started. Nothing was changed.",
+    failedUpdateSentence:
+      "The update did not complete. Nothing was changed.",
+    failedNoChangeSentence:
+      "The updater finished without an error, but the installed version did not change. Nothing was updated. Try again, or update this CLI from the channel that installed it.",
+    failedResultUnknownSentence:
+      "The update command finished, but the version for the next new session could not be verified. Check again before starting a new session.",
+    failedUnsupportedInstallSentence:
+      "This CLI install is managed by its own channel (for example the desktop app it came with) and updates itself there. Nothing was changed.",
+    failureInUseAdvice:
+      "A session or another process may still be using this CLI. Close them and try again.",
+    unavailableSentence:
+      "CLI updates are unavailable in this window. Nothing was changed.",
+    /*
+     * w120. Before this, the codex row was a bare button and nothing else:
+     * no version, no channel, no statement of what pressing it would do —
+     * and pressing it runs a non-interactive installer in the background.
+     * A person could not tell beforehand what they were about to install.
+     *
+     * What these two sentences may say is bounded by what the renderer is
+     * told. The codex report is `{ status: "no-check" }`; it carries no
+     * version and no channel, so neither is claimed here. Saying "you are on
+     * 0.153.4" from a value nobody sent would be the invention this project
+     * treats as its worst defect.
+     */
+    codexActionSentence:
+      "Workbench asks the channel that installed this CLI to update it. That can download and install a new version in the background.",
+    codexVersionUnknownSentence:
+      "The installed version is not read until the update runs. Afterwards Workbench re-reads it and only reports success if it actually changed.",
+    confirmUpdateQuestion:
+      "Update this CLI now?",
+    confirmUpdateAction: "Yes, update",
+    cancelUpdateAction: "Cancel",
+  },
   bindActionAriaCopy: (
     actionLabel: string,
     runtimeFamilyLabel: string,
@@ -146,7 +326,7 @@ const englishCopy = {
       "Subscription sign-in could not be verified. Re-check before taking an authentication action.",
     logoutAction: "Log out",
     loginAction: "Login",
-    recheckAction: "Re-check",
+    recheckAction: "Re-check sign-in",
     loginBlocked: "Login is blocked.",
     blockerAccepted: "Accepted",
     blockerStarting: "Starting",
@@ -171,9 +351,9 @@ const simplifiedChineseCopy = {
     readingCatalogs: "正在读取目录…",
     readCatalogs: "读取目录",
     recheckAll: "全部重新检查",
-    credentialHeading: "Workbench 永不处理凭据",
+    credentialHeading: "订阅凭据绝不经过 Workbench",
     credentialSentence:
-      "此页面绝不会索取密码、API 密钥或令牌，也不会读取凭据文件或存储凭据。不得添加任何此类控件。",
+      "订阅登录在各提供方自己的应用中完成。此页面绝不会索取订阅密码或令牌，不会读取订阅凭据文件，也不会存储订阅凭据。例外——各 API 密钥端点的 API 密钥——在下文对应提供方的 API 密钥区块中如实说明。",
     catalogAvailableHeading: "目录可用",
     catalogUnavailableHeading: "目录不可用",
     notCheckedHeading: "尚未检查",
@@ -229,10 +409,144 @@ const simplifiedChineseCopy = {
     confirmLogout: "要求提供方 CLI 退出登录",
     continueWithLogin: "继续登录",
   },
+  endpointKeyCopy: {
+    shared: {
+      storageSentence:
+        "保存的密钥由本操作系统账户加密（Windows 上为 DPAPI），并存储在 Workbench 的本地文件中。",
+      protectionSentence:
+        "该保护防的是离线盘检（拆盘或拷盘后离线读取密文）；它不能防已在你的用户账户下运行的进程。",
+      keyValueLabel: "API 密钥",
+      saveAction: "保存密钥",
+      revealAction: "显示密钥",
+      hideRevealAction: "隐藏密钥",
+      removeAction: "删除密钥",
+      probeAction: "测试连接",
+      statusLoadingLabel: "正在检查已存密钥…",
+      notConfiguredLabel: "未保存密钥",
+      configuredLabel: "已保存密钥",
+      persistentLabel: "已为本操作系统账户持久保存。",
+      sessionOnlyLabel: "仅本次会话有效——重启后已存密钥即失效。",
+      probeSuccessLabel: "连接成功：端点接受了该密钥。",
+      probeUnauthorizedLabel: "连接失败：端点拒绝了该密钥（未授权）。",
+      probeEndpointErrorLabel: "连接失败：端点拒绝了请求。",
+      probeServerErrorLabel: "连接失败：端点报告服务器错误，密钥未经验证。",
+      probeNetworkLabel: "连接失败：无法连接到端点。",
+      probeTimeoutLabel: "连接失败：端点未在时限内响应。",
+      probeTokenMissingLabel: "没有可测试的密钥，请先保存密钥。",
+      probeInvalidBaseUrlLabel: "未尝试连接：端点地址无效。",
+      saveInvalidSentence:
+        "请输入非空的 API 密钥，长度不超过 4,096 个字符，且不含换行或控制字符。",
+      unavailableSentence: "此窗口中密钥管理不可用。请保留当前密钥并重试。",
+    },
+    providers: {
+      "glm-coding-plan": {
+        heading: "GLM Coding Plan API 密钥",
+        lede: "GLM Coding Plan 端点使用 API 密钥认证，而非提供方登录。",
+        keyValuePlaceholder: "粘贴你的 GLM API 密钥",
+        environmentFallbackLabel:
+          "当前会话回退使用环境变量 GLM_ANTHROPIC_AUTH_TOKEN。",
+      },
+      "kimi-code": {
+        heading: "Kimi Code API 密钥",
+        lede: "Kimi Code 端点使用 API 密钥认证，而非提供方登录。",
+        keyValuePlaceholder: "粘贴你的 Kimi API 密钥",
+        environmentFallbackLabel:
+          "当前会话回退使用环境变量 KIMI_CODE_ANTHROPIC_AUTH_TOKEN。",
+        keyHandlingWarning:
+          "Kimi 控制台仅在创建时显示一次密钥，且最多允许 5 把：丢失的密钥只能重新创建，无法找回。",
+      },
+      "deepseek-api": {
+        heading: "DeepSeek API 密钥",
+        lede: "DeepSeek API 端点使用 API 密钥认证，而非提供方登录。",
+        keyValuePlaceholder: "粘贴你的 DeepSeek API 密钥",
+        environmentFallbackLabel:
+          "当前会话回退使用环境变量 DEEPSEEK_ANTHROPIC_AUTH_TOKEN。",
+      },
+      "kimi-platform": {
+        heading: "Kimi 平台 API 密钥",
+        lede: "Kimi 平台端点使用 API 密钥认证，而非提供方登录。",
+        keyValuePlaceholder: "粘贴你的 Kimi 平台 API 密钥",
+        environmentFallbackLabel:
+          "当前会话回退使用环境变量 KIMI_PLATFORM_API_KEY。",
+      },
+      "claude-api": {
+        heading: "Claude API 密钥",
+        lede: "Claude API 端点使用 API 密钥认证，而非提供方登录。",
+        keyValuePlaceholder: "粘贴你的 Claude API 密钥",
+        environmentFallbackLabel:
+          "当前会话回退使用环境变量 CLAUDE_API_KEY。",
+      },
+      "codex-api": {
+        heading: "Codex API 密钥",
+        lede: "Codex API 端点使用 API 密钥认证，而非提供方登录。",
+        keyValuePlaceholder: "粘贴你的 Codex API 密钥",
+        environmentFallbackLabel:
+          "当前会话回退使用环境变量 CODEX_API_KEY。",
+      },
+    },
+  },
+  familyFacadeCopy: {
+    segmentsLabel: (runtimeFamilyLabel: string): string =>
+      `${runtimeFamilyLabel} 后端`,
+  },
   bindingStatusAriaCopy: (
     runtimeFamilyLabel: string,
     stateLabel: string,
   ): string => `${runtimeFamilyLabel} 订阅身份验证：${stateLabel}`,
+  endpointCatalogFreshnessCopy: {
+    newModelsHeading: (count: number): string =>
+      count === 1 ? "1 个新模型可用" : `${count} 个新模型可用`,
+    newModelsItem: (entry: {
+      readonly id: string;
+      readonly displayName?: string;
+      readonly createdAt?: string;
+    }): string =>
+      `${entry.displayName ?? entry.id} · 新（未定档）` +
+      (entry.createdAt === undefined ? "" : ` · 列出于 ${entry.createdAt}`),
+    enrolledListLabel: "由自动目录检查加入（定档前为未定档）：",
+    refreshAction: "检查新模型",
+    refreshingAction: "正在检查…",
+    silentFailureSentence:
+      "自动目录检查暂时无法连接此提供方。现有目录继续生效。",
+    unavailableSentence: "此窗口中目录新鲜度不可用。现有目录继续生效。",
+  },
+  cliUpdateCopy: {
+    updateAvailableSentence: (
+      currentVersion: string,
+      availableVersion: string,
+    ): string => `有新版本可用：${currentVersion} → ${availableVersion}。`,
+    checkAndUpdateAction: "检查并更新",
+    updateAction: "更新",
+    runningAction: "正在更新…",
+    succeededSentence: "更新完成。下一个新会话将启动新版本；现有会话不会切换版本。",
+    restartNowAction: "立即重启",
+    restartingAction: "正在重启…",
+    restartLaterAction: "暂不",
+    relaunchFailedSentence:
+      "应用无法自行重启。你可以继续使用它；新会话将使用新版本。",
+    checkFailedSentence: "无法检查是否有更新版本。请重新检查以获取当前版本信息。",
+    checkAgainAction: "重新检查更新",
+    checkingAction: "正在检查…",
+    failedTimeoutSentence: "更新超时未完成。没有任何更改。",
+    failedLaunchSentence: "无法启动更新命令。没有任何更改。",
+    failedUpdateSentence: "更新未完成。没有任何更改。",
+    failedNoChangeSentence:
+      "更新程序没有报错，但已安装的版本并未变化，什么都没更新。请重试，或从安装它的渠道更新该 CLI。",
+    failedResultUnknownSentence:
+      "更新命令已结束，但无法核实下一个新会话的版本。请在新建会话前重新检查。",
+    failedUnsupportedInstallSentence:
+      "此 CLI 由其自身的安装渠道（例如随附的桌面应用）管理，并由该渠道自行更新。此处没有任何更改。",
+    failureInUseAdvice:
+      "可能有会话或其他进程正在使用此 CLI，关闭后重试。",
+    unavailableSentence: "此窗口中 CLI 更新不可用。没有任何更改。",
+    codexActionSentence:
+      "Workbench 会请安装此 CLI 的渠道进行更新。这可能会在后台下载并安装新版本。",
+    codexVersionUnknownSentence:
+      "已安装的版本要等更新运行时才会读取。更新后 Workbench 会重新读一次，只有版本确实变化才报成功。",
+    confirmUpdateQuestion: "现在更新此 CLI 吗？",
+    confirmUpdateAction: "确认更新",
+    cancelUpdateAction: "取消",
+  },
   bindActionAriaCopy: (
     actionLabel: string,
     runtimeFamilyLabel: string,
@@ -291,7 +605,7 @@ const simplifiedChineseCopy = {
     unknownDetail: "无法验证订阅登录。执行身份验证操作前请重新检查。",
     logoutAction: "退出登录",
     loginAction: "登录",
-    recheckAction: "重新检查",
+    recheckAction: "重新检查登录",
     loginBlocked: "登录已被阻止。",
     blockerAccepted: "已接受",
     blockerStarting: "正在启动",
@@ -373,6 +687,54 @@ export type AppearancePersistenceLabel =
   (typeof appearancePersistenceLabels)[keyof typeof appearancePersistenceLabels];
 
 export const subscriptionAuthCopy = localizedCopy.subscriptionAuthCopy;
+
+export const endpointKeySharedCopy = localizedCopy.endpointKeyCopy.shared;
+
+export const endpointKeyProviderCopy =
+  localizedCopy.endpointKeyCopy.providers;
+
+export type WorkbenchEndpointKeyCopyEndpointId = keyof typeof endpointKeyProviderCopy;
+
+/**
+ * The composed per-endpoint copy dictionary for one provider's key block:
+ * shared machine sentences plus the provider's own identity strings. The
+ * provider record may carry a key-handling warning absent on other providers
+ * (Kimi's shown-once × 5-keys limit).
+ */
+export function workbenchEndpointKeyCopy(
+  endpointId: WorkbenchEndpointKeyCopyEndpointId,
+) {
+  const provider = endpointKeyProviderCopy[endpointId];
+  return Object.freeze({
+    ...endpointKeySharedCopy,
+    heading: provider.heading,
+    lede: provider.lede,
+    keyValuePlaceholder: provider.keyValuePlaceholder,
+    environmentFallbackLabel: provider.environmentFallbackLabel,
+    ...("keyHandlingWarning" in provider && provider.keyHandlingWarning !== undefined
+      ? { keyHandlingWarning: provider.keyHandlingWarning }
+      : {}),
+  });
+}
+
+/** Flattened GLM view kept for the fidelity pins (same composed content). */
+export const glmEndpointKeyCopy = workbenchEndpointKeyCopy("glm-coding-plan");
+
+export const kimiEndpointKeyCopy = workbenchEndpointKeyCopy("kimi-code");
+
+export const deepseekEndpointKeyCopy = workbenchEndpointKeyCopy("deepseek-api");
+
+/** Flattened Kimi Platform view for the merged Kimi card's platform side. */
+export const kimiPlatformEndpointKeyCopy =
+  workbenchEndpointKeyCopy("kimi-platform");
+
+/** Copy for the merged family settings cards' backend segment switch. */
+export const familyFacadeCopy = localizedCopy.familyFacadeCopy;
+
+export const endpointCatalogFreshnessCopy =
+  localizedCopy.endpointCatalogFreshnessCopy;
+
+export const cliUpdateCopy = localizedCopy.cliUpdateCopy;
 
 export type SubscriptionAuthenticationLabel =
   (typeof subscriptionAuthCopy)[

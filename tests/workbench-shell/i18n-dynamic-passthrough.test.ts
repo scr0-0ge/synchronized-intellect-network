@@ -86,6 +86,19 @@ interface ComposerLocalizationModule {
   ) => unknown;
 }
 
+interface ComposerErrorVisibilityModule {
+  readonly DirectInputComposer: RenderedComponent;
+  readonly dynamicCopy: {
+    readonly submission: { readonly unavailable: string };
+  };
+  readonly initialRendererState: WorkbenchRendererState;
+  readonly setLocale: (locale: "en" | "zh-CN") => void;
+  readonly workbenchLocalizedText: (
+    key: string,
+    resolve: () => string,
+  ) => unknown;
+}
+
 interface HistoryLocalizationModule {
   readonly RecoveryBrowseState: RenderedComponent;
   readonly RecoveryList: RenderedComponent;
@@ -583,6 +596,99 @@ test("closed composer and interrupt vocabulary renders from identity in the curr
     assert.equal(
       renderToString(() => module.DirectInputComposer(composerProps)),
       english,
+    );
+  } finally {
+    await server.close();
+  }
+});
+
+test("a failed submission renders its error sentence in the composer foot in both locales", async () => {
+  // WO08-A: the owner reported a GLM send "did nothing visible". The view
+  // model already preserves the draft and re-arms submission on
+  // submission-unavailable (renderer-view-model.test.ts); this pins the
+  // rendered leg — the foot sentence and the textarea's error state — so a
+  // failed send can never again be silent in the composed UI.
+  const server = await createViteSsrTestServer({
+    appType: "custom",
+    configFile: false,
+    logLevel: "silent",
+    plugins: [solid({ ssr: true })],
+    root: repositoryRoot,
+    server: { middlewareMode: true },
+  });
+
+  try {
+    const module = {
+      ...(await server.ssrLoadModule(
+        "/src/workbench-shell/renderer/composer.tsx",
+      )),
+      ...(await server.ssrLoadModule(
+        "/src/workbench-shell/renderer/view-model.ts",
+      )),
+      ...(await server.ssrLoadModule(
+        "/src/workbench-shell/renderer/presentation-text.ts",
+      )),
+      ...(await server.ssrLoadModule(
+        "/src/workbench-shell/renderer/copy/dynamic-copy.ts",
+      )),
+      ...(await server.ssrLoadModule(
+        "/src/workbench-shell/renderer/locale.ts",
+      )),
+    } as unknown as ComposerErrorVisibilityModule;
+    const failureFeedback = module.workbenchLocalizedText(
+      "submission.unavailable",
+      () => module.dynamicCopy.submission.unavailable,
+    );
+    const base = module.initialRendererState;
+    const composerProps = Object.freeze({
+      view: visualFixture,
+      selected: undefined,
+      composer: Object.freeze({
+        ...base.composer,
+        draft: "Keep this draft after the failed send.",
+        phase: "error" as const,
+        feedback: failureFeedback,
+      }),
+      profile: base.profile,
+      newSession: base.newSession,
+      projectSwitch: base.projectSwitch,
+      projectOpen: base.projectOpen,
+      centered: false,
+      onDraft: noOp,
+      onLoadProfile: noOp,
+      onEnterNewSession: noOp,
+      onCancelNewSession: noOp,
+      onEndpoint: noOp,
+      onModel: noOp,
+      onWorkIntensity: noOp,
+      onExecutionMode: noOp,
+      onAccessMode: noOp,
+      onUseAsDefault: noOp,
+      onSubmit: noOp,
+    });
+
+    module.setLocale("en");
+    const english = renderToString(() =>
+      module.DirectInputComposer(composerProps),
+    );
+    assert.equal(
+      renderedIdText(english, "direct-input-feedback"),
+      "Direct input could not be durably accepted. Keep your draft and try again.",
+    );
+    assert.match(english, /aria-invalid="true"/u);
+
+    module.setLocale("zh-CN");
+    const chinese = renderToString(() =>
+      module.DirectInputComposer(composerProps),
+    );
+    assert.equal(
+      renderedIdText(chinese, "direct-input-feedback"),
+      "无法持久接受直接输入。请保留草稿并重试。",
+    );
+    assert.match(chinese, /aria-invalid="true"/u);
+    assert.doesNotMatch(
+      chinese,
+      /Direct input could not be durably accepted\./u,
     );
   } finally {
     await server.close();

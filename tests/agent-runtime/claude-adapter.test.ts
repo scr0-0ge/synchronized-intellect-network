@@ -471,12 +471,26 @@ test("Claude tolerated model data cannot cross the product catalog sanitizer bou
     projectDirectory: "project",
     codexAdapter,
     claudeAdapter,
+    glmEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const publicProductValue = JSON.stringify(discovery);
 
   assert.deepEqual(
     discovery.endpointDiscovery.statuses.map((status) => status.category),
-    ["catalog-ready", "catalog-ready"],
+    [
+      "catalog-ready",
+      "catalog-ready",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+      "authentication-required",
+    ],
   );
   assert.equal(publicProductValue.includes("futureRoutingHint"), false);
   assert.equal(publicProductValue.includes(privateDriftValue), false);
@@ -777,6 +791,80 @@ test("Claude inspect fails closed on malformed and turn-bearing initialization f
   assert.equal(turnBearing.stopped, 1);
 });
 
+for (const row of [
+  { name: "missing sources", body: { effective: {}, applied: { model: "opus-alias", effort: "xhigh", ultracode: true } } },
+  { name: "missing applied effort", body: { effective: {}, sources: [], applied: { model: "opus-alias", ultracode: true } } },
+  { name: "missing applied", body: { effective: {}, sources: [] } },
+  { name: "changed sources", body: { effective: {}, sources: {}, private: "PRIVATE_SETTINGS_CANARY" } },
+  { name: "changed body", body: [], category: "runtime-unavailable" as const },
+  { name: "removed get_settings", body: {}, rejected: true, category: "runtime-unavailable" as const },
+]) {
+  test(`Claude CLI drift: catalog remains usable without optional settings (${row.name})`, async (t) => {
+    const summaries: string[] = [];
+    t.mock.method(process.stderr, "write", (chunk: string) => {
+      summaries.push(String(chunk));
+      return true;
+    });
+    const createTransport = () => {
+      const transport = new InitializationTransport({ models: [{ value: "opus-alias", supportsEffort: true, supportedEffortLevels: ["high", "xhigh"] }] }, undefined, row.body);
+      if (row.rejected) {
+        const receive = transport.receive.bind(transport);
+        transport.receive = async () => {
+          const line = await receive();
+          if (line === null) return line;
+          const frame = JSON.parse(line);
+          if (frame.response?.request_id?.includes("settings")) {
+            frame.response = { subtype: "error", request_id: frame.response.request_id, error: "Unknown control subtype: get_settings" };
+          }
+          return JSON.stringify(frame);
+        };
+      }
+      return transport;
+    };
+    const transport = createTransport();
+    const catalog = await new ClaudeAdapter(async () => transport).inspect("project");
+    assert.deepEqual(catalog.models, [{ id: "opus-alias", effortLevels: ["high", "xhigh"] }]);
+    assert.equal(transport.stopped, 1);
+    assert.equal(transport.userFrames, 0);
+    assert.equal(summaries.length, 1);
+    assert.match(summaries[0]!, /optional-data-unavailable.*gate=catalog-settings/u);
+    assert.equal(JSON.stringify({ catalog, summaries }).includes("PRIVATE_SETTINGS_CANARY"), false);
+
+    // Inspect may omit an unconfirmed variant; executing a selected profile
+    // may not omit its confirmation or send a prompt on guessed settings.
+    const sessionTransport = createTransport();
+    await assert.rejects(() => new ClaudeAdapter(async () => sessionTransport, async () => sessionTransport).start({
+      projectDirectory: "project",
+      profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" },
+    }), fixedRuntimeError(row.category ?? "protocol-invalid"));
+    assert.equal(sessionTransport.stopped, 1);
+    assert.equal(sessionTransport.userFrames, 0);
+  });
+}
+
+test("Claude CLI drift: optional catalog settings do not mask broken framing or correlation", async () => {
+  for (const mutation of ["turn-bearing", "wrong-id", "malformed-json", "missing-response"]) {
+    const transport = new InitializationTransport({ models: [{ value: "model" }] });
+    const receive = transport.receive.bind(transport);
+    transport.receive = async () => {
+      const line = await receive();
+      if (line === null) return line;
+      const frame = JSON.parse(line);
+      if (frame.response?.request_id?.includes("settings")) {
+        if (mutation === "turn-bearing") return JSON.stringify({ type: "assistant" });
+        if (mutation === "malformed-json") return "{";
+        if (mutation === "missing-response") delete frame.response;
+        else frame.response.request_id = "not-our-request";
+      }
+      return JSON.stringify(frame);
+    };
+    await assert.rejects(() => new ClaudeAdapter(async () => transport).inspect("project"),
+      fixedRuntimeError(mutation === "wrong-id" ? "runtime-shutdown" : "protocol-invalid"));
+    assert.equal(transport.userFrames, 0);
+    assert.equal(transport.stopped, 1);
+  }
+});
+
 test("Claude catalog-fatal rejection names the exact gate and adversarial row without weakening the fixed Runtime error", async () => {
   const transport = new InitializationTransport({
     models: [
@@ -905,6 +993,89 @@ test("Claude start preserves a Chinese turn through the normalized Runtime seam"
   assert.equal(sessionTransport.stopped, 1);
 });
 
+test("Claude carries its post-result prompt suggestion on the completed turn", async () => {
+  const suggestion = "检查这次改动还缺哪些测试";
+  const transport = new SuccessfulSessionTransport(
+    "native-suggestion-session-must-remain-private",
+    "完成这个改动",
+    "改动已完成。",
+    false,
+    {
+      postResultFrames: [
+        {
+          type: "prompt_suggestion",
+          suggestion,
+          uuid: "suggestion-frame-id",
+          session_id: "native-suggestion-session-must-remain-private",
+        },
+      ],
+    },
+  );
+  const binding = await new ClaudeAdapter(
+    async () => {
+      throw new Error("catalog transport is not the session transport");
+    },
+    async () => transport,
+  ).start({
+    projectDirectory: "project",
+    profile: {
+      model: "opus-alias",
+      effortLevel: "high",
+      executionMode: "single-agent",
+      accessMode: "full-access",
+    },
+  });
+
+  await binding.send({ text: "完成这个改动" });
+  assert.deepEqual((await collect(binding.events())).at(-1), {
+    kind: "turn-completed",
+    status: "completed",
+    suggestions: [suggestion],
+  });
+  assert.equal(transport.stopped, 1);
+});
+
+test("Claude ignores malformed or foreign post-result suggestion frames without losing completion", async () => {
+  const transport = new SuccessfulSessionTransport(
+    "native-optional-suggestion-session",
+    "prompt",
+    "ANSWER",
+    false,
+    {
+      postResultFrames: [
+        { type: "prompt_suggestion", session_id: "native-optional-suggestion-session" },
+        { type: "prompt_suggestion", suggestion: 42, session_id: "native-optional-suggestion-session" },
+        { type: "prompt_suggestion", suggestion: " \t\n ", session_id: "native-optional-suggestion-session" },
+        { type: "prompt_suggestion", suggestion: "bad\u000bcontrol", session_id: "native-optional-suggestion-session" },
+        { type: "prompt_suggestion", suggestion: "belongs elsewhere", session_id: "foreign-session" },
+        { type: "future_optional_frame", private: "PRIVATE_OPTIONAL_CANARY" },
+        ["future-array-shape"],
+      ],
+    },
+  );
+  const binding = await new ClaudeAdapter(
+    async () => transport,
+    async () => transport,
+  ).start({
+    projectDirectory: "project",
+    profile: {
+      model: "opus-alias",
+      effortLevel: "high",
+      executionMode: "single-agent",
+      accessMode: "full-access",
+    },
+  });
+
+  await binding.send({ text: "prompt" });
+  const events = await collect(binding.events());
+  assert.deepEqual(events.at(-1), {
+    kind: "turn-completed",
+    status: "completed",
+  });
+  assert.equal(JSON.stringify(events).includes("PRIVATE_OPTIONAL_CANARY"), false);
+  assert.equal(transport.stopped, 1);
+});
+
 test("Claude carries result usage with an explicitly unknown context window", async () => {
   const transport = new SuccessfulSessionTransport(
     "native-usage-session-must-remain-private",
@@ -953,7 +1124,12 @@ test("Claude carries result usage with an explicitly unknown context window", as
   assert.equal(transport.stopped, 1);
 });
 
-test("Claude result usage fails closed on every invalid native row", async () => {
+test("Claude CLI drift: invalid optional usage is discarded with diagnostics, not a failed turn", async (t) => {
+  const summaries: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: string) => {
+    summaries.push(String(chunk));
+    return true;
+  });
   const baseUsage = {
     input_tokens: 10,
     cache_creation_input_tokens: 20,
@@ -961,20 +1137,14 @@ test("Claude result usage fails closed on every invalid native row", async () =>
     output_tokens: 5,
   };
   const adversarial = [
+    { name: "missing count", value: { input_tokens: 10, output_tokens: 5 } },
+    { name: "changed envelope", value: [baseUsage] },
+    { name: "null usage", value: null },
+    { name: "renamed counts", value: { tokens: baseUsage, private: "PRIVATE_USAGE_CANARY" } },
+    { name: "changed count type", value: { ...baseUsage, output_tokens: "5" } },
     { name: "negative count", value: { ...baseUsage, input_tokens: -1 } },
     { name: "non-integer count", value: { ...baseUsage, output_tokens: 1.5 } },
-    {
-      name: "provider numeric window is not accepted even when smaller",
-      value: { ...baseUsage, windowTokens: 64 },
-    },
-    {
-      name: "provider non-number window is not accepted",
-      value: { ...baseUsage, windowTokens: "unknown" },
-    },
-    {
-      name: "unrecognized extra key",
-      value: { ...baseUsage, future_provider_field: 1 },
-    },
+    { name: "overflow sum", value: { ...baseUsage, input_tokens: Number.MAX_SAFE_INTEGER } },
   ];
 
   for (const row of adversarial) {
@@ -1005,15 +1175,126 @@ test("Claude result usage fails closed on every invalid native row", async () =>
     const events = await collect(binding.events());
     assert.deepEqual(
       events.at(-1),
-      { kind: "failed", category: "protocol-invalid" },
+      { kind: "turn-completed", status: "completed" },
       row.name,
     );
     assert.equal(
-      events.some((event) => event.kind === "turn-completed"),
+      events.some((event) => "context" in event),
       false,
       row.name,
     );
     assert.equal(transport.stopped, 1, row.name);
+    assert.equal(summaries.length, adversarial.indexOf(row) + 1, row.name);
+    assert.match(summaries.at(-1)!, /optional-data-unavailable.*gate=context-usage/u);
+    assert.equal(JSON.stringify({ events, summaries }).includes("PRIVATE_USAGE_CANARY"), false);
+  }
+});
+
+for (const capabilities of [
+  { interrupt_receipt_v1: true, interrupt_cancel_queued_v1: true, private: "PRIVATE_CAPABILITY_CANARY" },
+  ["interrupt_receipt_v1", 42],
+  null,
+  undefined,
+  ["interrupt_receipt_v1"],
+  ["interrupt_cancel_queued_v1"],
+  [],
+]) {
+  test(`Claude CLI drift: reduced controls for capabilities ${JSON.stringify(capabilities)}`, async (t) => {
+    const summaries: string[] = [];
+    t.mock.method(process.stderr, "write", (chunk: string) => {
+      summaries.push(String(chunk));
+      return true;
+    });
+    const transport = new SuccessfulSessionTransport("private-session", "prompt", "ANSWER");
+    const receive = transport.receive.bind(transport);
+    transport.receive = async () => {
+      const line = await receive();
+      if (line === null) return line;
+      const message = JSON.parse(line);
+      if (message.type === "system" && message.subtype === "init") {
+        message.capabilities = capabilities;
+      }
+      return JSON.stringify(message);
+    };
+    const binding = await new ClaudeAdapter(async () => transport, async () => transport).start({
+      projectDirectory: "project",
+      profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" },
+    });
+    await binding.send({ text: "prompt" });
+    const iterator = binding.events()[Symbol.asyncIterator]();
+    assert.deepEqual((await iterator.next()).value, { kind: "session-started" });
+    assert.equal(binding.interruptAvailability!(), "unsupported");
+    assert.equal(binding.steerAvailability!(), "unsupported");
+    const writes = transport.sent.length;
+    await assert.rejects(() => binding.interrupt!(), fixedRuntimeError("unsupported-selection"));
+    await assert.rejects(() => binding.steer!({ text: "correction" }), fixedRuntimeError("unsupported-selection"));
+    assert.equal(transport.sent.length, writes, "unsupported controls must not reach the wire");
+    const events = await collectIterator(iterator);
+    assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed" });
+    assert.equal(transport.stopped, 1);
+    assert.equal(summaries.length, 1);
+    assert.match(summaries[0]!, /optional-data-unavailable.*gate=interrupt-and-steer/u);
+    assert.equal(JSON.stringify({ events, summaries }).includes("PRIVATE_CAPABILITY_CANARY"), false);
+  });
+}
+
+test("Claude CLI drift: new init version and capability keys leave known controls available", async (t) => {
+  const summaries: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: string) => { summaries.push(String(chunk)); return true; });
+  const transport = new SuccessfulSessionTransport("private-session", "prompt", "ANSWER");
+  const receive = transport.receive.bind(transport);
+  transport.receive = async () => {
+    const line = await receive();
+    if (line === null) return line;
+    const message = JSON.parse(line);
+    if (message.type === "system" && message.subtype === "init") {
+      message.claude_code_version = "999.0.0-garbage";
+      message.capabilities.push("future_control_v9");
+      message.future = { private: "PRIVATE_INIT_CANARY" };
+    }
+    return JSON.stringify(message);
+  };
+  const binding = await new ClaudeAdapter(async () => transport, async () => transport).start({
+    projectDirectory: "project",
+    profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" },
+  });
+  await binding.send({ text: "prompt" });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  assert.deepEqual((await iterator.next()).value, { kind: "session-started" });
+  assert.equal(binding.interruptAvailability!(), "available");
+  assert.equal(binding.steerAvailability!(), "available");
+  const events = await collectIterator(iterator);
+  assert.equal(events.at(-1)?.kind, "turn-completed");
+  assert.equal(summaries.length, 0);
+  assert.equal(JSON.stringify(events).includes("PRIVATE_INIT_CANARY"), false);
+});
+
+test("Claude CLI drift: optional data never excuses missing identity, permission, model or completion evidence", async () => {
+  for (const key of ["session_id", "permissionMode", "model", "terminal_reason", "result"]) {
+    const transport = new SuccessfulSessionTransport("private-session", "prompt", "ANSWER", false, { usage: {} });
+    const receive = transport.receive.bind(transport);
+    transport.receive = async () => {
+      const line = await receive();
+      if (line === null) return line;
+      const message = JSON.parse(line);
+      if (message.type === "system" && message.subtype === "init") {
+        if (["session_id", "permissionMode", "model"].includes(key)) {
+          message.capabilities = { interrupt_receipt_v1: true };
+          delete message[key];
+        }
+      }
+      if (message.type === "result") delete message[key];
+      return JSON.stringify(message);
+    };
+    const binding = await new ClaudeAdapter(async () => transport, async () => transport).start({
+      projectDirectory: "project",
+      profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" },
+    });
+    await binding.send({ text: "prompt" });
+    const events = await collect(binding.events());
+    assert.deepEqual(events.at(-1), { kind: "failed", category: ["terminal_reason", "result"].includes(key) ? "turn-failed" : "unsupported-selection" }, key);
+    assert.equal(events.some(event => event.kind === "turn-completed" || "context" in event), false);
+    assert.equal(transport.stopped, 1);
   }
 });
 
@@ -1470,16 +1751,8 @@ test("Claude interrupt correlates the synthetic user marker and reports one hone
     correlationFailureDiscriminator(): string | undefined;
   };
   assert.equal(typeof controllable.interrupt, "function");
-  assert.equal(
-    binding.steer,
-    undefined,
-    "Claude's hybrid prompt queue is not a turn-correlated steer capability",
-  );
-  assert.equal(
-    binding.steerAvailability,
-    undefined,
-    "interrupt_cancel_queued_v1 must not be advertised as steering",
-  );
+  assert.equal(typeof binding.steer, "function");
+  assert.equal(binding.steerAvailability?.(), "available");
   assert.equal(binding.interruptAvailability?.(), "available");
 
   let controlReceiptObserved = false;
@@ -1520,6 +1793,129 @@ test("Claude interrupt correlates the synthetic user marker and reports one hone
   assert.equal(transport.stopped, 1);
 });
 
+test("Claude steer interrupts before injecting a correction, keeps completed work in one Session, and completes only the corrected leg", async () => {
+  const transport = new SteerableSessionTransport();
+  const adapter = new ClaudeAdapter(
+    async () => {
+      throw new Error("catalog transport is not the session transport");
+    },
+    async () => transport,
+  );
+  const binding = await adapter.start({
+    projectDirectory: "project",
+    profile: {
+      model: "opus-alias",
+      effortLevel: "high",
+      executionMode: "single-agent",
+      accessMode: "full-access",
+    },
+  });
+  await binding.send({ text: "WRONG=41; first finish COMPLETED_STEP=alpha" });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  const events = [
+    (await iterator.next()).value,
+    (await iterator.next()).value,
+    (await iterator.next()).value,
+  ];
+  assert.equal(typeof binding.steer, "function");
+  assert.equal(binding.steerAvailability?.(), "available");
+
+  const steer = binding.steer!({ text: "CORRECTION: use 73" });
+  let nextEventSettled = false;
+  const nextEvent = iterator.next().then((step) => {
+    nextEventSettled = true;
+    return step;
+  });
+  await steer;
+  await transport.oldLegResultRead;
+  await Promise.resolve();
+
+  // Acceptance 1: the correction is delivered during the active turn, only
+  // after the matching interrupt receipt, and uses the live Session identity.
+  assert.deepEqual(transport.steeringWrites, [
+    {
+      type: "control_request",
+      request: { subtype: "interrupt", cancel_queued: true },
+    },
+    {
+      type: "user",
+      session_id: transport.sessionIdentity,
+      message: {
+        role: "user",
+        content: [{ type: "text", text: "CORRECTION: use 73" }],
+      },
+      parent_tool_use_id: null,
+    },
+  ]);
+  assert.equal(transport.correctionWrittenAfterReceipt, true);
+
+  // Acceptance 3: the old leg has already produced aborted_streaming, but it
+  // did not finish with the wrong number and did not close the binding.
+  assert.equal(nextEventSettled, false);
+  assert.equal(transport.stopped, 0);
+  assert.equal(binding.steerAvailability?.(), "unavailable");
+
+  transport.continueCorrectedLeg();
+  const firstContinuationEvent = await nextEvent;
+  assert.equal(firstContinuationEvent.done, false);
+  events.push(firstContinuationEvent.value);
+  events.push(...(await collectIterator(iterator)));
+
+  // Acceptance 2: there was no replacement Session and the already-completed
+  // work remains visible before the answer produced from the corrected value.
+  assert.deepEqual(new Set(transport.systemSessionIdentities), new Set([
+    transport.sessionIdentity,
+  ]));
+  assert.deepEqual(events, [
+    { kind: "session-started" },
+    { kind: "turn-started" },
+    { kind: "item-started", itemType: "agent-message" },
+    { kind: "agent-message", text: "COMPLETED_STEP=alpha" },
+    { kind: "item-completed", itemType: "agent-message" },
+    {
+      kind: "agent-message",
+      text: "COMPLETED_STEP=alpha; CORRECT=73",
+    },
+    { kind: "turn-completed", status: "completed" },
+  ]);
+  assert.equal(transport.stopped, 1);
+  assert.equal(binding.steerAvailability?.(), "unavailable");
+});
+
+test("Claude steer rejects a continuation init that changes the active Session", async () => {
+  const transport = new SteerableSessionTransport();
+  const binding = await new ClaudeAdapter(
+    async () => {
+      throw new Error("catalog transport is not the session transport");
+    },
+    async () => transport,
+  ).start({
+    projectDirectory: "project",
+    profile: {
+      model: "opus-alias",
+      effortLevel: "high",
+      executionMode: "single-agent",
+      accessMode: "full-access",
+    },
+  });
+  await binding.send({ text: "WRONG=41; first finish COMPLETED_STEP=alpha" });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  await iterator.next();
+  await iterator.next();
+  await iterator.next();
+
+  const steer = binding.steer!({ text: "CORRECTION: use 73" });
+  const remaining = collectIterator(iterator);
+  await steer;
+  await transport.oldLegResultRead;
+  transport.continueCorrectedLeg("different-native-session");
+
+  assert.deepEqual(await remaining, [
+    { kind: "failed", category: "correlation-invalid" },
+  ]);
+  assert.equal(transport.stopped, 1);
+});
+
 test("Claude provider-attempt mode truthfully disables unbudgeted interruption", async () => {
   const claims: ProviderOperationKind[] = [];
   const budget: ProviderRequestBudget = Object.freeze({
@@ -1552,9 +1948,14 @@ test("Claude provider-attempt mode truthfully disables unbudgeted interruption",
   });
 
   assert.equal(binding.interruptAvailability?.(), "unsupported");
+  assert.equal(binding.steerAvailability?.(), "unsupported");
   await assert.rejects(
     () =>
       (binding as typeof binding & { interrupt(): Promise<void> }).interrupt(),
+    fixedRuntimeError("unsupported-selection"),
+  );
+  await assert.rejects(
+    () => binding.steer!({ text: "must not start an unbudgeted correction" }),
     fixedRuntimeError("unsupported-selection"),
   );
   assert.equal(transport.interruptRequest, undefined);
@@ -1564,6 +1965,49 @@ test("Claude provider-attempt mode truthfully disables unbudgeted interruption",
   ]);
 
   await iterator.return?.();
+});
+
+test("Claude CLI drift: a steered continuation can lose control capabilities without losing its answer", async (t) => {
+  const summaries: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: string) => { summaries.push(String(chunk)); return true; });
+  const transport = new SteerableSessionTransport();
+  t.after(() => transport.stop());
+  const receive = transport.receive.bind(transport);
+  transport.receive = async () => {
+    const line = await receive();
+    if (line === null) return line;
+    const frame = JSON.parse(line);
+    if (frame.type === "system" && transport.systemSessionIdentities.length === 2) frame.capabilities = {};
+    return JSON.stringify(frame);
+  };
+  const binding = await new ClaudeAdapter(async () => transport, async () => transport).start({
+    projectDirectory: "project",
+    profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" },
+  });
+  await binding.send({ text: "WRONG=41; first finish COMPLETED_STEP=alpha" });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  await iterator.next();
+  await iterator.next();
+  await iterator.next();
+  assert.equal(binding.steerAvailability!(), "available");
+  const steer = binding.steer!({ text: "CORRECTION: use 73" });
+  let reducedControlsObserved = false;
+  const remaining = collectIterator(iterator, event => {
+    if (event.kind === "agent-message" && event.text === "COMPLETED_STEP=alpha") {
+      assert.equal(binding.interruptAvailability!(), "unsupported");
+      assert.equal(binding.steerAvailability!(), "unsupported");
+      reducedControlsObserved = true;
+    }
+  });
+  await steer;
+  await transport.oldLegResultRead;
+  transport.continueCorrectedLeg();
+  const events = await remaining;
+  assert.equal(reducedControlsObserved, true);
+  assert.ok(events.some(event => event.kind === "agent-message" && event.text === "COMPLETED_STEP=alpha; CORRECT=73"));
+  assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed" });
+  assert.equal(summaries.length, 1);
+  assert.match(summaries[0]!, /optional-data-unavailable.*gate=interrupt-and-steer/u);
 });
 
 test("Claude interrupt correlates the observed post-receipt user frame before reporting stopped", async () => {
@@ -1640,6 +2084,71 @@ test("Claude interrupt correlates the observed post-receipt user frame before re
   assert.equal(controllable.correlationFailureDiscriminator(), undefined);
   assert.equal(transport.stopped, 1);
 });
+
+// Issue #6 (QA batch) case 3: a confirmed interrupt whose terminal result
+// drifts from the wire shapes this build knows — a terminal_reason a newer
+// CLI spells differently, or a mid-stream stop where the Stop hook never
+// fires — must still report one honest interrupted terminal. The receipt is
+// positive evidence the Runtime accepted the stop; spelling drift must not
+// demote it to a fixed failure that ends the whole Session.
+for (const drift of [
+  { name: "unrecognized terminal_reason", drift: { terminalReason: "aborted" } },
+  { name: "no Stop-hook echo", drift: { omitStopHook: true } },
+  {
+    name: "both",
+    drift: { omitStopHook: true, terminalReason: "interrupted_by_user" },
+  },
+] as const) {
+  test(`Claude interrupt with a drifted result wire (${drift.name}) still reports interrupted, not a fixed failure`, async () => {
+    const transport = new InterruptibleSessionTransport(
+      "synthetic-marker",
+      true,
+      drift.drift,
+    );
+    const adapter = new ClaudeAdapter(
+      async () => {
+        throw new Error("catalog transport is not the session transport");
+      },
+      async () => transport,
+    );
+    const binding = await adapter.start({
+      projectDirectory: "project",
+      profile: {
+        model: "opus-alias",
+        effortLevel: "high",
+        executionMode: "single-agent",
+        accessMode: "full-access",
+      },
+    });
+    await binding.send({ text: "Reply slowly with UAW_FAKE_INTERRUPT" });
+    const iterator = binding.events()[Symbol.asyncIterator]();
+    await iterator.next();
+    await iterator.next();
+    await iterator.next();
+    const controllable = binding as typeof binding & {
+      interrupt(): Promise<void>;
+    };
+    // The receipt is only observed by the running event loop, so interrupt
+    // and iterator consumption must proceed concurrently (same shape as the
+    // strict-shape interrupt tests above).
+    const interrupt = controllable.interrupt();
+    const events: unknown[] = [];
+    const pump = (async () => {
+      while (true) {
+        const step = await iterator.next();
+        if (step.done) break;
+        events.push(step.value);
+      }
+    })();
+    await interrupt;
+    await pump;
+    assert.deepEqual(events, [
+      { kind: "turn-interrupted", status: "interrupted" },
+    ]);
+    assert.equal(transport.stopped, 1);
+    assert.equal(binding.interruptAvailability?.(), "unavailable");
+  });
+}
 
 const correlationRejectionFixtures = [
   {
@@ -1727,7 +2236,7 @@ for (const row of correlationRejectionFixtures) {
   });
 }
 
-test("Claude deliberately drops provider-only tool and rate-limit frames before the final normalized message", async () => {
+test("Claude surfaces thinking but does not mistake allowed quota telemetry for rate limiting (issue #6 cases 1a/4)", async () => {
   const transport = new SuccessfulSessionTransport(
     "native-tool-session-must-remain-private",
     "Use one fake tool, then reply UAW_FAKE_TOOL_DONE",
@@ -1753,9 +2262,26 @@ test("Claude deliberately drops provider-only tool and rate-limit frames before 
     text: "Use one fake tool, then reply UAW_FAKE_TOOL_DONE",
   });
 
+  // Thinking is real activity; the fixture's rate_limit_event says allowed,
+  // not blocked. Vendor signatures and redacted blocks remain private.
   assert.deepEqual(await collect(binding.events()), [
     { kind: "session-started" },
     { kind: "turn-started" },
+    { kind: "progress", activity: "thinking" },
+    {
+      kind: "progress",
+      activity: "tool",
+      tool: {
+        type: "tool_use",
+        name: "Read",
+        parameter: {
+          kind: "path",
+          value: "src/agent-runtime/index.ts",
+          truncated: false,
+        },
+      },
+    },
+    { kind: "reasoning", text: "private" },
     { kind: "item-started", itemType: "agent-message" },
     { kind: "item-completed", itemType: "agent-message" },
     { kind: "agent-message", text: "UAW_FAKE_TOOL_DONE" },
@@ -1763,7 +2289,94 @@ test("Claude deliberately drops provider-only tool and rate-limit frames before 
   ]);
 });
 
-test("Claude fails closed on an unrecognized assistant content block", async () => {
+test("Claude names an unnamed tool honestly and marks a clipped path", async () => {
+  const originalPath = `src/${"long-directory-".repeat(12)}component.ts`;
+  const transport = new SuccessfulSessionTransport(
+    "native-unnamed-tool-session-must-remain-private",
+    "Use one fake tool, then reply UAW_FAKE_UNKNOWN_TOOL_DONE",
+    "UAW_FAKE_UNKNOWN_TOOL_DONE",
+    true,
+    {
+      omitToolUseName: true,
+      toolUseInput: {
+        path: originalPath,
+        private_payload: "do not copy this whole input object",
+      },
+    },
+  );
+  const adapter = new ClaudeAdapter(
+    async () => {
+      throw new Error("catalog transport is not the session transport");
+    },
+    async () => transport,
+  );
+  const binding = await adapter.start({
+    projectDirectory: "project",
+    profile: {
+      model: "opus-alias",
+      effortLevel: "high",
+      executionMode: "single-agent",
+      accessMode: "full-access",
+    },
+  });
+  await binding.send({ text: "Use one fake tool, then reply UAW_FAKE_UNKNOWN_TOOL_DONE" });
+
+  const toolProgress = (await collect(binding.events())).filter(
+    (event) => event.kind === "progress" && event.activity === "tool",
+  );
+  assert.deepEqual(toolProgress, [
+    {
+      kind: "progress",
+      activity: "tool",
+      tool: {
+        type: "tool_use",
+        name: "未知工具",
+        parameter: {
+          kind: "path",
+          value: `${Array.from(originalPath).slice(0, 119).join("")}…`,
+          truncated: true,
+        },
+      },
+    },
+  ]);
+});
+
+test("Claude coalesces repeated provider retries into one retrying progress note (issue #6 case 4)", async () => {
+  const transport = new SuccessfulSessionTransport(
+    "native-api-retry-session-must-remain-private",
+    "Reply with exactly UAW_FAKE_RETRY_DONE",
+    "UAW_FAKE_RETRY_DONE",
+    true,
+    { apiRetrySystemFrames: true },
+  );
+  const adapter = new ClaudeAdapter(
+    async () => {
+      throw new Error("catalog transport is not the session transport");
+    },
+    async () => transport,
+  );
+  const binding = await adapter.start({
+    projectDirectory: "project",
+    profile: {
+      model: "opus-alias",
+      effortLevel: "high",
+      executionMode: "single-agent",
+      accessMode: "full-access",
+    },
+  });
+  await binding.send({ text: "Reply with exactly UAW_FAKE_RETRY_DONE" });
+
+  // Two api_retry frames arrive; the second is a consecutive repeat of the
+  // same activity and must not produce a second durable row.
+  const events = await collect(binding.events());
+  const retryingNotes = events.filter(
+    (event) => event.kind === "progress" && event.activity === "retrying",
+  );
+  assert.deepEqual(retryingNotes, [{ kind: "progress", activity: "retrying" }]);
+  assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed" });
+});
+
+test("Claude drops an unrecognized assistant content block and preserves the answer", async () => {
   const transport = new SuccessfulSessionTransport(
     "native-unknown-block-session-private",
     "Reply with exactly UAW_FAKE_UNKNOWN_BLOCK",
@@ -1789,8 +2402,8 @@ test("Claude fails closed on an unrecognized assistant content block", async () 
   await binding.send({ text: "Reply with exactly UAW_FAKE_UNKNOWN_BLOCK" });
 
   assert.deepEqual((await collect(binding.events())).at(-1), {
-    kind: "failed",
-    category: "protocol-invalid",
+    kind: "turn-completed",
+    status: "completed",
   });
 });
 
@@ -2142,23 +2755,14 @@ test("Claude Ask when needed completes allow and deny approval turns while resum
   assert.equal(resumedTransport.executedTools, 0);
 });
 
-test("Claude Ask when needed rejects malformed, widened, and duplicate permission requests before tool execution", async () => {
+test("Claude Ask when needed rejects malformed and duplicate permission requests before tool execution", async () => {
   const fixtures = [
-    { name: "extra control key", options: { messageExtras: { extra: true } } },
-    { name: "extra request key", options: { requestExtras: { extra: true } } },
     {
       name: "missing tool use id",
       options: { requestExtras: { tool_use_id: undefined } },
     },
     { name: "empty agent id", options: { requestExtras: { agent_id: "" } } },
-    {
-      name: "unknown permission suggestion",
-      options: {
-        requestExtras: {
-          permission_suggestions: [{ type: "setMode", mode: "future" }],
-        },
-      },
-    },
+
   ] as const;
   const profile = Object.freeze({
     model: "opus-alias",
@@ -2382,6 +2986,10 @@ class SuccessfulSessionTransport implements ClaudeCatalogTransport {
     readonly settingsEffort?: string | null;
     readonly settingsUltracode?: boolean;
     readonly settingsResponse?: unknown;
+    readonly apiRetrySystemFrames?: boolean;
+    readonly omitToolUseName?: boolean;
+    readonly toolUseInput?: unknown;
+    readonly postResultFrames?: readonly unknown[];
   };
   readonly #lines: string[] = [];
   #hookCallbackId = "";
@@ -2404,6 +3012,10 @@ class SuccessfulSessionTransport implements ClaudeCatalogTransport {
       readonly settingsEffort?: string | null;
       readonly settingsUltracode?: boolean;
       readonly settingsResponse?: unknown;
+      readonly apiRetrySystemFrames?: boolean;
+      readonly omitToolUseName?: boolean;
+      readonly toolUseInput?: unknown;
+      readonly postResultFrames?: readonly unknown[];
     } = {},
   ) {
     this.#nativeSessionCanary = nativeSessionCanary;
@@ -2500,6 +3112,22 @@ class SuccessfulSessionTransport implements ClaudeCatalogTransport {
         );
       }
       if (this.#withToolFrames) {
+        if (this.#reported.apiRetrySystemFrames === true) {
+          // The provider-retry shape whose silence made a stalled turn look
+          // dead (issue #6 case 4 / case 2's perceived hang).
+          prefix.push(
+            JSON.stringify({
+              type: "system",
+              subtype: "api_retry",
+              session_id: this.#nativeSessionCanary,
+            }),
+            JSON.stringify({
+              type: "system",
+              subtype: "api_retry",
+              session_id: this.#nativeSessionCanary,
+            }),
+          );
+        }
         prefix.push(
           JSON.stringify({
             type: "assistant",
@@ -2507,7 +3135,17 @@ class SuccessfulSessionTransport implements ClaudeCatalogTransport {
               role: "assistant",
               content: [
                 { type: "thinking", thinking: "private", signature: "private" },
-                { type: "tool_use", id: "tool-fixed", name: "Read", input: {} },
+                {
+                  type: "tool_use",
+                  id: "tool-fixed",
+                  ...(this.#reported.omitToolUseName === true
+                    ? {}
+                    : { name: "Read" }),
+                  input: this.#reported.toolUseInput ?? {
+                    path: "src/agent-runtime/index.ts",
+                    private_payload: "do not copy this whole input object",
+                  },
+                },
               ],
             },
             parent_tool_use_id: null,
@@ -2585,6 +3223,9 @@ class SuccessfulSessionTransport implements ClaudeCatalogTransport {
             ? {}
             : { usage: this.#reported.usage }),
         }),
+        ...(this.#reported.postResultFrames ?? []).map((frame) =>
+          JSON.stringify(frame),
+        ),
       );
     }
   }
@@ -2592,6 +3233,8 @@ class SuccessfulSessionTransport implements ClaudeCatalogTransport {
   async receive(): Promise<string | null> {
     return this.#lines.shift() ?? null;
   }
+
+  finishInput(): void {}
 
   async stop(): Promise<void> {
     this.stopped += 1;
@@ -2959,6 +3602,15 @@ class CorrelationRejectingSessionTransport implements ClaudeCatalogTransport {
   }
 }
 
+interface InterruptibleResultDrift {
+  /** Omit the post-receipt Stop-hook echo entirely (mid-stream interrupt). */
+  readonly omitStopHook?: boolean;
+  /** Spell a terminal_reason this build has never seen. */
+  readonly terminalReason?: string;
+  /** Spell a result subtype this build has never seen. */
+  readonly subtype?: string;
+}
+
 class InterruptibleSessionTransport implements ClaudeCatalogTransport {
   readonly #lines: string[] = [];
   #hookCallbackId = "";
@@ -2967,6 +3619,7 @@ class InterruptibleSessionTransport implements ClaudeCatalogTransport {
     | "synthetic-marker"
     | "unrecognized-text-block";
   readonly #emitInputEcho: boolean;
+  readonly #resultDrift: InterruptibleResultDrift;
   interruptRequest: Record<string, unknown> | undefined;
   stopped = 0;
 
@@ -2975,9 +3628,11 @@ class InterruptibleSessionTransport implements ClaudeCatalogTransport {
       | "synthetic-marker"
       | "unrecognized-text-block" = "synthetic-marker",
     emitInputEcho = true,
+    resultDrift: InterruptibleResultDrift = {},
   ) {
     this.#postReceiptFrame = postReceiptFrame;
     this.#emitInputEcho = emitInputEcho;
+    this.#resultDrift = resultDrift;
   }
 
   async send(line: string): Promise<void> {
@@ -3061,25 +3716,31 @@ class InterruptibleSessionTransport implements ClaudeCatalogTransport {
             },
           }),
           JSON.stringify(postReceiptUserFrame),
-          JSON.stringify({
-            type: "control_request",
-            request_id: "interrupt-stop-hook",
-            request: {
-              subtype: "hook_callback",
-              callback_id: this.#hookCallbackId,
-              input: {
-                hook_event_name: "Stop",
-                session_id: this.#session,
-                permission_mode: "bypassPermissions",
-                effort: { level: "high" },
-              },
-            },
-          }),
+          ...(this.#resultDrift.omitStopHook
+            ? []
+            : [
+                JSON.stringify({
+                  type: "control_request",
+                  request_id: "interrupt-stop-hook",
+                  request: {
+                    subtype: "hook_callback",
+                    callback_id: this.#hookCallbackId,
+                    input: {
+                      hook_event_name: "Stop",
+                      session_id: this.#session,
+                      permission_mode: "bypassPermissions",
+                      effort: { level: "high" },
+                    },
+                  },
+                }),
+              ]),
           JSON.stringify({
             type: "result",
-            subtype: "error_during_execution",
+            subtype:
+              this.#resultDrift.subtype ?? "error_during_execution",
             is_error: true,
-            terminal_reason: "aborted_streaming",
+            terminal_reason:
+              this.#resultDrift.terminalReason ?? "aborted_streaming",
             session_id: this.#session,
           }),
         );
@@ -3139,6 +3800,243 @@ class InterruptibleSessionTransport implements ClaudeCatalogTransport {
   }
 }
 
+class SteerableSessionTransport implements ClaudeCatalogTransport {
+  readonly sessionIdentity = "native-steer-session-private";
+  readonly sent: Record<string, unknown>[] = [];
+  readonly systemSessionIdentities: string[] = [];
+  readonly #lines: string[] = [];
+  readonly #receivers: ((line: string | null) => void)[] = [];
+  #hookCallbackId = "";
+  #interruptReceiptRead = false;
+  #resolveOldLegResultRead!: () => void;
+  readonly oldLegResultRead = new Promise<void>((resolve) => {
+    this.#resolveOldLegResultRead = resolve;
+  });
+  correctionWrittenAfterReceipt = false;
+  stopped = 0;
+
+  get steeringWrites(): Record<string, unknown>[] {
+    return this.sent
+      .filter((message) => {
+        const request = message.request as Record<string, unknown> | undefined;
+        return request?.subtype === "interrupt" ||
+          (message.type === "user" && message.session_id !== "");
+      })
+      .map((message) => {
+        if (message.type === "control_request") {
+          return { type: message.type, request: message.request };
+        }
+        return message;
+      });
+  }
+
+  async send(line: string): Promise<void> {
+    const message = JSON.parse(line) as Record<string, unknown>;
+    this.sent.push(message);
+    if (message.type === "control_request") {
+      const request = message.request as Record<string, unknown>;
+      if (request.subtype === "initialize") {
+        const hooks = request.hooks as {
+          Stop: { hookCallbackIds: string[] }[];
+        };
+        this.#hookCallbackId = hooks.Stop[0]!.hookCallbackIds[0]!;
+        this.#push({
+          type: "control_response",
+          response: {
+            subtype: "success",
+            request_id: message.request_id,
+            response: {
+              models: [
+                {
+                  value: "opus-alias",
+                  resolvedModel: "claude-opus-canonical",
+                  supportsEffort: true,
+                  supportedEffortLevels: ["high"],
+                },
+              ],
+            },
+          },
+        });
+        return;
+      }
+      if (request.subtype === "get_settings") {
+        this.#push({
+          type: "control_response",
+          response: {
+            subtype: "success",
+            request_id: message.request_id,
+            response: claudeSettingsResponse("high", false),
+          },
+        });
+        return;
+      }
+      if (request.subtype === "interrupt") {
+        this.#push({
+          type: "control_response",
+          response: {
+            subtype: "success",
+            request_id: message.request_id,
+            response: { still_queued: [], cancelled: [] },
+          },
+        });
+        return;
+      }
+    }
+    if (message.type !== "user") return;
+    if (message.session_id === "") {
+      this.#push(
+        this.#init(this.sessionIdentity),
+        {
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "WRONG=41; first finish COMPLETED_STEP=alpha",
+              },
+            ],
+          },
+          parent_tool_use_id: null,
+          session_id: this.sessionIdentity,
+        },
+        {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "COMPLETED_STEP=alpha" }],
+          },
+          parent_tool_use_id: null,
+          session_id: this.sessionIdentity,
+        },
+      );
+      return;
+    }
+    this.correctionWrittenAfterReceipt = this.#interruptReceiptRead;
+    this.#push(
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: "[Request interrupted by user]" }],
+        },
+        parent_tool_use_id: null,
+        session_id: this.sessionIdentity,
+        timestamp: "synthetic-timestamp",
+        uuid: "synthetic-interrupt-marker",
+      },
+      {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        terminal_reason: "aborted_streaming",
+        result: null,
+        session_id: this.sessionIdentity,
+      },
+    );
+  }
+
+  continueCorrectedLeg(sessionIdentity = this.sessionIdentity): void {
+    this.#push(
+      this.#init(sessionIdentity),
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: "COMPLETED_STEP=alpha; CORRECT=73" },
+          ],
+        },
+        parent_tool_use_id: null,
+        session_id: sessionIdentity,
+      },
+      {
+        type: "control_request",
+        request_id: "steer-stop-hook",
+        request: {
+          subtype: "hook_callback",
+          callback_id: this.#hookCallbackId,
+          input: {
+            hook_event_name: "Stop",
+            session_id: sessionIdentity,
+            permission_mode: "bypassPermissions",
+            effort: { level: "high" },
+          },
+        },
+      },
+      {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        terminal_reason: "completed",
+        result: "COMPLETED_STEP=alpha; CORRECT=73",
+        session_id: sessionIdentity,
+      },
+    );
+  }
+
+  async receive(): Promise<string | null> {
+    const line = this.#lines.shift();
+    const received = line ?? await new Promise<string | null>((resolve) => {
+      this.#receivers.push(resolve);
+    });
+    if (received !== null) {
+      const message = JSON.parse(received) as Record<string, unknown>;
+      if (message.type === "system" && message.subtype === "init") {
+        this.systemSessionIdentities.push(String(message.session_id));
+      }
+      if (message.type === "control_response") {
+        const response = message.response as Record<string, unknown>;
+        if (response.request_id === this.#interruptRequestId()) {
+          this.#interruptReceiptRead = true;
+        }
+      }
+      if (
+        message.type === "result" &&
+        message.terminal_reason === "aborted_streaming"
+      ) {
+        this.#resolveOldLegResultRead();
+      }
+    }
+    return received;
+  }
+
+  async stop(): Promise<void> {
+    this.stopped += 1;
+    while (this.#receivers.length > 0) this.#receivers.shift()!(null);
+  }
+
+  #init(sessionIdentity: string): Record<string, unknown> {
+    return {
+      type: "system",
+      subtype: "init",
+      model: "claude-opus-canonical",
+      permissionMode: "bypassPermissions",
+      capabilities: [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+      ],
+      session_id: sessionIdentity,
+    };
+  }
+
+  #interruptRequestId(): unknown {
+    return this.sent.find((message) => {
+      const request = message.request as Record<string, unknown> | undefined;
+      return request?.subtype === "interrupt";
+    })?.request_id;
+  }
+
+  #push(...messages: Record<string, unknown>[]): void {
+    for (const message of messages) {
+      const line = JSON.stringify(message);
+      const receiver = this.#receivers.shift();
+      if (receiver === undefined) this.#lines.push(line);
+      else receiver(line);
+    }
+  }
+}
+
 function claudeSettingsResponse(
   effort: string | null,
   ultracode: boolean,
@@ -3186,4 +4084,106 @@ function fixedRuntimeError(category: RuntimeAdapterError["category"]) {
     error.message === "Agent Runtime operation failed." &&
     error.stack ===
       "RuntimeAdapterError: Agent Runtime operation failed.";
+}
+
+for (const site of ["envelope", "request", "suggestions"] as const) {
+  test(`vendor Claude permission ${site}: additions are dropped before handler and response`, async () => {
+    const canary = { future_vendor_field: { redacted_thinking: "UNCONSUMED_VENDOR_CANARY" } };
+    const options = site === "envelope"
+      ? { messageExtras: canary }
+      : site === "request"
+        ? { requestExtras: canary }
+        : { requestExtras: { permission_suggestions: [{ type: "future-suggestion", ...canary }] } };
+    const transport = new ApprovalSessionTransport("native-vendor-permission", "prompt", "ANSWER", "tool-vendor", "default", options);
+    const requests: ClaudeToolPermissionRequest[] = [];
+    const binding = await new ClaudeAdapter(async () => transport, async () => transport, undefined, {
+      readPermissionMode: async () => "manual",
+      requestToolPermission: async request => { requests.push(request); return { behavior: "allow" }; },
+    }).start({ projectDirectory: "project", profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" } });
+    await binding.send({ text: "prompt" });
+    const events = await collect(binding.events());
+    assert.equal(events.at(-1)?.kind, "turn-completed");
+    assert.equal(requests.length, 1);
+    assert.equal(transport.executedTools, 1);
+    const downstream = JSON.stringify({ events, requests, response: transport.permissionResponse });
+    assert.equal(downstream.includes("UNCONSUMED_VENDOR_CANARY"), false);
+    assert.equal(downstream.includes("future_vendor_field"), false);
+  });
+}
+
+for (const site of ["envelope", "request"] as const) {
+  test(`vendor Claude permission ${site}: missing and malformed required fields stay fatal`, async () => {
+    for (const invalid of [undefined, 42]) {
+      const options = site === "envelope" ? { messageExtras: { request_id: invalid } } : { requestExtras: { tool_name: invalid } };
+      const transport = new ApprovalSessionTransport("native-vendor-required", "prompt", "ANSWER", "tool-vendor", "default", options);
+      let handlerCalls = 0;
+      const binding = await new ClaudeAdapter(async () => transport, async () => transport, undefined, {
+        readPermissionMode: async () => "manual",
+        requestToolPermission: async () => { handlerCalls += 1; return { behavior: "allow" }; },
+      }).start({ projectDirectory: "project", profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" } });
+      await binding.send({ text: "prompt" });
+      assert.deepEqual((await collect(binding.events())).at(-1), { kind: "failed", category: "protocol-invalid" });
+      assert.equal(handlerCalls, 0);
+      assert.equal(transport.executedTools, 0);
+    }
+  });
+}
+
+async function observeVendorInterruptFrame(mutate: (frame: Record<string, any>) => void) {
+  const transport = new InterruptibleSessionTransport("unrecognized-text-block", false);
+  const receive = transport.receive.bind(transport);
+  transport.receive = async () => {
+    const line = await receive();
+    if (line === null) return line;
+    const frame = JSON.parse(line);
+    if (frame.type === "user" && frame.timestamp !== undefined) mutate(frame);
+    return JSON.stringify(frame);
+  };
+  const binding = await new ClaudeAdapter(async () => transport, async () => transport).start({ projectDirectory: "project", profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" } });
+  await binding.send({ text: "Reply slowly with UAW_FAKE_INTERRUPT" });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  await iterator.next();
+  await iterator.next();
+  await iterator.next();
+  const receipt = binding.interrupt!();
+  const remaining = collectIterator(iterator);
+  await receipt;
+  return remaining;
+}
+
+test("Claude close starts shutdown and rejects an outstanding interrupt without reading its receipt", async () => {
+  const transport = new InterruptibleSessionTransport("unrecognized-text-block", false);
+  const binding = await new ClaudeAdapter(async () => transport, async () => transport).start({
+    projectDirectory: "project", profile: { model: "opus-alias", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" },
+  });
+  await binding.send({ text: "Reply slowly with UAW_FAKE_INTERRUPT" });
+  const iterator = binding.events()[Symbol.asyncIterator]();
+  await iterator.next();
+  await iterator.next();
+  await iterator.next();
+  assert.equal(binding.interruptAvailability(), "available");
+  const interrupt = binding.interrupt();
+  const rejected = assert.rejects(interrupt, error => error instanceof RuntimeAdapterError && error.category === "runtime-shutdown");
+  binding.close?.();
+  binding.close?.();
+  assert.equal(transport.stopped, 1, "close is idempotent and starts shutdown immediately");
+  assert.equal(binding.interruptAvailability(), "unavailable");
+  await rejected;
+  await iterator.return?.();
+});
+
+for (const site of ["envelope", "message", "block"] as const) {
+  const target = (frame: Record<string, any>): Record<string, any> => site === "envelope" ? frame : site === "message" ? frame.message : frame.message.content[0];
+  test(`vendor Claude interrupt ${site}: additive key is dropped after confirmed receipt`, async () => {
+    const events = await observeVendorInterruptFrame(frame => { target(frame).future_vendor_field = { redacted_thinking: "UNCONSUMED_VENDOR_CANARY" }; });
+    assert.deepEqual(events, [{ kind: "turn-interrupted", status: "interrupted" }]);
+    assert.equal(JSON.stringify(events).includes("UNCONSUMED_VENDOR_CANARY"), false);
+  });
+  test(`vendor Claude interrupt ${site}: required fields stay fatal`, async () => {
+    const key = site === "envelope" ? "uuid" : site === "message" ? "role" : "text";
+    for (const missing of [true, false]) {
+      const events = await observeVendorInterruptFrame(frame => { if (missing) delete target(frame)[key]; else target(frame)[key] = 42; });
+      assert.equal(events.at(-1)?.kind, "failed");
+    }
+  });
 }

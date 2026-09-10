@@ -76,6 +76,7 @@ import {
   directInputMode,
   directWorkIntensityPresentationLabel,
   enterNewAgentSessionMode,
+  hasHostedProjectView,
   initialRendererState,
   isInterruptShortcut,
   pendingContinuationDirectSessionProfileLoad,
@@ -795,9 +796,16 @@ test("renderer uses labeled keyboard-operable chips, popovers, and a discrete in
     composerSource.indexOf("const IntensityPopover"),
   );
   assert.doesNotMatch(profilePopover, /endpoint\.models\.length/u);
+  // Ticket 20/25: the picker list is the facade view — each family's two
+  // endpoints present as the single entry resolved from the persisted
+  // per-family preferences.
   assert.match(
     profilePopover,
-    /<For each=\{directEndpointStatusRows\(props\.profile\)\}>/u,
+    /<For each=\{directFacadeEndpointStatusRows\(/u,
+  );
+  assert.match(
+    profilePopover,
+    /props\.endpointPreferences\s*\?\?\s*defaultWorkbenchFamilyEndpointPreferences/u,
   );
   assert.match(profilePopover, /\{row\.endpointLabel\}/u);
   assert.doesNotMatch(rendererSource, /Review provider status from Settings in the Project rail/u);
@@ -954,9 +962,10 @@ test("renderer uses labeled keyboard-operable chips, popovers, and a discrete in
   );
   assert.match(
     inspectorSource,
-    /effective\.kind === "unknown"[\s\S]*?inspectorCopy\.unknownValue/u,
+    /effective\.kind === "unknown"[\s\S]*?observationPending[\s\S]*?inspectorCopy\.pendingObservationValue[\s\S]*?inspectorCopy\.unobservedValue/u,
   );
-  assert.equal(inspectorCopy.unknownValue, "Unknown");
+  assert.equal(inspectorCopy.unobservedValue, "Not observed");
+  assert.equal(inspectorCopy.pendingObservationValue, "Pending observation");
   assert.match(
     mountSource,
     /const initialWorkbenchAppearance = defaultWorkbenchAppearancePreference/u,
@@ -1191,12 +1200,12 @@ test("renderer saves the selected profile only through the explicit default acti
   const saved = completeDirectSessionProfileDefaultSave(retry.state, {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
   });
   assert.equal(saved.profile.defaultPreference.phase, "saved");
   assert.equal(
     presentationText(saved.profile.defaultPreference.feedback),
-    "Codex Session Profile default was durably saved.",
+    "Session Profile default was durably saved.",
   );
   assert.equal(
     typeof saved.profile.defaultPreference.feedback === "string"
@@ -1277,6 +1286,7 @@ test("renderer replaces live views while keeping selection stable with determini
   const fallbackState = replaceProjectResult(stableState, fallback);
 
   assert.equal(firstState.selectedKey, "command-1");
+  if (!hasHostedProjectView(first)) assert.fail("Expected a Project view.");
   assert.equal(selectedCommand(first.view, selectedState.selectedKey)?.key, "command-2");
   assert.equal(stableState.selectedKey, "command-2");
   assert.equal(stableState.result, later);
@@ -1319,7 +1329,7 @@ test("archiving the selected row chooses an active fallback and keeps an all-arc
     result(view(2, [archived(first), second], first.key)),
   );
   assert.equal(firstArchived.selectedKey, second.key);
-  assert.equal(selectedCommand(firstArchived.result!.ok
+  assert.equal(selectedCommand(hasHostedProjectView(firstArchived.result)
     ? firstArchived.result!.view
     : view(0, [], null), firstArchived.selectedKey)?.session?.archived, false);
 
@@ -1328,11 +1338,11 @@ test("archiving the selected row chooses an active fallback and keeps an all-arc
     result(view(3, [archived(first), archived(second)], first.key)),
   );
   assert.equal(allArchived.selectedKey, second.key);
-  assert.equal(selectedCommand(allArchived.result!.ok
+  assert.equal(selectedCommand(hasHostedProjectView(allArchived.result)
     ? allArchived.result!.view
     : view(0, [], null), allArchived.selectedKey)?.session?.archived, true);
   assert.deepEqual(
-    selectedCommand(allArchived.result!.ok
+    selectedCommand(hasHostedProjectView(allArchived.result)
       ? allArchived.result!.view
       : view(0, [], null), allArchived.selectedKey)?.session?.timeline,
     second.session?.timeline,
@@ -1343,7 +1353,7 @@ test("archiving the selected row chooses an active fallback and keeps an all-arc
     result(view(4, [archived(first), second], second.key)),
   );
   assert.equal(restored.selectedKey, second.key);
-  assert.equal(selectedCommand(restored.result!.ok
+  assert.equal(selectedCommand(hasHostedProjectView(restored.result)
     ? restored.result!.view
     : view(0, [], null), restored.selectedKey)?.session?.archived, false);
 });
@@ -1441,9 +1451,10 @@ test("renderer prevents invalid and pending duplicate submissions then clears on
       : accepted.composer.feedback?.key,
     "submission.accepted",
   );
+  if (!hasHostedProjectView(accepted.result)) assert.fail("Expected a Project view.");
   assert.equal(
     selectedCommand(
-      (accepted.result as Extract<WorkbenchHostedProjectResult, { ok: true }>).view,
+      accepted.result.view,
       accepted.selectedKey,
     )?.status,
     "accepted",
@@ -1906,6 +1917,85 @@ test("renderer revokes a continuation catalog on stale capability and prefills e
   assert.equal(canSubmitDirectInput(updateDirectInputDraft(invalidated, "next")), false);
 });
 
+test("renderer keeps continuation and guidance drafts with the Session they were written for", () => {
+  const first = Object.freeze({
+    ...resumableSessionCommand(
+      "command-1",
+      "Running Session",
+      "fable-5",
+      "low",
+      "00000000-0000-4000-8000-000000000041",
+    ),
+    status: "in-flight" as const,
+  });
+  const second = resumableSessionCommand(
+    "command-2",
+    "Completed Session",
+    "opus-5",
+    "high",
+    "00000000-0000-4000-8000-000000000042",
+  );
+  const selectedFirst = replaceProjectResult(
+    initialRendererState,
+    result(view(23, [first, second], first.key)),
+  );
+  const draftedFirst = updateDirectInputDraft(
+    selectedFirst,
+    "Guidance for the running Session only.",
+  );
+
+  const selectedSecond = selectProjectCommand(draftedFirst, second.key);
+  assert.equal(selectedSecond.composer.draft, "");
+  assert.equal(canSubmitDirectInput(selectedSecond), false);
+
+  const secondProfileRequest = continuationDirectSessionProfileLoadRequest(
+    selectedSecond,
+  )!;
+  const secondReady = completeDirectSessionProfileLoad(
+    beginDirectSessionProfileLoad(selectedSecond, secondProfileRequest),
+    continuationProfileResult("model-opus", "intensity-high"),
+    secondProfileRequest,
+  );
+  const draftedSecond = updateDirectInputDraft(
+    secondReady,
+    "Reply for the completed Session only.",
+  );
+  const secondSubmission = beginDirectInputSubmission(draftedSecond);
+  assert.deepEqual(secondSubmission.request, {
+    kind: "continue",
+    input: "Reply for the completed Session only.",
+    selectionKey: second.session!.selectionKey,
+    snapshotKey: "snapshot-continuation",
+    endpointKey: "endpoint-claude",
+    modelKey: "model-opus",
+    workIntensityKey: "intensity-high",
+    executionModeKey: "execution-fixed",
+    accessModeKey: "access-fixed",
+  });
+
+  const viewedFirstWhileSecondPending = selectProjectCommand(
+    secondSubmission.state,
+    first.key,
+  );
+  assert.equal(viewedFirstWhileSecondPending.composer.phase, "pending");
+  assert.equal(
+    viewedFirstWhileSecondPending.composer.draft,
+    "Guidance for the running Session only.",
+  );
+  const acceptedSecond = completeDirectInputSubmission(
+    viewedFirstWhileSecondPending,
+    acceptedSubmission(),
+  );
+  assert.equal(acceptedSecond.composer.phase, "idle");
+  const returnedFirst = selectProjectCommand(acceptedSecond, first.key);
+  assert.equal(
+    returnedFirst.composer.draft,
+    "Guidance for the running Session only.",
+  );
+  const returnedSecond = selectProjectCommand(returnedFirst, second.key);
+  assert.equal(returnedSecond.composer.draft, "");
+});
+
 test("renderer explicitly enters and leaves New Agent Session mode without losing draft or selection", () => {
   const first = resumableSessionCommand(
     "command-1",
@@ -2234,7 +2324,7 @@ test("renderer preserves explicit start on failure and selects one newly visible
   assert.equal(canSubmitDirectInput(ambiguous), false);
 });
 
-test("Project switching is blocked by any draft or relevant pending action and never targets selected or unavailable rows", () => {
+test("Project switching carries any draft but still blocks relevant pending actions and invalid targets", () => {
   const first = resumableSessionCommand(
     "command-1",
     "Agent Session 01",
@@ -2253,11 +2343,11 @@ test("Project switching is blocked by any draft or relevant pending action and n
 
   assert.equal(
     canSelectProject(updateDirectInputDraft(base, "Keep this draft."), 1),
-    false,
+    true,
   );
   assert.equal(
     canSelectProject(updateDirectInputDraft(base, " "), 1),
-    false,
+    true,
   );
   const loading = beginDirectSessionProfileLoad(
     enterNewAgentSessionMode(base),
@@ -2334,7 +2424,7 @@ test("Open Project uses the switching gates, preserves state on cancel or failur
   assert.equal(canOpenProject(scoped), true);
   assert.equal(
     canOpenProject(updateDirectInputDraft(scoped, "Keep this Project draft.")),
-    false,
+    true,
   );
   assert.equal(
     canOpenProject(beginProjectSelection(base, 1).state),
@@ -2614,6 +2704,10 @@ test("Create Project reuses strict acquisition correlation and resets exactly on
   assert.equal(created.composer.draft, "");
   assert.equal(created.profile.phase, "idle");
   assert.equal(created.newSession.phase, "inactive");
+  const switchFromCreated = beginProjectSelection(created, 0);
+  assert.notEqual(switchFromCreated.request, null);
+  assert.equal(switchFromCreated.state.projectOpen.phase, "idle");
+  assert.equal(switchFromCreated.state.projectOpen.feedback, null);
 
   const viewFirst = replaceProjectResult(beginCreateProject(scoped), target);
   assert.equal(viewFirst.projectOpen.phase, "pending");
@@ -2980,7 +3074,7 @@ test("idempotent current-Project reopening recognizes the latest rotated snapsho
     {
       ok: true,
       status: "saved",
-      message: "Codex Session Profile default was durably saved.",
+      message: "Session Profile default was durably saved.",
     },
   );
   const switchAttempt = beginProjectSelection(savedDefault, 1);
@@ -3179,7 +3273,12 @@ test("Project selection uses the current snapshot key and resets Project-scoped 
   );
   assert.equal(acceptedBeforeView.projectSwitch.phase, "pending");
   assert.equal(acceptedBeforeView.projectSwitch.selectionAccepted, true);
-  assert.equal(acceptedBeforeView.result?.ok ? acceptedBeforeView.result.view.commands[0]?.key : null, first.key);
+  assert.equal(
+    hasHostedProjectView(acceptedBeforeView.result)
+      ? acceptedBeforeView.result.view.commands[0]?.key
+      : null,
+    first.key,
+  );
 
   const targetView = result(
     twoProjectView(1, [second], second.key, 1, "available", 101),

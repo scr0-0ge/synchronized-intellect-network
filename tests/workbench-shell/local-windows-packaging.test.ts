@@ -41,7 +41,7 @@ test("Windows packaging stages only the minimal production manifest and accepted
   assert.deepEqual(
     JSON.parse(await readFile(join(stagingDirectory, "package.json"), "utf8")),
     {
-      name: "unified-agent-workbench",
+      name: "synchronized-intellect-network",
       productName: "Synchronized Intellect Network",
       version: "0.0.0",
       private: true,

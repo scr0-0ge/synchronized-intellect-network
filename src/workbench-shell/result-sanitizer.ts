@@ -1,3 +1,5 @@
+import type { WorkbenchProjectPathFailure, WorkbenchProjectPathFailureReason } from "./contract.ts";
+import type { WorkbenchSubscriptionUsageObservation, WorkbenchSubscriptionUsageResult } from "./contract.ts";
 import type {
   ProjectCommandFailureCategory,
   ProjectCommandStatus,
@@ -9,7 +11,10 @@ import {
 import { normalizeSessionDisplayName } from "../session-metadata.ts";
 import { redactFilesystemPaths } from "./path-redaction.ts";
 import {
+  isWorkbenchRuntimeFailureCategory,
   isValidWorkbenchDirectInput,
+  isValidWorkbenchEndpointKeyValue,
+  WORKBENCH_ENDPOINT_KEY_MAX_LENGTH,
   publicAppearancePreferenceLoaded,
   publicAppearancePreferenceSaved,
   publicAppearancePreferenceUnavailable,
@@ -21,6 +26,20 @@ import {
   WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH,
   publicClaudePermissionHandlingSaved,
   publicClaudePermissionHandlingUnavailable,
+  publicEndpointPreferencesLoaded,
+  publicEndpointPreferenceSaved,
+  publicEndpointPreferenceUnavailable,
+  publicEndpointKeyInvalidValue,
+  publicEndpointKeyNotConfigured,
+  publicEndpointKeyRemoved,
+  publicEndpointKeyRevealed,
+  publicEndpointKeySaved,
+  publicEndpointKeyStatusLoaded,
+  publicEndpointKeyUnavailable,
+  publicEndpointProbed,
+  publicEndpointCatalogFreshnessLoaded,
+  publicEndpointCatalogFreshnessRefreshed,
+  publicEndpointCatalogFreshnessUnavailable,
   publicCreateProjectResult,
   publicContinuationProfileUnavailable,
   publicContinuationModelUnavailable,
@@ -37,6 +56,7 @@ import {
   publicRuntimeNotLocated,
   publicProfileDefaultSaved,
   publicPreferenceUnavailable,
+  publicEmptyProjectRegistry,
   publicHostedProjectFailure,
   publicInvalidProjectSelection,
   publicProjectFailure,
@@ -70,8 +90,21 @@ import {
   type WorkbenchRuntimeExecutableSaveResult,
   type WorkbenchRuntimeExecutablesLoadResult,
   type WorkbenchClaudePermissionHandlingSaveResult,
+  type WorkbenchFamilyEndpointPreference,
+  type WorkbenchFamilyEndpointPreferences,
+  type WorkbenchEndpointPreferenceLoadResult,
+  type WorkbenchEndpointPreferenceSaveResult,
   type WorkbenchCreateProjectResult,
   type WorkbenchDirectInputRequest,
+  type WorkbenchEndpointKeyRemoveResult,
+  type WorkbenchEndpointKeyRevealResult,
+  type WorkbenchEndpointKeySaveResult,
+  type WorkbenchEndpointKeySnapshot,
+  type WorkbenchEndpointKeyStatusResult,
+  type WorkbenchEndpointProbeFailureReason,
+  type WorkbenchEndpointProbeResult,
+  type WorkbenchEndpointCatalogFreshnessModelEntry,
+  type WorkbenchEndpointCatalogFreshnessResult,
   type WorkbenchStartDirectInputRequest,
   type WorkbenchContinueDirectInputRequest,
   type WorkbenchDirectSessionProfileDefaultRequest,
@@ -90,6 +123,8 @@ import {
   type WorkbenchRuntimeEndpointId,
   type WorkbenchHostedProjectResult,
   type WorkbenchHostedProjectView,
+  type WorkbenchProjectTransfer,
+  type WorkbenchTurnView,
   type WorkbenchInterruptControl,
   type WorkbenchInterruptRequest,
   type WorkbenchInterruptResult,
@@ -125,8 +160,15 @@ import {
   type WorkbenchSubscriptionAuthenticationRequest,
   type WorkbenchSubscriptionAuthenticationSnapshotResult,
   type WorkbenchTimelineEvent,
+  type WorkbenchToolActivity,
   type WorkbenchWorkIntensityOption,
 } from "./contract.ts";
+import {
+  isRegisteredRuntimeEndpointId,
+  runtimeEndpointOrdinal,
+  WORKBENCH_RUNTIME_ENDPOINT_IDS,
+} from "./runtime-endpoint-identity.ts";
+import type { SubscriptionAuthenticationEndpointId } from "../agent-runtime/subscription-authentication.ts";
 
 export type WorkbenchAppearancePreferenceReconstruction =
   | {
@@ -305,6 +347,485 @@ function isClaudePermissionHandlingFailureResult(value: unknown): boolean {
     value.error.category === "claude-permission-handling-unavailable" &&
     value.error.message ===
       "Claude permission handling could not be loaded or saved. Keep the current choice and try again."
+  );
+}
+
+export type WorkbenchFamilyEndpointPreferenceReconstruction =
+  | {
+      readonly ok: true;
+      readonly preference: WorkbenchFamilyEndpointPreference;
+    }
+  | { readonly ok: false };
+
+export function reconstructWorkbenchFamilyEndpointPreference(
+  value: unknown,
+): WorkbenchFamilyEndpointPreferenceReconstruction {
+  return value === "kimi-code" ||
+    value === "kimi-platform" ||
+    value === "claude-code-desktop" ||
+    value === "claude-api" ||
+    value === "codex-desktop" ||
+    value === "codex-api"
+    ? Object.freeze({
+        ok: true,
+        preference: value,
+      })
+    : Object.freeze({ ok: false });
+}
+
+export type WorkbenchFamilyEndpointPreferencesReconstruction =
+  | {
+      readonly ok: true;
+      readonly preferences: WorkbenchFamilyEndpointPreferences;
+    }
+  | { readonly ok: false };
+
+export function reconstructWorkbenchFamilyEndpointPreferences(
+  value: unknown,
+): WorkbenchFamilyEndpointPreferencesReconstruction {
+  if (
+    !isStrictDataRecord(value, ["claude", "codex", "kimi"])
+  ) {
+    return Object.freeze({ ok: false });
+  }
+  if (
+    value.claude !== "claude-code-desktop" &&
+    value.claude !== "claude-api"
+  ) {
+    return Object.freeze({ ok: false });
+  }
+  if (value.codex !== "codex-desktop" && value.codex !== "codex-api") {
+    return Object.freeze({ ok: false });
+  }
+  if (value.kimi !== "kimi-code" && value.kimi !== "kimi-platform") {
+    return Object.freeze({ ok: false });
+  }
+  return Object.freeze({
+    ok: true,
+    preferences: Object.freeze({
+      claude: value.claude,
+      codex: value.codex,
+      kimi: value.kimi,
+    }),
+  });
+}
+
+export function sanitizeWorkbenchEndpointPreferenceLoadResult(
+  value: unknown,
+): WorkbenchEndpointPreferenceLoadResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["ok", "preferences", "status"]) &&
+      value.ok === true &&
+      value.status === "loaded"
+    ) {
+      const reconstructed = reconstructWorkbenchFamilyEndpointPreferences(
+        value.preferences,
+      );
+      if (reconstructed.ok) {
+        return publicEndpointPreferencesLoaded(reconstructed.preferences);
+      }
+    }
+    if (isEndpointPreferenceFailureResult(value)) {
+      return publicEndpointPreferenceUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointPreferenceUnavailable();
+}
+
+export function sanitizeWorkbenchEndpointPreferenceSaveResult(
+  value: unknown,
+): WorkbenchEndpointPreferenceSaveResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["message", "ok", "status"]) &&
+      value.ok === true &&
+      value.status === "saved" &&
+      value.message === "The endpoint preference was durably saved."
+    ) {
+      return publicEndpointPreferenceSaved();
+    }
+    if (isEndpointPreferenceFailureResult(value)) {
+      return publicEndpointPreferenceUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointPreferenceUnavailable();
+}
+
+function isEndpointPreferenceFailureResult(value: unknown): boolean {
+  return (
+    isStrictDataRecord(value, ["error", "ok"]) &&
+    value.ok === false &&
+    isStrictDataRecord(value.error, ["category", "message"]) &&
+    value.error.category === "endpoint-preference-unavailable" &&
+    value.error.message ===
+      "The endpoint preference could not be loaded or saved. Keep the current choice and try again."
+  );
+}
+
+export type WorkbenchEndpointKeySaveRequestReconstruction =
+  | { readonly ok: true; readonly keyValue: string }
+  | { readonly ok: false };
+
+/** Compatibility alias from the GLM-only era of this surface. */
+export type WorkbenchGlmEndpointKeySaveRequestReconstruction =
+  WorkbenchEndpointKeySaveRequestReconstruction;
+
+/**
+ * The save request is the one renderer-to-main channel that carries secret
+ * material (the user's explicit save action). Everything else crosses the
+ * boundary name-only.
+ */
+export function reconstructWorkbenchEndpointKeySaveRequest(
+  value: unknown,
+): WorkbenchEndpointKeySaveRequestReconstruction {
+  try {
+    if (
+      !isStrictDataRecord(value, ["keyValue"]) ||
+      !isValidWorkbenchEndpointKeyValue(value.keyValue)
+    ) {
+      return Object.freeze({ ok: false });
+    }
+    return Object.freeze({ ok: true, keyValue: value.keyValue });
+  } catch {
+    return Object.freeze({ ok: false });
+  }
+}
+
+/** Compatibility alias from the GLM-only era of this surface. */
+export const reconstructWorkbenchGlmEndpointKeySaveRequest =
+  reconstructWorkbenchEndpointKeySaveRequest;
+
+export function sanitizeWorkbenchEndpointKeyStatusResult(
+  value: unknown,
+): WorkbenchEndpointKeyStatusResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["ok", "snapshot", "status"]) &&
+      value.ok === true &&
+      value.status === "loaded"
+    ) {
+      const snapshot = reconstructEndpointKeySnapshot(value.snapshot);
+      if (snapshot !== undefined) {
+        return publicEndpointKeyStatusLoaded(snapshot);
+      }
+    }
+    if (isEndpointKeyFailureResult(value)) {
+      return publicEndpointKeyUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointKeyUnavailable();
+}
+
+/** Compatibility alias from the GLM-only era of this surface. */
+export const sanitizeWorkbenchGlmEndpointKeyStatusResult =
+  sanitizeWorkbenchEndpointKeyStatusResult;
+
+export function sanitizeWorkbenchEndpointKeySaveResult(
+  value: unknown,
+): WorkbenchEndpointKeySaveResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["isPersistent", "maskedHint", "ok", "status"]) &&
+      value.ok === true &&
+      value.status === "saved" &&
+      isMaskedEndpointSecretHint(value.maskedHint) &&
+      typeof value.isPersistent === "boolean"
+    ) {
+      return publicEndpointKeySaved(value.maskedHint, value.isPersistent);
+    }
+    if (isEndpointKeyFailureResult(value)) {
+      return value.error.category === "endpoint-key-invalid-value"
+        ? publicEndpointKeyInvalidValue()
+        : publicEndpointKeyUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointKeyUnavailable();
+}
+
+/** Compatibility alias from the GLM-only era of this surface. */
+export const sanitizeWorkbenchGlmEndpointKeySaveResult =
+  sanitizeWorkbenchEndpointKeySaveResult;
+
+export function sanitizeWorkbenchEndpointKeyRemoveResult(
+  value: unknown,
+): WorkbenchEndpointKeyRemoveResult {
+  try {
+    if (isStrictDataRecord(value, ["ok", "snapshot", "status"]) && value.ok === true) {
+      if (value.status === "removed" || value.status === "not-configured") {
+        const snapshot = reconstructEndpointKeySnapshot(value.snapshot);
+        // Both removal outcomes report the post-removal state: nothing stored.
+        if (snapshot !== undefined && snapshot.configured === false) {
+          return value.status === "removed"
+            ? publicEndpointKeyRemoved(snapshot)
+            : publicEndpointKeyNotConfigured(snapshot);
+        }
+      }
+    }
+    if (isEndpointKeyFailureResult(value)) {
+      return publicEndpointKeyUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointKeyUnavailable();
+}
+
+/** Compatibility alias from the GLM-only era of this surface. */
+export const sanitizeWorkbenchGlmEndpointKeyRemoveResult =
+  sanitizeWorkbenchEndpointKeyRemoveResult;
+
+export function sanitizeWorkbenchEndpointKeyRevealResult(
+  value: unknown,
+): WorkbenchEndpointKeyRevealResult {
+  try {
+    if (
+      isStrictDataRecordWithAllowedKeys(value, [
+        "ok",
+        "status",
+        "snapshot",
+        "value",
+      ]) &&
+      value.ok === true
+    ) {
+      if (
+        value.status === "not-configured" &&
+        Object.hasOwn(value, "snapshot")
+      ) {
+        const snapshot = reconstructEndpointKeySnapshot(value.snapshot);
+        if (snapshot !== undefined && snapshot.configured === false) {
+          return publicEndpointKeyNotConfigured(snapshot);
+        }
+      }
+      if (
+        value.status === "revealed" &&
+        Object.hasOwn(value, "value") &&
+        Object.hasOwn(value, "snapshot") &&
+        typeof value.value === "string" &&
+        value.value.length > 0 &&
+        value.value.length <= WORKBENCH_ENDPOINT_KEY_MAX_LENGTH
+      ) {
+        const snapshot = reconstructEndpointKeySnapshot(value.snapshot);
+        // A reveal without a configured snapshot is internally inconsistent.
+        if (snapshot !== undefined && snapshot.configured === true) {
+          return publicEndpointKeyRevealed(value.value, snapshot);
+        }
+      }
+    }
+    if (isEndpointKeyFailureResult(value)) {
+      return publicEndpointKeyUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointKeyUnavailable();
+}
+
+/** Compatibility alias from the GLM-only era of this surface. */
+export const sanitizeWorkbenchGlmEndpointKeyRevealResult =
+  sanitizeWorkbenchEndpointKeyRevealResult;
+
+export function sanitizeWorkbenchEndpointProbeResult(
+  value: unknown,
+): WorkbenchEndpointProbeResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["ok", "probe", "status"]) &&
+      value.ok === true &&
+      value.status === "probed"
+    ) {
+      const probe = value.probe;
+      if (
+        isStrictDataRecord(probe, ["outcome"]) &&
+        probe.outcome === "success"
+      ) {
+        return publicEndpointProbed({ outcome: "success" });
+      }
+      if (
+        isStrictDataRecord(probe, ["outcome", "reason"]) &&
+        probe.outcome === "failure" &&
+        isEndpointProbeFailureReason(probe.reason)
+      ) {
+        return publicEndpointProbed({
+          outcome: "failure",
+          reason: probe.reason,
+        });
+      }
+    }
+    if (isEndpointKeyFailureResult(value)) {
+      return publicEndpointKeyUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointKeyUnavailable();
+}
+
+/** Compatibility alias from the GLM-only era of this surface. */
+export const sanitizeWorkbenchGlmEndpointProbeResult =
+  sanitizeWorkbenchEndpointProbeResult;
+
+export function sanitizeWorkbenchEndpointCatalogFreshnessResult(
+  value: unknown,
+): WorkbenchEndpointCatalogFreshnessResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["ok", "reports", "status"]) &&
+      value.ok === true &&
+      (value.status === "loaded" || value.status === "refreshed") &&
+      isDenseDataArray(value.reports)
+    ) {
+      const reports = value.reports.map((report) => {
+        if (
+          !isStrictDataRecord(report, [
+            "endpointId",
+            "enrolledModels",
+            "newModels",
+            "status",
+          ]) ||
+          (report.endpointId !== "glm-coding-plan" &&
+            report.endpointId !== "kimi-code" &&
+            report.endpointId !== "deepseek-api") ||
+          (report.status !== "fresh" && report.status !== "silent-failure") ||
+          !isDenseDataArray(report.newModels) ||
+          !isDenseDataArray(report.enrolledModels)
+        ) {
+          throw new Error("invalid-catalog-freshness-report");
+        }
+        return Object.freeze({
+          endpointId: report.endpointId,
+          status: report.status,
+          newModels: Object.freeze(
+            report.newModels.map(reconstructFreshnessEntry),
+          ),
+          enrolledModels: Object.freeze(
+            report.enrolledModels.map(reconstructFreshnessEntry),
+          ),
+        });
+      });
+      return value.status === "loaded"
+        ? publicEndpointCatalogFreshnessLoaded(reports)
+        : publicEndpointCatalogFreshnessRefreshed(reports);
+    }
+    if (
+      isStrictDataRecord(value, ["error", "ok"]) &&
+      value.ok === false &&
+      isStrictDataRecord(value.error, ["category", "message"]) &&
+      value.error.category === "endpoint-catalog-freshness-unavailable"
+    ) {
+      return publicEndpointCatalogFreshnessUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicEndpointCatalogFreshnessUnavailable();
+}
+
+function reconstructFreshnessEntry(
+  value: unknown,
+): WorkbenchEndpointCatalogFreshnessModelEntry {
+  if (
+    !isStrictDataRecordWithAllowedKeys(value, [
+      "createdAt",
+      "displayName",
+      "id",
+    ]) ||
+    typeof value.id !== "string" ||
+    value.id.length === 0 ||
+    value.id.length > 200 ||
+    !/^[^\u0000-\u001f\u007f-\u009f\s]*$/u.test(value.id) ||
+    (value.displayName !== undefined &&
+      (typeof value.displayName !== "string" ||
+        value.displayName.length > 200 ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(value.displayName))) ||
+    (value.createdAt !== undefined &&
+      (typeof value.createdAt !== "string" || value.createdAt.length > 64))
+  ) {
+    throw new Error("invalid-catalog-freshness-entry");
+  }
+  return Object.freeze({
+    id: value.id,
+    ...(value.displayName === undefined ? {} : { displayName: value.displayName }),
+    ...(value.createdAt === undefined ? {} : { createdAt: value.createdAt }),
+  });
+}
+
+function reconstructEndpointKeySnapshot(
+  value: unknown,
+): WorkbenchEndpointKeySnapshot | undefined {
+  if (
+    !isStrictDataRecord(value, [
+      "configured",
+      "environmentFallback",
+      "isPersistent",
+      "maskedHint",
+    ]) ||
+    typeof value.configured !== "boolean" ||
+    typeof value.isPersistent !== "boolean" ||
+    typeof value.environmentFallback !== "boolean"
+  ) {
+    return undefined;
+  }
+  if (value.configured) {
+    if (!isMaskedEndpointSecretHint(value.maskedHint)) return undefined;
+  } else if (value.maskedHint !== null) {
+    return undefined;
+  }
+  return Object.freeze({
+    configured: value.configured,
+    maskedHint: value.maskedHint,
+    isPersistent: value.isPersistent,
+    environmentFallback: value.environmentFallback,
+  });
+}
+
+/** The masked-hint format the main process emits: `••••` plus ≤4 tail chars. */
+function isMaskedEndpointSecretHint(value: unknown): value is string {
+  return (
+    typeof value === "string" && /^••••[\x21-\x7e]{0,4}$/u.test(value)
+  );
+}
+
+function isEndpointProbeFailureReason(
+  value: unknown,
+): value is WorkbenchEndpointProbeFailureReason {
+  return (
+    value === "token-missing" ||
+    value === "invalid-base-url" ||
+    value === "unauthorized" ||
+    value === "endpoint-error" ||
+    value === "server-error" ||
+    value === "network" ||
+    value === "timeout"
+  );
+}
+
+function isEndpointKeyFailureResult(
+  value: unknown,
+): value is {
+  readonly ok: false;
+  readonly error: {
+    readonly category: "endpoint-key-unavailable" | "endpoint-key-invalid-value";
+    readonly message: string;
+  };
+} {
+  return (
+    isStrictDataRecord(value, ["error", "ok"]) &&
+    value.ok === false &&
+    isStrictDataRecord(value.error, ["category", "message"]) &&
+    (value.error.category === "endpoint-key-unavailable" ||
+      value.error.category === "endpoint-key-invalid-value") &&
+    (value.error.category !== "endpoint-key-unavailable" ||
+      value.error.message ===
+        "Endpoint key management is unavailable. Keep the current key and try again.")
   );
 }
 
@@ -708,10 +1229,28 @@ function isSubscriptionAuthenticationFailureResult(value: unknown): boolean {
   );
 }
 
+/**
+ * The exact participant set of subscription authentication. Exhaustive over
+ * the participants union, so a future OAuth endpoint joins as a data change
+ * here; static-key endpoints (GLM) are structurally absent.
+ */
+const subscriptionAuthenticationEndpointIds: Readonly<
+  Record<SubscriptionAuthenticationEndpointId, true>
+> = Object.freeze({
+  "codex-desktop": true,
+  "claude-code-desktop": true,
+});
+
 function isSubscriptionAuthenticationEndpointId(
   value: unknown,
-): value is WorkbenchRuntimeEndpointId {
-  return value === "codex-desktop" || value === "claude-code-desktop";
+): value is SubscriptionAuthenticationEndpointId {
+  return (
+    typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(
+      subscriptionAuthenticationEndpointIds,
+      value,
+    )
+  );
 }
 
 function isSubscriptionAuthenticationStatus(
@@ -750,6 +1289,12 @@ export function sanitizeWorkbenchCreateProjectResult(
   try {
     if (!isRecord(value)) return publicCreateProjectResult("unavailable");
     const outcome = value.outcome;
+    if ("failure" in value) {
+      const failure = reconstructWorkbenchProjectPathFailure(value.failure);
+      return outcome === "unavailable" && hasExactKeys(value, ["failure", "outcome"]) && failure !== undefined
+        ? publicCreateProjectResult("unavailable", failure)
+        : publicCreateProjectResult("unavailable");
+    }
     if (
       outcome === "created" ||
       outcome === "cancelled" ||
@@ -1044,12 +1589,27 @@ export function reconstructWorkbenchSessionMetadataMutationRequest(
   value: unknown,
 ): WorkbenchSessionMetadataMutationReconstruction {
   try {
+    if (!hasStableCloneableDataGraph(value)) {
+      return Object.freeze({ ok: false });
+    }
+    const acknowledged = isStrictDataRecord(value, [
+      "acknowledgedUnknownOutcome",
+      "metadataKey",
+      "operation",
+    ]);
     if (
-      !hasStableCloneableDataGraph(value) ||
-      !isStrictDataRecord(value, ["metadataKey", "operation"]) ||
+      (!acknowledged &&
+        !isStrictDataRecord(value, ["metadataKey", "operation"])) ||
       typeof value.metadataKey !== "string" ||
       !sessionMetadataKeyPattern.test(value.metadataKey) ||
       !isRecord(value.operation)
+    ) {
+      return Object.freeze({ ok: false });
+    }
+    if (
+      acknowledged &&
+      (value.operation.kind !== "archive" ||
+        value.acknowledgedUnknownOutcome !== true)
     ) {
       return Object.freeze({ ok: false });
     }
@@ -1084,6 +1644,9 @@ export function reconstructWorkbenchSessionMetadataMutationRequest(
       request: Object.freeze({
         metadataKey: value.metadataKey,
         operation: Object.freeze({ kind: value.operation.kind }),
+        ...(acknowledged
+          ? { acknowledgedUnknownOutcome: true as const }
+          : {}),
       }),
     });
   } catch {
@@ -1645,6 +2208,7 @@ const statuses: readonly ProjectCommandStatus[] = [
   "accepted",
   "in-flight",
   "completed",
+  "quota-paused",
   "failed",
   "recovery-required",
 ];
@@ -1652,6 +2216,7 @@ const commandFailureCategories: readonly ProjectCommandFailureCategory[] = [
   "interrupted",
   "profile-resolution-failed",
   "runtime-failed",
+  "quota-expired",
 ];
 export function sanitizeWorkbenchProjectResult(
   value: unknown,
@@ -1677,6 +2242,13 @@ export function sanitizeWorkbenchHostedProjectResult(
   value: unknown,
 ): WorkbenchHostedProjectResult {
   if (
+    isStrictDataRecord(value, ["empty", "ok"]) &&
+    value.ok === true &&
+    value.empty === true
+  ) {
+    return publicEmptyProjectRegistry();
+  }
+  if (
     !isStrictDataRecord(value, ["ok", "view"]) ||
     value.ok !== true
   ) {
@@ -1687,6 +2259,317 @@ export function sanitizeWorkbenchHostedProjectResult(
   } catch {
     return publicHostedProjectFailure();
   }
+}
+
+function sanitizeWorkbenchHostedProjectResultStrict(
+  value: unknown,
+): WorkbenchHostedProjectResult | undefined {
+  const result = sanitizeWorkbenchHostedProjectResult(value);
+  if (result.ok) {
+    if ("empty" in result) {
+      return isStrictDataRecord(value, ["empty", "ok"]) &&
+        value.ok === true &&
+        value.empty === true
+        ? result
+        : undefined;
+    }
+    return isStrictDataRecord(value, ["ok", "view"]) && value.ok === true
+      ? result
+      : undefined;
+  }
+  return isStrictDataRecord(value, ["error", "ok"]) &&
+    value.ok === false &&
+    isStrictDataRecord(value.error, ["category", "message"]) &&
+    value.error.category === "project-view-unavailable" &&
+    value.error.message === "Live Project data is unavailable."
+    ? result
+    : undefined;
+}
+
+// A revision identifies an actual transfer, not a digest of the history. A new
+// observation gets a fresh revision so stale deltas cannot address its turns.
+let nextProjectTransferRevision = 0;
+export function createWorkbenchProjectTransferEncoder() {
+  let previous: WorkbenchHostedProjectResult | undefined;
+  let previousRevision = 0;
+  return (input: WorkbenchHostedProjectResult): WorkbenchProjectTransfer => {
+    const result = sanitizeWorkbenchHostedProjectResult(input);
+    const revision = ++nextProjectTransferRevision;
+    let transfer: WorkbenchProjectTransfer = { kind: "snapshot", revision, result };
+    if (result.ok && "view" in result && previous?.ok && "view" in previous &&
+        result.view.commands.every(command => !command.session || command.session.turns !== undefined)) {
+      const turns = new Map<WorkbenchTurnView, number>();
+      previous.view.commands.flatMap(command => command.session?.turns ?? [])
+        .forEach((turn, index) => turns.set(turn, index));
+      transfer = { kind: "delta", revision, baseRevision: previousRevision, view: {
+        ...result.view,
+        commands: result.view.commands.map(command => {
+          if (!command.session) { const { session: _session, ...header } = command; return header; }
+          const { timeline: _timeline, turns: currentTurns, ...session } = command.session;
+          return { ...command, session: { ...session, turns: currentTurns!.map(turn => {
+            const reuse = turns.get(turn);
+            return reuse === undefined ? turn : { reuse };
+          }) } };
+        }),
+      } };
+    }
+    if (transfer.kind === "delta" && !transfer.view.commands.some(command =>
+      command.session?.turns.some(turn => "reuse" in turn))) {
+      // Full recovery (or a different Project) has no shared immutable history.
+      transfer = { kind: "snapshot", revision, result };
+    }
+    previous = result;
+    previousRevision = revision;
+    return transfer;
+  };
+}
+
+type WorkbenchProjectDelta = Extract<
+  WorkbenchProjectTransfer,
+  { readonly kind: "delta" }
+>;
+type WorkbenchProjectDeltaTurn =
+  NonNullable<
+    WorkbenchProjectDelta["view"]["commands"][number]["session"]
+  >["turns"][number];
+
+/**
+ * Preload-side validation for the compact main-process packet. It retains only
+ * the prior turn profiles needed to validate later references; historical
+ * event text is reconstructed only after the contextBridge crossing.
+ */
+export function createWorkbenchProjectTransferSanitizer() {
+  let previousRevision = 0;
+  let previousTurnProfiles:
+    | readonly WorkbenchSessionProfileProjection[]
+    | undefined;
+  return (value: unknown): WorkbenchProjectTransfer | undefined => {
+    try {
+      if (
+        !isRecord(value) ||
+        !Number.isSafeInteger(value.revision) ||
+        (value.revision as number) <= 0
+      ) {
+        throw new Error("invalid-transfer");
+      }
+      if (
+        value.kind === "snapshot" &&
+        isStrictDataRecord(value, ["kind", "revision", "result"])
+      ) {
+        const result = sanitizeWorkbenchHostedProjectResultStrict(value.result);
+        if (result === undefined) throw new Error("invalid-snapshot");
+        previousRevision = value.revision as number;
+        previousTurnProfiles =
+          result.ok && "view" in result
+            ? Object.freeze(
+                result.view.commands.flatMap(command =>
+                  (command.session?.turns ?? []).map(turn => turn.profile),
+                ),
+              )
+            : undefined;
+        return deepFreeze({
+          kind: "snapshot" as const,
+          revision: previousRevision,
+          result,
+        });
+      }
+      if (
+        !isStrictDataRecord(value, [
+          "kind",
+          "revision",
+          "baseRevision",
+          "view",
+        ]) ||
+        value.kind !== "delta" ||
+        value.baseRevision !== previousRevision ||
+        (value.revision as number) <= previousRevision ||
+        previousTurnProfiles === undefined ||
+        !isStrictDataRecord(value.view, [
+          "project",
+          "observation",
+          "commands",
+          "initialSelectionKey",
+          "projectSelection",
+        ]) ||
+        !isDenseDataArray(value.view.commands)
+      ) {
+        throw new Error("invalid-delta-base");
+      }
+      const oldTurnProfiles = previousTurnProfiles;
+
+      const compactTurnsByCommand: Array<
+        readonly WorkbenchProjectDeltaTurn[] | undefined
+      > = [];
+      const turnProfilesByCommand: Array<
+        readonly WorkbenchSessionProfileProjection[] | undefined
+      > = [];
+      const validationCommands = value.view.commands.map(
+        (command: unknown, commandIndex: number) => {
+          if (!isRecord(command) || !Object.hasOwn(command, "session")) {
+            compactTurnsByCommand[commandIndex] = undefined;
+            turnProfilesByCommand[commandIndex] = undefined;
+            return command;
+          }
+          const session = command.session;
+          const sessionKeys = [
+            "profile",
+            "turns",
+            "removalKey",
+            "metadataKey",
+            "archived",
+            "selectionKey",
+            "resumable",
+          ];
+          if (isRecord(session) && Object.hasOwn(session, "context")) {
+            sessionKeys.push("context");
+          }
+          if (
+            !isStrictDataRecord(session, sessionKeys) ||
+            !isDenseDataArray(session.turns)
+          ) {
+            throw new Error("invalid-delta-session");
+          }
+          const compactTurns: WorkbenchProjectDeltaTurn[] = [];
+          const turnProfiles: WorkbenchSessionProfileProjection[] = [];
+          for (const turn of session.turns) {
+            if (isRecord(turn) && Object.hasOwn(turn, "reuse")) {
+              if (
+                !isStrictDataRecord(turn, ["reuse"]) ||
+                !Number.isSafeInteger(turn.reuse) ||
+                (turn.reuse as number) < 0 ||
+                (turn.reuse as number) >= oldTurnProfiles.length
+              ) {
+                throw new Error("invalid-turn-reference");
+              }
+              compactTurns.push(
+                Object.freeze({ reuse: turn.reuse as number }),
+              );
+              turnProfiles.push(oldTurnProfiles[turn.reuse as number]!);
+            } else {
+              const sanitized = sanitizeTurn(turn);
+              compactTurns.push(sanitized);
+              turnProfiles.push(sanitized.profile);
+            }
+          }
+          compactTurnsByCommand[commandIndex] = Object.freeze(compactTurns);
+          turnProfilesByCommand[commandIndex] = Object.freeze(turnProfiles);
+          const lastProfile = turnProfiles.at(-1);
+          const validationTurns =
+            lastProfile === undefined
+              ? []
+              : [deepFreeze({ profile: lastProfile, timeline: [] })];
+          return {
+            ...command,
+            session: {
+              ...session,
+              turns: validationTurns,
+              timeline: [],
+            },
+          };
+        },
+      );
+      const view = sanitizeHostedView({
+        ...value.view,
+        commands: validationCommands,
+      });
+      const commands: WorkbenchProjectDelta["view"]["commands"] =
+        view.commands.map((command, commandIndex) => {
+          const compactTurns = compactTurnsByCommand[commandIndex];
+          const turnProfiles = turnProfilesByCommand[commandIndex];
+          if (compactTurns === undefined) {
+            if (command.session !== undefined || turnProfiles !== undefined) {
+              throw new Error("invalid-delta-command");
+            }
+            const { session: _session, ...header } = command;
+            return deepFreeze(header);
+          }
+          if (command.session === undefined) {
+            throw new Error("invalid-delta-command");
+          }
+          if (
+            turnProfiles === undefined ||
+            turnProfiles.some(
+              profile =>
+                profile.requested.kind === "recorded" &&
+                profile.requested.runtimeFamilyLabel !== command.runtime,
+            )
+          ) {
+            throw new Error("invalid-turn-runtime-label");
+          }
+          const { session: _existingSession, ...header } = command;
+          const { timeline: _timeline, turns: _turns, ...session } =
+            command.session;
+          return deepFreeze({
+            ...header,
+            session: { ...session, turns: compactTurns },
+          });
+        });
+      const transfer = deepFreeze({
+        kind: "delta" as const,
+        revision: value.revision as number,
+        baseRevision: value.baseRevision as number,
+        view: { ...view, commands },
+      }) satisfies WorkbenchProjectTransfer;
+      previousRevision = transfer.revision;
+      previousTurnProfiles = Object.freeze(
+        turnProfilesByCommand.flatMap(profiles => profiles ?? []),
+      );
+      return transfer;
+    } catch {
+      previousRevision = 0;
+      previousTurnProfiles = undefined;
+      return undefined;
+    }
+  };
+}
+
+/** Undefined means a broken transfer, requiring a new full observation. */
+export function createWorkbenchProjectTransferDecoder() {
+  let previous: WorkbenchHostedProjectResult | undefined;
+  let revision = 0;
+  return (value: unknown): WorkbenchHostedProjectResult | undefined => {
+    try {
+      if (!isRecord(value) || !Number.isSafeInteger(value.revision) || (value.revision as number) <= 0) throw new Error("invalid-transfer");
+      let result: WorkbenchHostedProjectResult;
+      if (value.kind === "snapshot" && isStrictDataRecord(value, ["kind", "revision", "result"])) {
+        const snapshot = sanitizeWorkbenchHostedProjectResultStrict(value.result);
+        if (snapshot === undefined) throw new Error("invalid-snapshot");
+        result = snapshot;
+      } else {
+        if (!isStrictDataRecord(value, ["kind", "revision", "baseRevision", "view"]) || value.kind !== "delta" ||
+            value.baseRevision !== revision || (value.revision as number) <= revision || !previous?.ok || !("view" in previous) ||
+            !isStrictDataRecord(value.view, ["project", "observation", "commands", "initialSelectionKey", "projectSelection"]) ||
+            !Array.isArray(value.view.commands)) throw new Error("invalid-delta-base");
+        const oldTurns = previous.view.commands.flatMap(command => command.session?.turns ?? []);
+        const commands = value.view.commands.map((command: unknown) => {
+          if (!isRecord(command) || !isStrictDataRecord(command, Object.keys(command))) throw new Error("invalid-command");
+          if (!Object.hasOwn(command, "session")) return command;
+          const session = command.session;
+          const sessionKeys = ["profile", "turns", "removalKey", "metadataKey", "archived", "selectionKey", "resumable"];
+          if (isRecord(session) && Object.hasOwn(session, "context")) sessionKeys.push("context");
+          if (!isStrictDataRecord(session, sessionKeys) || !Array.isArray(session.turns)) throw new Error("invalid-delta-session");
+          const turns = session.turns.map((turn: unknown) => {
+            if (isRecord(turn) && Object.hasOwn(turn, "reuse")) {
+              if (!isStrictDataRecord(turn, ["reuse"]) || !Number.isSafeInteger(turn.reuse) || (turn.reuse as number) < 0 ||
+                  (turn.reuse as number) >= oldTurns.length) throw new Error("invalid-turn-reference");
+              return oldTurns[turn.reuse as number]!;
+            }
+            return sanitizeTurn(turn);
+          });
+          return { ...command, session: { ...session, turns, timeline: turns.flatMap(turn => turn.timeline) } };
+        });
+        result = sanitizeWorkbenchHostedProjectResult({ ok: true, view: { ...value.view, commands } });
+        if (!result.ok || !("view" in result)) throw new Error("invalid-delta-view");
+      }
+      previous = result;
+      revision = value.revision as number;
+      return result;
+    } catch {
+      previous = undefined;
+      revision = 0;
+      return undefined;
+    }
+  };
 }
 
 export function sanitizeWorkbenchProjectSelectionResult(
@@ -1761,6 +2644,7 @@ export function sanitizeWorkbenchOpenProjectResult(
   if (!isRecord(value) || typeof value.ok !== "boolean") {
     return publicProjectOpenUnavailable();
   }
+  if ("failure" in value) return publicProjectOpenUnavailable();
   if (
     value.ok === true &&
     value.status === "opened" &&
@@ -1809,6 +2693,12 @@ export function sanitizeWorkbenchOpenProjectResult(
     value.error.message ===
       "Open Project could not be completed. Keep the current Project and try again."
   ) {
+    if ("failure" in value.error) {
+      const failure = reconstructWorkbenchProjectPathFailure(value.error.failure);
+      return hasExactKeys(value, ["error", "ok"]) &&
+        hasExactKeys(value.error, ["category", "failure", "message"]) && failure !== undefined
+        ? publicProjectOpenUnavailable(failure) : publicProjectOpenUnavailable();
+    }
     return publicProjectOpenUnavailable();
   }
   return publicProjectOpenUnavailable();
@@ -1876,7 +2766,7 @@ export function sanitizeWorkbenchDirectSessionProfileDefaultResult(
   if (
     value.ok === true &&
     value.status === "saved" &&
-    value.message === "Codex Session Profile default was durably saved."
+    value.message === "Session Profile default was durably saved."
   ) {
     return publicProfileDefaultSaved();
   }
@@ -1907,12 +2797,14 @@ export function sanitizeWorkbenchDirectSessionProfileResult<
 >(
   value: unknown,
   expectedRequest: Request,
+  endpointIds?: readonly WorkbenchRuntimeEndpointId[],
 ): WorkbenchPublicDirectSessionProfileResultFor<Request>;
 export function sanitizeWorkbenchDirectSessionProfileResult(
   value: unknown,
   expectedRequest: WorkbenchDirectSessionProfileLoadRequest = Object.freeze({
     kind: "catalog-default",
   }),
+  endpointIds: readonly WorkbenchRuntimeEndpointId[] = WORKBENCH_RUNTIME_ENDPOINT_IDS,
 ): WorkbenchAnyPublicDirectSessionProfileResult {
   try {
     const reconstructedRequest =
@@ -1923,6 +2815,7 @@ export function sanitizeWorkbenchDirectSessionProfileResult(
     return sanitizeWorkbenchDirectSessionProfileResultUnchecked(
       value,
       reconstructedRequest.request,
+      endpointIds,
     );
   } catch {
     return publicProfileUnavailable();
@@ -1932,6 +2825,7 @@ export function sanitizeWorkbenchDirectSessionProfileResult(
 function sanitizeWorkbenchDirectSessionProfileResultUnchecked(
   value: unknown,
   expectedRequest: WorkbenchDirectSessionProfileLoadRequest,
+  endpointIds: readonly WorkbenchRuntimeEndpointId[],
 ): WorkbenchAnyPublicDirectSessionProfileResult {
   if (
     isStrictDataRecord(value, ["endpointDiscovery", "ok", "profile"]) &&
@@ -1939,6 +2833,7 @@ function sanitizeWorkbenchDirectSessionProfileResultUnchecked(
   ) {
     const endpointDiscovery = sanitizeEndpointDiscovery(
       value.endpointDiscovery,
+      endpointIds,
     );
     const readyEndpointIds = endpointDiscovery.statuses
       .filter((status) => status.category === "catalog-ready")
@@ -1946,7 +2841,7 @@ function sanitizeWorkbenchDirectSessionProfileResultUnchecked(
     if (readyEndpointIds.length === 0) {
       throw new Error("incoherent-direct-profile-success");
     }
-    const profile = sanitizeDirectProfile(value.profile, expectedRequest);
+    const profile = sanitizeDirectProfile(value.profile, expectedRequest, endpointIds);
     if (
       (expectedRequest.kind === "continuation-session"
         ? profile.endpoints.length !== 1 ||
@@ -1973,7 +2868,10 @@ function sanitizeWorkbenchDirectSessionProfileResultUnchecked(
   ) {
     throw new Error("invalid-direct-profile-result");
   }
-  const endpointDiscovery = sanitizeEndpointDiscovery(value.endpointDiscovery);
+  const endpointDiscovery = sanitizeEndpointDiscovery(
+    value.endpointDiscovery,
+    endpointIds,
+  );
   if (
     expectedRequest.kind === "continuation-session" &&
     value.error.category === "continuation-unavailable" &&
@@ -2027,27 +2925,34 @@ function sanitizeWorkbenchDirectSessionProfileResultUnchecked(
 
 function sanitizeEndpointDiscovery(
   value: unknown,
+  endpointIds: readonly WorkbenchRuntimeEndpointId[],
 ): WorkbenchRuntimeEndpointDiscovery {
   if (
     !isStrictDataRecord(value, ["statuses"]) ||
     !isDenseDataArray(value.statuses) ||
-    value.statuses.length !== 2
+    value.statuses.length !== endpointIds.length
   ) {
     throw new Error("invalid-endpoint-discovery");
   }
-  const codex = value.statuses[0];
-  const claude = value.statuses[1];
-  if (
-    !isStrictDataRecord(codex, ["category", "endpointId"]) ||
-    codex.endpointId !== "codex-desktop" ||
-    !isDiscoveryCategory(codex.category) ||
-    !isStrictDataRecord(claude, ["category", "endpointId"]) ||
-    claude.endpointId !== "claude-code-desktop" ||
-    !isClaudeDiscoveryCategory(claude.category)
-  ) {
-    throw new Error("invalid-endpoint-discovery-status");
+  const statuses = value.statuses;
+  const categories: WorkbenchRuntimeEndpointDiscoveryCategory[] = [];
+  for (const [index, endpointId] of endpointIds.entries()) {
+    const status = statuses[index];
+    if (
+      !isStrictDataRecord(status, ["category", "endpointId"]) ||
+      status.endpointId !== endpointId ||
+      !isDiscoveryCategory(status.category)
+    ) {
+      throw new Error("invalid-endpoint-discovery-status");
+    }
+    categories.push(status.category);
   }
-  return publicRuntimeEndpointDiscovery(codex.category, claude.category);
+  return publicRuntimeEndpointDiscovery(
+    endpointIds.map((endpointId, index) => ({
+      endpointId,
+      category: categories[index]!,
+    })),
+  );
 }
 
 function isDiscoveryCategory(
@@ -2062,21 +2967,10 @@ function isDiscoveryCategory(
   );
 }
 
-function isClaudeDiscoveryCategory(
-  value: unknown,
-): value is WorkbenchRuntimeEndpointDiscoveryCategory {
-  return isDiscoveryCategory(value);
-}
-
-function isRuntimeEndpointId(
-  value: unknown,
-): value is WorkbenchRuntimeEndpointId {
-  return value === "codex-desktop" || value === "claude-code-desktop";
-}
-
 function sanitizeDirectProfile(
   value: unknown,
   expectedRequest: WorkbenchDirectSessionProfileLoadRequest,
+  endpointIds: readonly WorkbenchRuntimeEndpointId[],
 ): WorkbenchLoadedDirectSessionProfile {
   if (
     !hasExactDirectProfileKeys(value, expectedRequest.kind) ||
@@ -2084,14 +2978,14 @@ function sanitizeDirectProfile(
     !snapshotKeyPattern.test(value.snapshotKey) ||
     !isDenseDataArray(value.endpoints) ||
     value.endpoints.length === 0 ||
-    value.endpoints.length > 2 ||
+    value.endpoints.length > endpointIds.length ||
     (expectedRequest.kind === "continuation-session" &&
       value.endpoints.length !== 1)
   ) {
     throw new Error("invalid-direct-profile");
   }
   const endpointKeys = new Set<string>();
-  const endpointIds = new Set<WorkbenchRuntimeEndpointId>();
+  const seenEndpointIds = new Set<WorkbenchRuntimeEndpointId>();
   const intensityKeys = new Set<string>();
   const modelKeys = new Set<string>();
   const executionModeKeys = new Set<string>();
@@ -2108,8 +3002,8 @@ function sanitizeDirectProfile(
         "models",
         "runtimeFamilyLabel",
       ]) ||
-      !isRuntimeEndpointId(endpoint.endpointId) ||
-      endpointIds.has(endpoint.endpointId) ||
+      !isRegisteredRuntimeEndpointId(endpoint.endpointId, endpointIds) ||
+      seenEndpointIds.has(endpoint.endpointId) ||
       typeof endpoint.key !== "string" ||
       !endpointKeyPattern.test(endpoint.key) ||
       endpointKeys.has(endpoint.key) ||
@@ -2121,12 +3015,15 @@ function sanitizeDirectProfile(
     ) {
       throw new Error("invalid-endpoint-option");
     }
-    const endpointOrdinal = endpoint.endpointId === "codex-desktop" ? 0 : 1;
+    const endpointOrdinal = runtimeEndpointOrdinal(
+      endpoint.endpointId,
+      endpointIds,
+    );
     if (endpointOrdinal <= previousEndpointOrdinal) {
       throw new Error("invalid-endpoint-order");
     }
     previousEndpointOrdinal = endpointOrdinal;
-    endpointIds.add(endpoint.endpointId);
+    seenEndpointIds.add(endpoint.endpointId);
     endpointKeys.add(endpoint.key);
     const executionModes = sanitizeProfileOptions(
       endpoint.executionModes,
@@ -2573,7 +3470,20 @@ function sanitizeHostedView(value: unknown): WorkbenchHostedProjectView {
   });
 }
 
+export function sanitizeWorkbenchContinuationStop(value: unknown): import("./contract.ts").WorkbenchContinuationStop {
+  if (!isStrictDataRecord(value, ["step", "limit", "reason"]) ||
+      !Number.isSafeInteger(value.step) || !Number.isSafeInteger(value.limit) ||
+      (value.step as number) < 1 || (value.step as number) > (value.limit as number) ||
+      (value.limit as number) > 10 ||
+      (value.reason !== "turn-not-completed" && value.reason !== "continuation-unavailable" &&
+       value.reason !== "observation-unavailable" && value.reason !== "submission-unavailable")) {
+    throw new Error("invalid-continuation-stop");
+  }
+  return Object.freeze({ step: value.step as number, limit: value.limit as number, reason: value.reason });
+}
+
 function sanitizeCommand(value: unknown): WorkbenchCommandView {
+  const hasContinuationStop = isRecord(value) && Object.hasOwn(value, "continuationStop");
   const hasFailure =
     isRecord(value) && Object.prototype.hasOwnProperty.call(value, "failureCategory");
   const hasSession =
@@ -2585,6 +3495,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
   if (
     !isStrictDataRecord(value, [
       ...(hasFailure ? ["failureCategory"] : []),
+      ...(hasContinuationStop ? ["continuationStop"] : []),
       ...(hasInterrupt ? ["interrupt"] : []),
       "key",
       "label",
@@ -2624,6 +3535,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
     ? sanitizeInterruptControl(value.interrupt)
     : undefined;
   const steer = hasSteer ? sanitizeSteerControl(value.steer) : undefined;
+  const continuationStop = hasContinuationStop ? sanitizeWorkbenchContinuationStop(value.continuationStop) : undefined;
   if (interrupt !== undefined && value.status !== "in-flight") {
     throw new Error("invalid-interrupt-control");
   }
@@ -2722,6 +3634,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
     runtime,
     status: value.status,
     ...(failureCategory === undefined ? {} : { failureCategory }),
+    ...(continuationStop === undefined ? {} : { continuationStop }),
     ...(interrupt === undefined ? {} : { interrupt }),
     ...(session === undefined ? {} : { session }),
     ...(steer === undefined ? {} : { steer }),
@@ -2875,24 +3788,84 @@ function sanitizeProfileProjection(
   });
 }
 
-function sanitizeTurn(value: unknown) {
+const immutableData = new WeakSet<object>();
+function isImmutableData(value: unknown): value is object {
+  if (value === null || typeof value !== "object") return false;
+  if (immutableData.has(value)) return true;
+  if (!Object.isFrozen(value) || (Object.getPrototypeOf(value) !== Object.prototype && !Array.isArray(value))) return false;
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+    if (!("value" in descriptor)) return false;
+    if (descriptor.value !== null && typeof descriptor.value === "object" && !isImmutableData(descriptor.value)) return false;
+  }
+  immutableData.add(value);
+  return true;
+}
+const sanitizedTurns = new WeakMap<object, WorkbenchTurnView>();
+const sanitizedEvents = new WeakMap<object, WorkbenchTimelineEvent>();
+function sanitizeTurn(value: unknown): WorkbenchTurnView {
+  if (value !== null && typeof value === "object") {
+    const cached = sanitizedTurns.get(value);
+    if (cached !== undefined) return cached;
+  }
+  const result = sanitizeTurnUncached(value);
+  if (isImmutableData(value)) sanitizedTurns.set(value, result);
+  sanitizedTurns.set(result, result);
+  return result;
+}
+
+function sanitizeTurnUncached(value: unknown) {
+  const hasRecovery =
+    isRecord(value) && Object.prototype.hasOwnProperty.call(value, "recovery");
   if (
-    !isStrictDataRecord(value, ["profile", "timeline"]) ||
+    !isStrictDataRecord(value, [
+      "profile",
+      "timeline",
+      ...(hasRecovery ? ["recovery"] : []),
+    ]) ||
     !Array.isArray(value.timeline)
   ) {
     throw new Error("invalid-turn");
   }
+  let recovery: WorkbenchTurnView["recovery"];
+  if (hasRecovery) {
+    const raw = value.recovery;
+    if (isStrictDataRecord(raw, ["resume"]) && raw.resume === "confirmed") {
+      recovery = { resume: "confirmed" };
+    } else if (isStrictDataRecord(raw, ["resume", "reason"]) && raw.resume === "unconfirmed" &&
+      (isWorkbenchRuntimeFailureCategory(raw.reason) || raw.reason === "runtime-not-located" ||
+        raw.reason === "binding-drift" || raw.reason === "session-reference-unavailable" ||
+        raw.reason === "authentication-changed" || raw.reason === "channel-closed" ||
+        raw.reason === "resume-timeout" || raw.reason === "resume-unconfirmed")) {
+      recovery = { resume: "unconfirmed", reason: raw.reason };
+    } else {
+      throw new Error("invalid-turn-recovery");
+    }
+  }
   return deepFreeze({
+    ...(recovery === undefined ? {} : { recovery }),
     profile: sanitizeProfileProjection(value.profile),
     timeline: value.timeline.map(sanitizeEvent),
   });
 }
 
 function samePublicValue(left: unknown, right: unknown): boolean {
+  if (left === right || (Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index]))) return true;
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function sanitizeEvent(value: unknown): WorkbenchTimelineEvent {
+  if (value !== null && typeof value === "object") {
+    const cached = sanitizedEvents.get(value);
+    if (cached !== undefined) return cached;
+  }
+  const result = sanitizeEventUncached(value);
+  if (isImmutableData(value)) sanitizedEvents.set(value, result);
+  sanitizedEvents.set(result, result);
+  return result;
+}
+
+function sanitizeEventUncached(value: unknown): WorkbenchTimelineEvent {
   if (!isRecord(value) || typeof value.kind !== "string") {
     throw new Error("invalid-event");
   }
@@ -2917,9 +3890,60 @@ function sanitizeEvent(value: unknown): WorkbenchTimelineEvent {
         kind: "agent-message",
         text: sanitizeDisplayString(requireString(value.text)),
       });
-    case "turn-completed":
-      if (value.status !== "completed") throw new Error("invalid-event");
-      return Object.freeze({ kind: "turn-completed", status: "completed" });
+    case "reasoning":
+      if (!hasExactKeys(value, ["kind", "text"])) throw new Error("invalid-event");
+      return Object.freeze({
+        kind: "reasoning",
+        text: sanitizeDisplayString(requireString(value.text)),
+      });
+    case "progress": {
+      const hasTool = Object.hasOwn(value, "tool");
+      if (
+        !hasExactKeys(
+          value,
+          hasTool ? ["activity", "kind", "tool"] : ["activity", "kind"],
+        ) ||
+        (value.activity !== "thinking" &&
+          value.activity !== "tool" &&
+          value.activity !== "retrying" &&
+          value.activity !== "rate-limited" &&
+          value.activity !== "status")
+      ) {
+        throw new Error("invalid-event");
+      }
+      return Object.freeze({
+        kind: "progress",
+        activity: value.activity,
+        ...(hasTool ? { tool: sanitizeToolActivity(value.tool) } : {}),
+      });
+    }
+    case "turn-completed": {
+      const hasSuggestions = Object.prototype.hasOwnProperty.call(
+        value,
+        "suggestions",
+      );
+      if (
+        !isStrictDataRecordWithAllowedKeys(value, [
+          "kind",
+          "status",
+          ...(hasSuggestions ? ["suggestions"] : []),
+        ]) ||
+        value.status !== "completed" ||
+        (hasSuggestions &&
+          (!isDenseDataArray(value.suggestions) ||
+            value.suggestions.length === 0 ||
+            !value.suggestions.every(isValidWorkbenchDirectInput)))
+      ) {
+        throw new Error("invalid-event");
+      }
+      return Object.freeze({
+        kind: "turn-completed",
+        status: "completed",
+        ...(hasSuggestions
+          ? { suggestions: Object.freeze([...(value.suggestions as string[])]) }
+          : {}),
+      });
+    }
     case "turn-interrupted":
       if (
         !hasExactKeys(value, ["kind", "status"]) ||
@@ -2928,11 +3952,156 @@ function sanitizeEvent(value: unknown): WorkbenchTimelineEvent {
         throw new Error("invalid-event");
       }
       return Object.freeze({ kind: "turn-interrupted", status: "interrupted" });
+    case "turn-paused":
+      if (!hasExactKeys(value, ["kind", "reason"]) || value.reason !== "quota-exhausted") throw new Error("invalid-event");
+      return Object.freeze({ kind: "turn-paused", reason: "quota-exhausted" });
     case "failed":
-      return Object.freeze({ kind: "failed" });
+      if (hasExactKeys(value, ["kind"])) return Object.freeze({ kind: "failed" });
+      if (
+        !hasExactKeys(value, ["category", "kind"]) ||
+        !isWorkbenchRuntimeFailureCategory(value.category)
+      ) {
+        throw new Error("invalid-event");
+      }
+      return Object.freeze({ kind: "failed", category: value.category });
     default:
       throw new Error("invalid-event");
   }
+}
+
+const maximumToolActivitySourceTypeCharacters = 240;
+
+function sanitizeToolActivity(value: unknown): WorkbenchToolActivity {
+  if (!isRecord(value)) throw new Error("invalid-tool-activity");
+  const hasFileChanges = Object.hasOwn(value, "fileChanges");
+  const hasParameter = Object.hasOwn(value, "parameter");
+  const hasSourceType = Object.hasOwn(value, "sourceType");
+  if (
+    !hasExactKeys(value, [
+      ...(hasFileChanges ? ["fileChanges"] : []),
+      "name",
+      ...(hasParameter ? ["parameter"] : []),
+      ...(hasSourceType ? ["sourceType"] : []),
+      "type",
+    ]) ||
+    (value.type !== "tool_use" &&
+      value.type !== "commandExecution" &&
+      value.type !== "fileChange" &&
+      value.type !== "webSearch" &&
+      value.type !== "unknown") ||
+    typeof value.name !== "string" ||
+    (value.type === "unknown"
+      ? !isSafeToolActivitySourceType(value.sourceType)
+      : hasSourceType) ||
+    (hasFileChanges && value.type !== "fileChange")
+  ) {
+    throw new Error("invalid-tool-activity");
+  }
+  return Object.freeze({
+    type: value.type,
+    name: value.name,
+    ...(hasFileChanges
+      ? { fileChanges: sanitizeFileChangeSummary(value.fileChanges) }
+      : {}),
+    ...(hasParameter
+      ? { parameter: sanitizeToolActivityParameter(value.parameter) }
+      : {}),
+    ...(hasSourceType ? { sourceType: value.sourceType as string } : {}),
+  });
+}
+
+function sanitizeFileChangeSummary(
+  value: unknown,
+): NonNullable<WorkbenchToolActivity["fileChanges"]> {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["files", "totalFiles", "truncated"]) ||
+    !Array.isArray(value.files) ||
+    value.files.length === 0 ||
+    value.files.length > 3 ||
+    !Number.isSafeInteger(value.totalFiles) ||
+    (value.totalFiles as number) < value.files.length ||
+    value.truncated !== ((value.totalFiles as number) > value.files.length)
+  ) {
+    throw new Error("invalid-file-change-summary");
+  }
+  return Object.freeze({
+    files: Object.freeze(value.files.map(sanitizeChangedFileSummary)),
+    totalFiles: value.totalFiles as number,
+    truncated: value.truncated,
+  });
+}
+
+function sanitizeChangedFileSummary(
+  value: unknown,
+): NonNullable<WorkbenchToolActivity["fileChanges"]>["files"][number] {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(
+      value,
+      Object.hasOwn(value, "lines")
+        ? ["lines", "path", "truncated"]
+        : ["path", "truncated"],
+    ) ||
+    typeof value.path !== "string" ||
+    typeof value.truncated !== "boolean"
+  ) {
+    throw new Error("invalid-changed-file-summary");
+  }
+  return Object.freeze({
+    path: value.path,
+    truncated: value.truncated,
+    ...(Object.hasOwn(value, "lines")
+      ? { lines: sanitizeFileChangeLineSummary(value.lines) }
+      : {}),
+  });
+}
+
+function sanitizeFileChangeLineSummary(
+  value: unknown,
+): { readonly additions: number; readonly deletions: number } {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["additions", "deletions"]) ||
+    !Number.isSafeInteger(value.additions) ||
+    (value.additions as number) < 0 ||
+    !Number.isSafeInteger(value.deletions) ||
+    (value.deletions as number) < 0
+  ) {
+    throw new Error("invalid-file-change-line-summary");
+  }
+  return Object.freeze({
+    additions: value.additions as number,
+    deletions: value.deletions as number,
+  });
+}
+
+function isSafeToolActivitySourceType(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumToolActivitySourceTypeCharacters &&
+    !value.includes("\0")
+  );
+}
+
+function sanitizeToolActivityParameter(
+  value: unknown,
+): NonNullable<WorkbenchToolActivity["parameter"]> {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["kind", "truncated", "value"]) ||
+    (value.kind !== "command" && value.kind !== "path") ||
+    typeof value.value !== "string" ||
+    typeof value.truncated !== "boolean"
+  ) {
+    throw new Error("invalid-tool-activity-parameter");
+  }
+  return Object.freeze({
+    kind: value.kind,
+    value: value.value,
+    truncated: value.truncated,
+  });
 }
 
 function sanitizeDisplayString(value: string): string {
@@ -3216,4 +4385,55 @@ function deepFreeze<T>(value: T): T {
   Object.freeze(value);
   for (const child of Object.values(value)) deepFreeze(child);
   return value;
+}
+
+/** Exact public/stored shape. Vendor tolerance belongs in the runtime parser. */
+export function reconstructWorkbenchSubscriptionUsage(value: unknown): WorkbenchSubscriptionUsageObservation | undefined {
+  try {
+    if (!isRecord(value) || !hasExactKeys(value, ["five_hour", "observedAt", "seven_day"]) ||
+        !Number.isSafeInteger(value.observedAt) || (value.observedAt as number) <= 0 ||
+        (value.observedAt as number) > 8_640_000_000_000_000) return undefined;
+    const window = (input: unknown) => {
+      if (input === null) return null;
+      if (!isRecord(input) || !hasExactKeys(input, ["resetsAt", "utilization"]) ||
+          typeof input.utilization !== "number" || !Number.isFinite(input.utilization) ||
+          input.utilization < 0 || input.utilization > 1 ||
+          !Number.isSafeInteger(input.resetsAt) || (input.resetsAt as number) <= 0 ||
+          (input.resetsAt as number) > 8_640_000_000_000) return undefined;
+      return Object.freeze({ utilization: input.utilization, resetsAt: input.resetsAt as number });
+    };
+    const five_hour = window(value.five_hour);
+    const seven_day = window(value.seven_day);
+    if (five_hour === undefined || seven_day === undefined) return undefined;
+    return Object.freeze({ five_hour, seven_day, observedAt: value.observedAt as number });
+  } catch { return undefined; }
+}
+
+export function sanitizeWorkbenchSubscriptionUsageResult(value: unknown): WorkbenchSubscriptionUsageResult {
+  try {
+    if (isRecord(value) && value.ok === true && hasExactKeys(value, ["observation", "ok"])) {
+      const observation = value.observation === null ? null : reconstructWorkbenchSubscriptionUsage(value.observation);
+      if (observation !== undefined) return Object.freeze({ ok: true, observation });
+    }
+  } catch { /* Unavailable, not a fabricated zero-usage observation. */ }
+  return Object.freeze({ ok: false });
+}
+
+const projectPathFailureReasons: readonly WorkbenchProjectPathFailureReason[] = [
+  "selected-file", "directory-missing", "destination-exists", "parent-directory-missing",
+  "parent-is-file", "parent-is-alias", "parent-is-reparse", "parent-unavailable", "create-denied", "unknown",
+];
+
+export function reconstructWorkbenchProjectPathFailure(value: unknown): WorkbenchProjectPathFailure | undefined {
+  try {
+    if (!isRecord(value) || !hasExactKeys(value, ["reason", "targetPath"]) ||
+        !projectPathFailureReasons.includes(value.reason as WorkbenchProjectPathFailureReason) ||
+        typeof value.targetPath !== "string" || value.targetPath.length === 0 || value.targetPath.length > 32_768 ||
+        /[\u0000-\u001f\u007f-\u009f]/u.test(value.targetPath)) return undefined;
+    // Electron's Windows chooser supplies drive-absolute or UNC paths. Keep
+    // the chosen spelling; do not resolve relative input or treat URLs as paths.
+    const path = value.targetPath.replaceAll("\\", "/");
+    if (!/^[a-zA-Z]:\//u.test(path) && !/^\/\/[^/]+\/[^/]+(?:\/|$)/u.test(path)) return undefined;
+    return Object.freeze({ reason: value.reason as WorkbenchProjectPathFailureReason, targetPath: value.targetPath });
+  } catch { return undefined; }
 }

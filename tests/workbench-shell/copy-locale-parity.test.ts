@@ -116,7 +116,7 @@ test("English copy stays byte-exact and zh-CN selection is immediate", () => {
     ],
     [
       "Create Project…",
-      "Workbench never handles credentials",
+      "No subscription credentials handled",
       "Endpoint: Choose endpoint",
       "Draft preserved · 12 characters",
       "Confirm removal",

@@ -157,9 +157,9 @@ test("oracle literals, opaque controls, and existing Settings selectors stay ind
     true,
   );
   assert.deepEqual(F104_COPY, {
-    credentialHeading: "The Workbench never handles credentials",
+    credentialHeading: "Subscription credentials never pass through the Workbench",
     credentialSentence:
-      "This page never asks for a password, API key or token, never reads a credential file, and never stores credentials. None of those controls may be added.",
+      "Subscription sign-in happens in each provider's own app. This page never asks for a subscription password or token, never reads a subscription credential file, and never stores subscription credentials. The one exception is disclosed in the GLM Coding Plan API key section below.",
     boundAction: "Log out",
     signedOutAction: "Login",
     consequence:

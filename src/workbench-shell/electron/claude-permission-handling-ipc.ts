@@ -126,11 +126,17 @@ export function installWorkbenchClaudePermissionHandlingIpc(options: {
     WORKBENCH_SAVE_CLAUDE_PERMISSION_HANDLING_CHANNEL,
     saveHandler,
   );
-  options.window.webContents.on(
+  // Captured while the window is still alive. Reading the `webContents`
+  // getter on a destroyed BrowserWindow throws `Object has been destroyed`,
+  // and dispose() runs from the window's own "closed" handler, where the
+  // window is destroyed by definition (issue 172). A reference taken here
+  // keeps answering removeListener afterwards, so nothing has to be caught.
+  const rendererSender = options.window.webContents;
+  rendererSender.on(
     "render-process-gone",
     terminalLifecycleListener,
   );
-  options.window.webContents.on("destroyed", terminalLifecycleListener);
+  rendererSender.on("destroyed", terminalLifecycleListener);
   options.window.on("closed", terminalLifecycleListener);
 
   return Object.freeze({
@@ -144,11 +150,11 @@ export function installWorkbenchClaudePermissionHandlingIpc(options: {
       options.ipcMain.removeHandler(
         WORKBENCH_SAVE_CLAUDE_PERMISSION_HANDLING_CHANNEL,
       );
-      options.window.webContents.removeListener(
+      rendererSender.removeListener(
         "render-process-gone",
         terminalLifecycleListener,
       );
-      options.window.webContents.removeListener(
+      rendererSender.removeListener(
         "destroyed",
         terminalLifecycleListener,
       );

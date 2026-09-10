@@ -25,6 +25,12 @@ const englishCopy = {
       "Review preserved historical stores separately from the active Project. Recovery never merges, imports, resumes, or changes a Project folder.",
     reviewButton: "Review data recovery",
     metadataUnavailable: "Metadata unavailable",
+    unavailableSourceGuidance:
+      "Workbench could not read this historical store. Check that your Windows account has permission to read it, then restart Workbench to retry.",
+    unreadableSourceMetadata: "Metadata could not be inspected.",
+    unreadableSourceState: "Metadata unreadable",
+    unreadableSourceGuidance:
+      "Preserve this store, then export an exact copy to retrieve its complete contents.",
     preserveAction: "Preserve",
     acknowledgeAction: "Acknowledge",
     libraryHeading: "Historical Recovery Library",
@@ -33,6 +39,9 @@ const englishCopy = {
     projectsBreadcrumb: "Projects",
     sessionsBreadcrumb: "Sessions",
     emptyBranch: "No metadata rows in this branch.",
+    contentExportGuidance:
+      "Conversation content is not displayed here. Export an exact copy to retrieve the complete preserved history.",
+    exportingExactCopy: "Exporting recovery copy",
   },
   preservingOperationCopy: (label: string): string => `Preserving ${label}`,
   acknowledgingOperationCopy: (label: string): string =>
@@ -55,11 +64,11 @@ const englishCopy = {
       "The prior export outcome is unknown. Start a new export only if another copy is intentional.",
   },
   preservedResultCopy: (generationLabel: string): string =>
-    `${generationLabel} was preserved in the Historical Recovery Library.`,
+    `${generationLabel} was preserved in the Historical Recovery Library. Browse its metadata here, or use Export exact copy… to retrieve the complete preserved history.`,
   alreadyPreservedResultCopy: (generationLabel: string): string =>
-    `${generationLabel} was already preserved.`,
+    `${generationLabel} was already preserved. Browse its metadata here, or use Export exact copy… to retrieve the complete preserved history.`,
   exportedResultCopy: (exportLabel: string): string =>
-    `${exportLabel} was exported as an exact copy.`,
+    `${exportLabel} was exported to the location you selected as an exact copy.`,
 } as const;
 
 const simplifiedChineseCopy = {
@@ -73,6 +82,12 @@ const simplifiedChineseCopy = {
       "请将保留的历史存储与活动项目分开检查。恢复操作不会合并、导入或继续会话，也不会更改项目文件夹。",
     reviewButton: "检查数据恢复",
     metadataUnavailable: "元数据不可用",
+    unavailableSourceGuidance:
+      "Workbench 无法读取此历史存储。请确认你的 Windows 帐户有权读取它，然后重启 Workbench 再试。",
+    unreadableSourceMetadata: "无法检查元数据。",
+    unreadableSourceState: "元数据不可读",
+    unreadableSourceGuidance:
+      "请先保留此存储，然后导出精确副本以取回其完整内容。",
     preserveAction: "保留",
     acknowledgeAction: "确认",
     libraryHeading: "历史恢复库",
@@ -81,6 +96,9 @@ const simplifiedChineseCopy = {
     projectsBreadcrumb: "项目",
     sessionsBreadcrumb: "智能体会话",
     emptyBranch: "此分支没有元数据行。",
+    contentExportGuidance:
+      "此处不显示对话正文。请导出精确副本以取回完整的已保留历史记录。",
+    exportingExactCopy: "正在导出恢复副本",
   },
   preservingOperationCopy: (label: string): string => `正在保留 ${label}`,
   acknowledgingOperationCopy: (label: string): string =>
@@ -102,11 +120,11 @@ const simplifiedChineseCopy = {
       "上一次导出的结果未知。仅当你确实需要另一份副本时，才开始新的导出。",
   },
   preservedResultCopy: (generationLabel: string): string =>
-    `${generationLabel} 已保留到历史恢复库。`,
+    `${generationLabel} 已保留到历史恢复库。可在此浏览元数据，或使用“导出精确副本…”取回完整的已保留历史记录。`,
   alreadyPreservedResultCopy: (generationLabel: string): string =>
-    `${generationLabel} 已经保留。`,
+    `${generationLabel} 已经保留。可在此浏览元数据，或使用“导出精确副本…”取回完整的已保留历史记录。`,
   exportedResultCopy: (exportLabel: string): string =>
-    `${exportLabel} 已导出为精确副本。`,
+    `${exportLabel} 已作为精确副本导出到你选择的位置。`,
 } as const satisfies LocalizedShape<typeof englishCopy>;
 
 export const copyLocaleDictionaries = defineCopyLocaleDictionaries(

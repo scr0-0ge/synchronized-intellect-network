@@ -303,7 +303,6 @@ function serializeActive(
   return {
     operationNumber: active.operationNumber,
     phase: active.phase,
-    targetPath: active.targetPath,
     targetToken: active.targetToken,
     chooserResult: active.chooserResult,
     createResult: active.createResult,

@@ -1,14 +1,17 @@
 import { randomUUID } from "node:crypto";
+import type { ProjectSnapshotChanges } from "../coordinator/types.ts";
 import { basename, resolve } from "node:path";
 import { types as nodeUtilTypes } from "node:util";
 
 import type {
   NormalizedRuntimeEvent,
-  RuntimeFailureCategory,
+  RuntimeProgressActivity,
+  RuntimeToolActivity,
   SessionProfile,
 } from "../agent-runtime/index.ts";
 import type {
   ProjectChannel,
+  ProjectCommandSummary,
   ProjectCommandFailureCategory,
   ProjectCommandStatus,
   ProjectInterruptCapability,
@@ -20,13 +23,17 @@ import type {
   RequestedSessionProfileProjection,
 } from "../coordinator/index.ts";
 import { normalizeSessionDisplayName } from "../session-metadata.ts";
+import type { ProjectCommandRecovery } from "../coordinator/types.ts";
 import { redactFilesystemPaths } from "./path-redaction.ts";
+import { sanitizeWorkbenchContinuationStop } from "./result-sanitizer.ts";
+import type { WorkbenchContinuationStop } from "./contract.ts";
 import {
   cloneEffectiveSessionProfileProjection,
   cloneRequestedSessionProfileProjection,
   unknownEffectiveSessionProfileProjection,
 } from "../coordinator/profile-projection.ts";
 import {
+  isWorkbenchRuntimeFailureCategory,
   isValidWorkbenchDirectInput,
   publicProjectFailure,
   type WorkbenchCommandView,
@@ -38,12 +45,15 @@ import {
   type WorkbenchSessionContextUsage,
   type WorkbenchSessionProfileProjection,
   type WorkbenchTimelineEvent,
+  type WorkbenchTurnView,
+  type WorkbenchToolActivity,
 } from "./contract.ts";
 
 const statuses: readonly ProjectCommandStatus[] = [
   "accepted",
   "in-flight",
   "completed",
+  "quota-paused",
   "failed",
   "recovery-required",
 ];
@@ -51,23 +61,14 @@ const failureCategories: readonly ProjectCommandFailureCategory[] = [
   "interrupted",
   "profile-resolution-failed",
   "runtime-failed",
+  "quota-expired",
 ];
-const runtimeFailureCategories: readonly RuntimeFailureCategory[] = [
-  "approval-required",
-  "authentication-required",
-  "catalog-invalid",
-  "correlation-invalid",
-  "invalid-input",
-  "protocol-invalid",
-  "protocol-rejected",
-  "runtime-shutdown",
-  "runtime-unavailable",
-  "temp-cleanup",
-  "temp-cleanup-guard",
-  "transport-failed",
-  "turn-failed",
-  "unexpected-server-request",
-  "unsupported-selection",
+const runtimeProgressActivities: readonly RuntimeProgressActivity[] = [
+  "thinking",
+  "tool",
+  "retrying",
+  "rate-limited",
+  "status",
 ];
 
 type ProjectTimelineEvent =
@@ -77,6 +78,8 @@ type ProjectTimelineEvent =
 type ObservationState = {
   disposed: boolean;
   emittedCursor?: number;
+  snapshot?: ProjectSnapshot;
+  view?: WorkbenchProjectView;
   listener?: WorkbenchProjectListener;
   iterator?: AsyncIterator<ProjectUpdate>;
   completion: Promise<void>;
@@ -89,6 +92,8 @@ type ObservationState = {
 
 export interface WorkbenchLiveView {
   observe(listener: WorkbenchProjectListener): () => void;
+  /** Trusted product state, projected only on the last command of an open Session. */
+  reportContinuationStop(commandId: string, stop: WorkbenchContinuationStop): void;
   /** Reprojects a same-cursor snapshot after a trusted Session mutation. */
   refreshAfterSessionMutation(): Promise<void>;
   resolveSessionRemoval(removalKey: string):
@@ -146,6 +151,7 @@ export function createWorkbenchLiveView(options: {
   const projectLabel = deriveProjectLabel(projectDirectory);
   const sessionOrdinals = new Map<string, number>();
   const observations = new Set<ObservationState>();
+  const continuationStops = new Map<string, WorkbenchContinuationStop>();
   let nextSessionOrdinal = 1;
   let selectionCursor: number | undefined;
   let selectionSignature: string | undefined;
@@ -188,6 +194,68 @@ export function createWorkbenchLiveView(options: {
     }
   };
 
+  const resetSnapshotCapabilities = (): void => {
+      selectionCursor = undefined;
+      selectionSignature = undefined;
+      selectionKeysBySession = new Map();
+      continuationSelections = new Map();
+      removalCursor = undefined;
+      removalSignature = undefined;
+      removalKeysBySession = new Map();
+      sessionRemovals = new Map();
+      metadataCursor = undefined;
+      metadataSignature = undefined;
+      metadataKeysBySession = new Map();
+      sessionMetadataTargets = new Map();
+      replacementSourceCursor = undefined;
+      replacementSourceSignature = undefined;
+      replacementProfilesByCommandKey = new Map();
+      interruptCursor = undefined;
+      interruptSignature = undefined;
+      interruptKeysByCommandId = new Map();
+      interruptTargets = new Map();
+      steerCursor = undefined;
+      steerSignature = undefined;
+      steerKeysByCommandId = new Map();
+      steerTargets = new Map();
+  };
+
+  const commandTimelineCache = new WeakMap<readonly ProjectTimelineEvent[], Map<string, { input: unknown; requested: unknown; effective: unknown; timeline: ProjectTimelineEvent[] }>>();
+  const turnCache = new WeakMap<readonly ProjectTimelineEvent[], WorkbenchTurnView>();
+  const contextCache = new WeakMap<readonly ProjectTimelineEvent[], { completed: boolean; value: WorkbenchSessionContextUsage | undefined }>();
+
+  const applyChanges = (previous: ProjectSnapshot, changes: ProjectSnapshotChanges): ProjectSnapshot => {
+    if (changes.projectId !== previous.projectId || changes.after !== previous.cursor ||
+      !Number.isSafeInteger(changes.cursor) || changes.cursor <= previous.cursor ||
+      !Array.isArray(changes.commands) || !Array.isArray(changes.sessions)) throw new Error("invalid-project-changes");
+    const commands = new Map(previous.commands.map(command => [command.commandId, command]));
+    const changedIds = new Set<string>();
+    for (const command of changes.commands) {
+      if (changedIds.has(command.commandId)) throw new Error("duplicate-project-change");
+      changedIds.add(command.commandId);
+      const before = commands.get(command.commandId);
+      if (before?.session !== undefined && command.session?.sessionId !== before.session.sessionId) throw new Error("changed-session-link");
+      commands.set(command.commandId, command.session === undefined ? command : {
+        ...command, session: { ...command.session,
+          events: [...(before?.session?.events ?? []), ...command.session.events],
+        },
+      });
+    }
+    const sessions = new Map(changes.sessions.map(session => [session.sessionId, session]));
+    if (sessions.size !== changes.sessions.length) throw new Error("duplicate-session-change");
+    return deepFreeze({ projectId: previous.projectId, cursor: changes.cursor,
+      commands: [...commands.values()].map(command => {
+        if (command.session === undefined) return command;
+        const shared = sessions.get(command.session.sessionId);
+        if (shared === undefined) throw new Error("missing-session-change");
+        const { lastModelReplyCursor: _previousReply, ...session } = command.session;
+        if (session.displayName === shared.displayName && session.archived === shared.archived &&
+          session.resumable === shared.resumable && command.session.lastModelReplyCursor === shared.lastModelReplyCursor) return command;
+        return { ...command, session: { ...session, ...shared } };
+      }),
+    });
+  };
+
   const projectSnapshot = (snapshot: ProjectSnapshot): WorkbenchProjectView => {
     if (!Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < 0) {
       throw new Error("invalid-snapshot");
@@ -206,6 +274,7 @@ export function createWorkbenchLiveView(options: {
         effectiveProfileProjection?: EffectiveSessionProfileProjection;
         runtimeLabel: string;
         readonly turns: Array<{
+          readonly recovery?: ProjectCommandRecovery;
           readonly timeline: ProjectTimelineEvent[];
           readonly requestedProfileProjection?: RequestedSessionProfileProjection;
           readonly effectiveProfileProjection?: EffectiveSessionProfileProjection;
@@ -213,6 +282,10 @@ export function createWorkbenchLiveView(options: {
         resumable: boolean;
         status: ProjectCommandStatus;
         failureCategory?: ProjectCommandFailureCategory;
+        /** Cursor of the last recorded model reply for this Session. */
+        lastModelReplyCursor: number;
+        /** Latest accepted command cursor grouped into this Session. */
+        lastAcceptedCommandCursor: number;
       }
     >();
     for (const command of snapshot.commands) {
@@ -230,10 +303,7 @@ export function createWorkbenchLiveView(options: {
       ) {
         throw new Error("invalid-failure");
       }
-      const commandTimeline = projectCommandTimeline(
-        command.input,
-        command.session?.events ?? [],
-      );
+      const commandTimeline = projectCommandTimeline(command);
       const sessionId = command.session?.sessionId;
       if (sessionId !== undefined && requireString(sessionId).length === 0) {
         throw new Error("invalid-session-identity");
@@ -241,6 +311,21 @@ export function createWorkbenchLiveView(options: {
       const identity =
         sessionId === undefined ? `command:${commandId}` : `session:${sessionId}`;
       const existing = grouped.get(identity);
+      const lastModelReplyCursor = command.session?.lastModelReplyCursor;
+      const acceptedCommandCursor = command.session?.acceptedCommandCursor;
+      if (
+        lastModelReplyCursor !== undefined &&
+        (!Number.isSafeInteger(lastModelReplyCursor) || lastModelReplyCursor < 0)
+      ) {
+        throw new Error("invalid-session");
+      }
+      if (
+        acceptedCommandCursor !== undefined &&
+        (!Number.isSafeInteger(acceptedCommandCursor) ||
+          acceptedCommandCursor < 0)
+      ) {
+        throw new Error("invalid-session");
+      }
       if (existing === undefined) {
         if (command.session === undefined) {
           grouped.set(identity, {
@@ -251,6 +336,8 @@ export function createWorkbenchLiveView(options: {
             archived: false,
             resumable: false,
             status: command.status,
+            lastModelReplyCursor: 0,
+            lastAcceptedCommandCursor: 0,
             ...(command.failureCategory === undefined
               ? {}
               : { failureCategory: command.failureCategory }),
@@ -286,6 +373,7 @@ export function createWorkbenchLiveView(options: {
           runtimeLabel:
             requestedProfileProjection?.runtimeFamilyLabel ?? "Codex",
           turns: [{
+            ...(command.recovery === undefined ? {} : { recovery: command.recovery }),
             timeline: commandTimeline,
             ...(requestedProfileProjection === undefined
               ? {}
@@ -297,6 +385,8 @@ export function createWorkbenchLiveView(options: {
           }],
           resumable: command.session.resumable,
           status: command.status,
+          lastModelReplyCursor: lastModelReplyCursor ?? 0,
+          lastAcceptedCommandCursor: acceptedCommandCursor ?? 0,
           ...(command.failureCategory === undefined
             ? {}
             : { failureCategory: command.failureCategory }),
@@ -332,6 +422,7 @@ export function createWorkbenchLiveView(options: {
       );
       existing.runtimeLabel = requestedProfileProjection?.runtimeFamilyLabel ?? "Codex";
       existing.turns.push({
+        ...(command.recovery === undefined ? {} : { recovery: command.recovery }),
         timeline: commandTimeline,
         ...(requestedProfileProjection === undefined
           ? {}
@@ -341,6 +432,14 @@ export function createWorkbenchLiveView(options: {
       existing.resumable = command.session.resumable;
       existing.latestCommandId = commandId;
       existing.status = command.status;
+      existing.lastModelReplyCursor = Math.max(
+        existing.lastModelReplyCursor,
+        lastModelReplyCursor ?? 0,
+      );
+      existing.lastAcceptedCommandCursor = Math.max(
+        existing.lastAcceptedCommandCursor,
+        acceptedCommandCursor ?? 0,
+      );
       if (command.failureCategory === undefined) delete existing.failureCategory;
       else existing.failureCategory = command.failureCategory;
     }
@@ -419,18 +518,66 @@ export function createWorkbenchLiveView(options: {
       throw new Error("snapshot-drift");
     }
 
-    const projectedEntries = groups.map((entry) => {
-      let ordinal = sessionOrdinals.get(entry.identity);
-      if (ordinal === undefined) {
-        ordinal = nextSessionOrdinal;
-        nextSessionOrdinal += 1;
-        sessionOrdinals.set(entry.identity, ordinal);
-      }
-      return Object.freeze({
-        commandKey: `command-${ordinal}`,
-        entry,
+    // Ordinals are assigned in FIRST-SEEN order, so `command-N` stays stable
+    // across snapshots regardless of display order. Display order is a
+    // separate decision (issue #6 comment 3.1): active Sessions lead terminal
+    // history. Within that tier, a Session currently waiting for its first
+    // reply leads, ordered by its latest accepted command. Otherwise Sessions
+    // remain ordered by their last model reply, with first-seen order breaking
+    // ties. Progress, steering, metadata and terminal updates do not affect
+    // either recency signal.
+    const projectedEntries = groups
+      .map((entry) => {
+        let ordinal = sessionOrdinals.get(entry.identity);
+        if (ordinal === undefined) {
+          ordinal = nextSessionOrdinal;
+          nextSessionOrdinal += 1;
+          sessionOrdinals.set(entry.identity, ordinal);
+        }
+        return Object.freeze({
+          commandKey: `command-${ordinal}`,
+          ordinal,
+          entry,
+        });
+      })
+      .sort((left, right) => {
+        const leftActive =
+          left.entry.status === "accepted" ||
+          left.entry.status === "in-flight";
+        const rightActive =
+          right.entry.status === "accepted" ||
+          right.entry.status === "in-flight";
+        if (leftActive !== rightActive) return leftActive ? -1 : 1;
+        const leftWaitsForFirstReply =
+          leftActive &&
+          left.entry.lastModelReplyCursor === 0;
+        const rightWaitsForFirstReply =
+          rightActive &&
+          right.entry.lastModelReplyCursor === 0;
+        if (leftWaitsForFirstReply !== rightWaitsForFirstReply) {
+          return leftWaitsForFirstReply ? -1 : 1;
+        }
+        if (
+          leftWaitsForFirstReply &&
+          left.entry.lastAcceptedCommandCursor !==
+            right.entry.lastAcceptedCommandCursor
+        ) {
+          return (
+            right.entry.lastAcceptedCommandCursor -
+            left.entry.lastAcceptedCommandCursor
+          );
+        }
+        if (
+          left.entry.lastModelReplyCursor !==
+          right.entry.lastModelReplyCursor
+        ) {
+          return (
+            right.entry.lastModelReplyCursor -
+            left.entry.lastModelReplyCursor
+          );
+        }
+        return left.ordinal - right.ordinal;
       });
-    });
     const interruptCapability = readInterruptCapability(options.channel);
     const steerCapability = readSteerCapability(options.channel);
     const runningEntries = projectedEntries.filter(
@@ -521,17 +668,35 @@ export function createWorkbenchLiveView(options: {
     }
 
     const commands = projectedEntries.map(({ commandKey, entry }) => {
-      const turns = entry.turns.map((turn) => deepFreeze({
-        profile: projectPublicProfile(
-          turn.requestedProfileProjection,
-          turn.effectiveProfileProjection,
-        ),
-        timeline: turn.timeline.map(projectEvent),
-      }));
+      const turns = entry.turns.map((turn) => {
+        const cached =
+          turn.recovery === undefined
+            ? turnCache.get(turn.timeline)
+            : undefined;
+        if (cached !== undefined) return cached;
+        const projected = deepFreeze({
+          ...(turn.recovery === undefined
+            ? {}
+            : { recovery: structuredClone(turn.recovery) }),
+          profile: projectPublicProfile(turn.requestedProfileProjection, turn.effectiveProfileProjection),
+          timeline: projectTimeline(turn.timeline),
+        });
+        if (turn.recovery === undefined) {
+          turnCache.set(turn.timeline, projected);
+        }
+        return projected;
+      });
       const timeline = turns.flatMap((turn) => turn.timeline);
-      const context = projectLatestContext(
-        entry.turns.flatMap((turn) => turn.timeline),
-      );
+      let context: WorkbenchSessionContextUsage | undefined;
+      for (const turn of entry.turns) {
+        let cached = contextCache.get(turn.timeline);
+        if (cached === undefined) {
+          cached = { completed: turn.timeline.some(event => event.kind === "turn-completed"), value: projectLatestContext(turn.timeline) };
+          contextCache.set(turn.timeline, cached);
+        }
+        if (cached.completed) context = cached.value;
+      }
+      const continuationStop = continuationStops.get(entry.latestCommandId);
       const projected: WorkbenchCommandView = {
         key: commandKey,
         label:
@@ -539,6 +704,7 @@ export function createWorkbenchLiveView(options: {
           `Agent Session ${commandKey.slice("command-".length).padStart(2, "0")}`,
         runtime: entry.runtimeLabel,
         status: entry.status,
+        ...(continuationStop === undefined ? {} : { continuationStop }),
         ...(entry.status === "in-flight"
           ? {
               interrupt: projectInterruptControl(
@@ -642,7 +808,8 @@ export function createWorkbenchLiveView(options: {
 
   const runObservation = async (state: ObservationState): Promise<void> => {
     try {
-      const snapshot = await options.channel.snapshot();
+      const snapshot = deepFreeze(await options.channel.snapshot());
+      state.snapshot = snapshot;
       if (state.disposed || closed) return;
       if (!emitState(state, { ok: true, view: projectSnapshot(snapshot) })) {
         state.dispose();
@@ -664,16 +831,33 @@ export function createWorkbenchLiveView(options: {
           state.dispose();
           return;
         }
-        if (
-          next.value.kind === "snapshot" ||
-          !Number.isSafeInteger(next.value.cursor) ||
-          next.value.cursor !== rawCursor + 1
-        ) {
-          throw new Error("invalid-observation");
+        const sequential = next.value.kind !== "snapshot" && Number.isSafeInteger(next.value.cursor) && next.value.cursor === rawCursor + 1;
+        if (sequential) rawCursor = next.value.cursor;
+        if (sequential && rawCursor <= (state.emittedCursor ?? -1)) continue;
+        let freshSnapshot: ProjectSnapshot;
+        let freshView: WorkbenchProjectView | undefined;
+        const priorOrdinals = new Map(sessionOrdinals);
+        const priorNextOrdinal = nextSessionOrdinal;
+        if (sequential && options.channel.snapshotChanges !== undefined) {
+          try {
+            const changes = await options.channel.snapshotChanges(state.snapshot!.cursor);
+            if (!changes.commands.some(command => command.commandId === next.value.commandId)) throw new Error("missing-command-change");
+            freshSnapshot = applyChanges(state.snapshot!, changes);
+            if (freshSnapshot.cursor < rawCursor) throw new Error("stale-project-changes");
+            freshView = projectSnapshot(freshSnapshot);
+          } catch {
+            console.warn("Live Project update mismatch; reloading the full snapshot.");
+            resetSnapshotCapabilities();
+            sessionOrdinals.clear();
+            for (const [identity, ordinal] of priorOrdinals) sessionOrdinals.set(identity, ordinal);
+            nextSessionOrdinal = priorNextOrdinal;
+            freshSnapshot = deepFreeze(await options.channel.snapshot());
+          }
+        } else {
+          if (!sequential) console.warn("Live Project cursor mismatch; reloading the full snapshot.");
+          freshSnapshot = deepFreeze(await options.channel.snapshot());
         }
-        rawCursor = next.value.cursor;
-        if (rawCursor <= (state.emittedCursor ?? -1)) continue;
-        const freshSnapshot = await options.channel.snapshot();
+        if (!sequential) rawCursor = next.value.cursor;
         if (state.disposed || closed) return;
         if (
           freshSnapshot.cursor < rawCursor ||
@@ -684,12 +868,13 @@ export function createWorkbenchLiveView(options: {
         if (
           !emitState(state, {
             ok: true,
-            view: projectSnapshot(freshSnapshot),
+            view: freshView ?? projectSnapshot(freshSnapshot),
           })
         ) {
           state.dispose();
           return;
         }
+        state.snapshot = freshSnapshot;
         state.emittedCursor = freshSnapshot.cursor;
       }
     } catch {
@@ -702,35 +887,31 @@ export function createWorkbenchLiveView(options: {
 
   return Object.freeze({
     observe,
+    reportContinuationStop(commandId: string, stop: WorkbenchContinuationStop) {
+      if (closed) return;
+      continuationStops.set(commandId, sanitizeWorkbenchContinuationStop(stop));
+      // Only annotate the last public view: rebuilding an older raw snapshot
+      // against today's Runtime controls would falsely report snapshot drift.
+      // An observer still catching up picks up the stored annotation normally.
+      for (const state of [...observations]) {
+        if (state.disposed || state.view === undefined) continue;
+        const command = state.snapshot?.commands.find(entry => entry.commandId === commandId);
+        if (command === undefined) continue;
+        const identity = command.session === undefined ? `command:${commandId}` : `session:${command.session.sessionId}`;
+        const key = `command-${sessionOrdinals.get(identity)}`;
+        const view = deepFreeze({ ...state.view, commands: state.view.commands.map(entry =>
+          entry.key === key ? { ...entry, continuationStop: continuationStops.get(commandId)! } : entry),
+        });
+        if (!emitState(state, { ok: true, view })) state.dispose();
+      }
+    },
     async refreshAfterSessionMutation(): Promise<void> {
       if (closed) return;
       // Session metadata changes and hard deletion intentionally leave no update
       // cursor. Rotate every snapshot-scoped capability before same-cursor projection.
-      selectionCursor = undefined;
-      selectionSignature = undefined;
-      selectionKeysBySession = new Map();
-      continuationSelections = new Map();
-      removalCursor = undefined;
-      removalSignature = undefined;
-      removalKeysBySession = new Map();
-      sessionRemovals = new Map();
-      metadataCursor = undefined;
-      metadataSignature = undefined;
-      metadataKeysBySession = new Map();
-      sessionMetadataTargets = new Map();
-      replacementSourceCursor = undefined;
-      replacementSourceSignature = undefined;
-      replacementProfilesByCommandKey = new Map();
-      interruptCursor = undefined;
-      interruptSignature = undefined;
-      interruptKeysByCommandId = new Map();
-      interruptTargets = new Map();
-      steerCursor = undefined;
-      steerSignature = undefined;
-      steerKeysByCommandId = new Map();
-      steerTargets = new Map();
+      resetSnapshotCapabilities();
       try {
-        const snapshot = await options.channel.snapshot();
+        const snapshot = deepFreeze(await options.channel.snapshot());
         if (closed) return;
         const result = {
           ok: true as const,
@@ -747,6 +928,7 @@ export function createWorkbenchLiveView(options: {
             state.dispose();
             continue;
           }
+          state.snapshot = snapshot;
           state.emittedCursor = snapshot.cursor;
         }
       } catch {
@@ -998,10 +1180,19 @@ export function createWorkbenchLiveView(options: {
     });
   }
 
-  function projectCommandTimeline(
-    input: unknown,
-    events: readonly ProjectTimelineEvent[],
-  ): ProjectTimelineEvent[] {
+  function projectCommandTimeline(command: ProjectCommandSummary): ProjectTimelineEvent[] {
+    const input = command.input;
+    const events = command.session?.events ?? [];
+    const requested = command.session?.requestedProfileProjection;
+    const effective = command.session?.effectiveProfileProjection;
+    const cached = commandTimelineCache.get(events)?.get(command.commandId);
+    if (cached !== undefined && cached.input === input && cached.requested === requested && cached.effective === effective) return cached.timeline;
+    const cache = (timeline: ProjectTimelineEvent[]) => {
+      let entries = commandTimelineCache.get(events);
+      if (entries === undefined) commandTimelineCache.set(events, entries = new Map());
+      entries.set(command.commandId, { input, requested, effective, timeline });
+      return timeline;
+    };
     const runtimeEvents = events.map((event) => {
       if (
         event.kind === "user-message" &&
@@ -1017,11 +1208,36 @@ export function createWorkbenchLiveView(options: {
       }
       return structuredClone(event);
     });
-    if (input === undefined) return runtimeEvents;
+    if (input === undefined) {
+      return cache(runtimeEvents);
+    }
     if (!isValidWorkbenchDirectInput(input)) {
       throw new Error("invalid-user-message");
     }
-    return [Object.freeze({ kind: "user-message", text: input }), ...runtimeEvents];
+    const timeline: ProjectTimelineEvent[] = [Object.freeze({ kind: "user-message", text: input }), ...runtimeEvents];
+    return cache(timeline);
+  }
+
+  function projectTimeline(events: readonly ProjectTimelineEvent[]): WorkbenchTimelineEvent[] {
+    const combined: ProjectTimelineEvent[] = [];
+    let reasoning: { kind: "reasoning"; text: string } | undefined;
+    for (const event of events) {
+      if (event.kind === "reasoning") {
+        // Sanitize the assembled text: a filesystem path can cross deltas,
+        // including a runtime activity notification between its fragments.
+        if (reasoning === undefined) {
+          reasoning = { kind: "reasoning", text: "" };
+          combined.push(reasoning);
+        }
+        reasoning.text += requireString(event.text);
+      } else {
+        combined.push(event);
+        if (event.kind !== "progress" && event.kind !== "item-started" && event.kind !== "item-completed") {
+          reasoning = undefined;
+        }
+      }
+    }
+    return combined.map(projectEvent);
   }
 
   function projectEvent(event: ProjectTimelineEvent): WorkbenchTimelineEvent {
@@ -1036,24 +1252,97 @@ export function createWorkbenchLiveView(options: {
         if (event.itemType !== "agent-message") throw new Error("invalid-event");
         return Object.freeze({ kind: event.kind, itemType: "agent-message" });
       case "agent-message":
+      case "reasoning":
         return Object.freeze({
-          kind: "agent-message",
+          kind: event.kind,
           text: sanitizeVisibleString(requireString(event.text)),
+        });
+      case "progress":
+        if (!runtimeProgressActivities.includes(event.activity)) {
+          throw new Error("invalid-event");
+        }
+        return Object.freeze({
+          kind: "progress" as const,
+          activity: event.activity,
+          ...(event.tool === undefined
+            ? {}
+            : { tool: projectToolActivity(event.tool) }),
         });
       case "turn-completed":
         if (event.status !== "completed") throw new Error("invalid-event");
-        return Object.freeze({ kind: "turn-completed", status: "completed" });
+        return Object.freeze({
+          kind: "turn-completed",
+          status: "completed",
+          ...(event.suggestions === undefined
+            ? {}
+            : { suggestions: projectPromptSuggestions(event.suggestions) }),
+        });
       case "turn-interrupted":
         if (event.status !== "interrupted") throw new Error("invalid-event");
         return Object.freeze({ kind: "turn-interrupted", status: "interrupted" });
+      case "turn-paused":
+        if (event.reason !== "quota-exhausted") throw new Error("invalid-event");
+        return Object.freeze({ kind: "turn-paused", reason: "quota-exhausted" });
       case "failed":
-        if (!runtimeFailureCategories.includes(event.category)) {
+        if (!isWorkbenchRuntimeFailureCategory(event.category)) {
           throw new Error("invalid-event");
         }
-        return Object.freeze({ kind: "failed" });
+        return Object.freeze({ kind: "failed", category: event.category });
       default:
         throw new Error("invalid-event");
     }
+  }
+
+  function projectToolActivity(
+    tool: RuntimeToolActivity,
+  ): WorkbenchToolActivity {
+    return Object.freeze({
+      type: tool.type,
+      name: tool.name,
+      ...(tool.sourceType === undefined ? {} : { sourceType: tool.sourceType }),
+      ...(tool.parameter === undefined
+        ? {}
+        : {
+            parameter: Object.freeze({
+              kind: tool.parameter.kind,
+              value: tool.parameter.value,
+              truncated: tool.parameter.truncated,
+            }),
+          }),
+      ...(tool.fileChanges === undefined
+        ? {}
+        : {
+            fileChanges: Object.freeze({
+              files: Object.freeze(tool.fileChanges.files.map((file) =>
+                Object.freeze({
+                  path: file.path,
+                  truncated: file.truncated,
+                  ...(file.lines === undefined
+                    ? {}
+                    : {
+                        lines: Object.freeze({
+                          additions: file.lines.additions,
+                          deletions: file.lines.deletions,
+                        }),
+                      }),
+                })
+              )),
+              totalFiles: tool.fileChanges.totalFiles,
+              truncated: tool.fileChanges.truncated,
+            }),
+          }),
+    });
+  }
+
+  function projectPromptSuggestions(value: unknown): readonly string[] {
+    if (
+      !Array.isArray(value) ||
+      value.length === 0 ||
+      !value.every(isValidWorkbenchDirectInput)
+    ) {
+      throw new Error("invalid-event");
+    }
+    return Object.freeze([...value]);
   }
 
   function projectLatestContext(
@@ -1166,7 +1455,7 @@ function isResumableTerminal(entry: {
   readonly status: ProjectCommandStatus;
   readonly failureCategory?: ProjectCommandFailureCategory;
 }): boolean {
-  return entry.status === "completed" || entry.failureCategory === "interrupted";
+  return entry.status === "completed" || entry.status === "recovery-required" || entry.status === "quota-paused" || entry.failureCategory === "interrupted";
 }
 
 function readInterruptCapability(
@@ -1373,6 +1662,7 @@ function emitState(
   result: WorkbenchProjectResult,
 ): boolean {
   const listener = state.listener;
+  state.view = result.ok ? result.view : undefined;
   return listener === undefined ? false : emit(listener, result);
 }
 
@@ -1423,11 +1713,13 @@ function requireString(value: unknown): string {
   return value;
 }
 
+const deeplyFrozen = new WeakSet<object>();
 function deepFreeze<T>(value: T): T {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) {
+  if (typeof value !== "object" || value === null || deeplyFrozen.has(value)) {
     return value;
   }
   Object.freeze(value);
+  deeplyFrozen.add(value);
   for (const child of Object.values(value)) deepFreeze(child);
   return value;
 }

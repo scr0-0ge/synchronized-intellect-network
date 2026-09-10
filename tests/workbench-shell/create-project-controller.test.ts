@@ -156,6 +156,10 @@ test("known no-create commits are unavailable while unknown create and every fai
     "collision-alias",
     "collision-reparse",
     "target-appeared",
+    "parent-directory-missing",
+    "parent-is-file",
+    "parent-is-alias",
+    "parent-is-reparse",
     "parent-unavailable",
     "create-denied",
     "create-failed-known-no-commit",
@@ -209,6 +213,28 @@ test("known no-create commits are unavailable while unknown create and every fai
           : "unknown",
     );
     assert.equal(harness.store.state.recoveryTargets.length, 1);
+  }
+});
+
+test("controller hands each known Create failure and selected path to IPC only in memory", async () => {
+  for (const createResult of [
+    "collision-directory",
+    "parent-directory-missing",
+    "parent-is-file",
+    "create-denied",
+  ] as const) {
+    const harness = createHarness({ createResult });
+    const controller = await createWorkbenchCreateProjectController(harness.options);
+    const result = await controller.createProject();
+
+    assert.deepEqual(result, { outcome: "unavailable" });
+    assert.deepEqual(result.diagnostic, { reason: createResult, targetPath });
+    assert.equal(
+      Object.getOwnPropertyDescriptor(result, "diagnostic")?.enumerable,
+      false,
+    );
+    assert.equal(JSON.stringify(result).includes(targetPath), false);
+    assert.equal(JSON.stringify(harness.store.state).includes(targetPath), false);
   }
 });
 
@@ -317,7 +343,7 @@ test("a recovery-correlated target never retries create or Host registration", a
   assert.equal(harness.store.state.recoveryTargets.length, 1);
 });
 
-test("restart resumes only unclaimed chooser/create and never repeats claimed create or registration", async () => {
+test("restart resumes only an unclaimed chooser and never repeats a path-dependent effect", async () => {
   const phases = [
     "chooser-ready",
     "chooser-claimed",
@@ -332,13 +358,15 @@ test("restart resumes only unclaimed chooser/create and never repeats claimed cr
     const harness = createHarness({ state });
     const controller = await createWorkbenchCreateProjectController(harness.options);
     const result = await controller.createProject();
-    const resumable = phase === "chooser-ready" || phase === "create-ready";
+    const resumable = phase === "chooser-ready";
     assert.equal(
       result.outcome,
       resumable
         ? "created"
         : phase === "chooser-claimed"
           ? "unavailable"
+          : phase === "create-ready"
+            ? "unavailable"
           : phase === "response-ready"
             ? "created"
             : "created-recovery-required",
@@ -347,12 +375,12 @@ test("restart resumes only unclaimed chooser/create and never repeats claimed cr
     assert.equal(harness.chooserCalls, phase === "chooser-ready" ? 1 : 0, phase);
     assert.equal(
       harness.createCalls,
-      phase === "chooser-ready" || phase === "create-ready" ? 1 : 0,
+      phase === "chooser-ready" ? 1 : 0,
       phase,
     );
     assert.equal(
       harness.registerCalls,
-      phase === "chooser-ready" || phase === "create-ready" ? 1 : 0,
+      phase === "chooser-ready" ? 1 : 0,
       phase,
     );
   }
@@ -389,6 +417,7 @@ test("close during an ambiguous claimed create returns recovery and late creatio
   const controller = await createWorkbenchCreateProjectController(harness.options);
   const pending = controller.createProject();
   await waitUntil(() => harness.createCalls === 1);
+  assert.equal(JSON.stringify(harness.store.state).includes(targetPath), false);
 
   await controller.close();
   assert.deepEqual(await pending, { outcome: "created-recovery-required" });
@@ -521,7 +550,7 @@ test("close at recovery capacity still settles a live claimed create as recovery
   const deferred = createDeferred<WorkbenchCreateProjectCreateResult>();
   const harness = createHarness({
     state: {
-      ...atRecoveryCapacity(stateAtPhase("create-ready")),
+      ...atRecoveryCapacity(stateAtPhase("chooser-ready")),
     },
     createPromise: deferred.promise,
   });
@@ -764,7 +793,6 @@ function stateAtPhase(
       kind: "chooser-result",
       operationNumber: 1,
       result: "selected",
-      targetPath,
       targetToken: createWorkbenchCreateProjectTargetToken(targetPath),
     },
     { kind: "claim-effect", operationNumber: 1, effectKind: "create-if-absent" },

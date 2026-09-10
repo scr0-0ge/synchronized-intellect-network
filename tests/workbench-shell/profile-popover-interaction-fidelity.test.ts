@@ -70,7 +70,7 @@ const endpoint = Object.freeze({
   endpointId: "codex-desktop" as const,
   key: "endpoint:codex",
   runtimeFamilyLabel: "Codex",
-  endpointLabel: "Codex desktop",
+  endpointLabel: "Subscription",
   models: Object.freeze([model, secondModel]),
   executionModes: Object.freeze([
     Object.freeze({ key: "execution:single", label: "Single agent" }),
@@ -85,7 +85,7 @@ const secondEndpoint = Object.freeze({
   endpointId: "claude-code-desktop" as const,
   key: "endpoint:claude",
   runtimeFamilyLabel: "Claude",
-  endpointLabel: "Claude Code desktop",
+  endpointLabel: "Subscription",
 });
 
 test("picker geometry uses the accepted gap, gutters, maximum width, and current viewport", () => {
@@ -468,13 +468,13 @@ test("rendered pickers keep exact locked, loading, mixed-case, roving, and fixed
       /id="direct-profile-popover-heading"[^>]*>\s*Endpoint\s*<span class="n">2<\/span>/u,
     );
     assert.deepEqual(readyEndpointOptions.map(plainText), [
-      "Codex Codex desktop · Catalog ready",
-      "Claude Claude Code desktop · Catalog ready",
+      "Codex Subscription · Catalog ready",
+      "Claude Subscription · Catalog ready",
     ]);
     assert.deepEqual(
       [...endpointPicker.matchAll(/<span class="opt-sub">([\s\S]*?)<\/span>/gu)]
         .map((match) => plainText(match[1] ?? "")),
-      ["Codex desktop", "Claude Code desktop"],
+      ["Subscription", "Subscription"],
     );
     assert.deepEqual(
       [...endpointPicker.matchAll(
@@ -503,8 +503,8 @@ test("rendered pickers keep exact locked, loading, mixed-case, roving, and fixed
       selectedEndpointKey: secondEndpoint.key,
     });
     assert.deepEqual(profileOptions(mixedPicker).map(plainText), [
-      "Codex Codex desktop · Runtime not located",
-      "Claude Claude Code desktop · Catalog ready",
+      "Codex Subscription · Runtime not located",
+      "Claude Subscription · Catalog ready",
     ]);
     assert.match(
       mixedPicker,
@@ -606,7 +606,7 @@ test("the rendered Work Intensity chip preserves a selected index-zero label", a
       pending: false,
       endpointLocked: false,
       lockedEndpointRuntimeFamilyLabel: "Codex",
-      lockedEndpointLabel: "Codex desktop",
+      lockedEndpointLabel: "Subscription",
       openPopover: null,
       onOpen: noOp,
     });
@@ -626,7 +626,7 @@ test("the rendered Work Intensity chip preserves a selected index-zero label", a
       pending: false,
       endpointLocked: true,
       lockedEndpointRuntimeFamilyLabel: "Codex",
-      lockedEndpointLabel: "Codex desktop",
+      lockedEndpointLabel: "Subscription",
       openPopover: null,
       onOpen: noOp,
     });

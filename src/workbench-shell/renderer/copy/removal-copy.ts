@@ -26,7 +26,7 @@ const englishCopy = {
     sessionActivityUnknownFeedback:
       "Agent Session was not deleted because turn activity could not be verified. Try again — if its last turn outcome was never established, you will be asked to confirm removal.",
     subjectActivityUnknownSuffix:
-      " was not removed because turn activity could not be verified. Keep the Workbench open and try again when activity is known.",
+      " was not removed because turn activity could not be verified. Switch to another Project, then remove this Project from the Workbench; its recorded conversation history remains available when you reopen it.",
     blockedTurnSuffix: " because a turn is ",
     blockedTurnMiddle: "Let it finish, then try again.",
     sessionNotFoundFeedback:
@@ -48,7 +48,7 @@ const englishCopy = {
   removeProjectDescriptionCopy: (label: string): string =>
     `Remove ${label} from this Workbench? Its folder and files will stay on disk.`,
   subjectActivityUnknownCopy: (subject: string): string =>
-    `${subject} was not removed because turn activity could not be verified. Keep the Workbench open and try again when activity is known.`,
+    `${subject} was not removed because turn activity could not be verified. Switch to another Project, then remove this Project from the Workbench; its recorded conversation history remains available when you reopen it.`,
   blockedWhileTurnActiveCopy: (
     subject: string,
     pastVerb: string,
@@ -74,7 +74,7 @@ const simplifiedChineseCopy = {
     sessionActivityUnknownFeedback:
       "因无法验证回合活动，智能体会话未删除。请重试；如果上一个回合的结果从未确定，系统会要求你确认移除。",
     subjectActivityUnknownSuffix:
-      "未被移除，因为无法验证回合活动。请保持 Workbench 打开，并在活动状态明确后重试。",
+      "未被移除，因为无法验证回合活动。请先切换到另一个项目，再从 Workbench 中移除当前项目；重新打开时仍可使用已记录的对话历史。",
     blockedTurnSuffix: "，因为回合正在",
     blockedTurnMiddle: "请等待其完成后重试。",
     sessionNotFoundFeedback: "该智能体会话已不可用。项目视图已刷新。",
@@ -93,7 +93,7 @@ const simplifiedChineseCopy = {
   removeProjectDescriptionCopy: (label: string): string =>
     `从此 Workbench 中移除 ${label}？其文件夹和文件仍会保留在磁盘上。`,
   subjectActivityUnknownCopy: (subject: string): string =>
-    `${subject}未被移除，因为无法验证回合活动。请保持 Workbench 打开，并在活动状态明确后重试。`,
+    `${subject}未被移除，因为无法验证回合活动。请先切换到另一个项目，再从 Workbench 中移除当前项目；重新打开时仍可使用已记录的对话历史。`,
   blockedWhileTurnActiveCopy: (
     subject: string,
     pastVerb: string,

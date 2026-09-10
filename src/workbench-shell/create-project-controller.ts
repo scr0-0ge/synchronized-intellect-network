@@ -12,6 +12,7 @@ import {
   transitionWorkbenchCreateProject,
   validateWorkbenchCreateProjectState,
   type WorkbenchCreateProjectEffect,
+  type WorkbenchCreateProjectCreateResult,
   type WorkbenchCreateProjectRegistrationResult,
   type WorkbenchCreateProjectState,
 } from "./create-project-transition.ts";
@@ -30,9 +31,30 @@ export interface WorkbenchCreateProjectControllerOptions {
   readonly host: WorkbenchCreateProjectHost;
 }
 
+/** A selected Create target is only available for the result delivery that owns it. */
+export interface WorkbenchCreateProjectFailureDiagnostic {
+  readonly reason: Exclude<WorkbenchCreateProjectCreateResult, "created">;
+  readonly targetPath: string;
+}
+
+/**
+ * The diagnostic is deliberately non-enumerable: IPC can use it while the
+ * result is in memory, but the public contract, JSON logs and the sidecar
+ * state never receive a selected filesystem path.
+ */
+export type WorkbenchCreateProjectControllerResult =
+  WorkbenchCreateProjectResult & {
+    readonly diagnostic?: WorkbenchCreateProjectFailureDiagnostic;
+  };
+
 export interface WorkbenchCreateProjectController {
-  createProject(): Promise<WorkbenchCreateProjectResult>;
+  createProject(): Promise<WorkbenchCreateProjectControllerResult>;
   close(): Promise<void>;
+}
+
+interface WorkbenchCreateProjectEffectExecution {
+  readonly event: Record<string, unknown>;
+  readonly selectedTargetPath?: string;
 }
 
 export async function createWorkbenchCreateProjectController(
@@ -71,35 +93,38 @@ export async function createWorkbenchCreateProjectController(
 
   let closed = false;
   let operationPending = false;
+  const selectedTargets = new Map<number, string>();
   let closePromise: Promise<void> | undefined;
-  let settleTerminal!: (result: WorkbenchCreateProjectResult) => void;
-  const terminalResult = new Promise<WorkbenchCreateProjectResult>((resolve) => {
+  let settleTerminal!: (result: WorkbenchCreateProjectControllerResult) => void;
+  const terminalResult = new Promise<WorkbenchCreateProjectControllerResult>((resolve) => {
     settleTerminal = resolve;
   });
 
   const controller: WorkbenchCreateProjectController = Object.freeze({
-    async createProject(): Promise<WorkbenchCreateProjectResult> {
+    async createProject(): Promise<WorkbenchCreateProjectControllerResult> {
       if (closed || failedClosed || operationPending) {
-        return failedClosed
+        return controllerResult(failedClosed
           ? failedOutcome
-          : publicCreateProjectResult("unavailable");
+          : publicCreateProjectResult("unavailable"));
       }
       operationPending = true;
       const failClosed = (state: WorkbenchCreateProjectState) => {
         failedOutcome = terminalOutcome(state);
         failedClosed = true;
-        return failedOutcome;
+        return controllerResult(failedOutcome);
       };
       const work = runCreateProject(
         options,
         () => closed || failedClosed,
         failClosed,
         terminalResult,
+        selectedTargets,
       );
       try {
         return await Promise.race([work, terminalResult]);
       } finally {
         operationPending = false;
+        selectedTargets.clear();
       }
     },
     close(): Promise<void> {
@@ -136,7 +161,7 @@ export async function createWorkbenchCreateProjectController(
             closeBase = latest;
           }
         }
-        settleTerminal(result);
+        settleTerminal(controllerResult(result));
         await options.stateStore.close().catch(() => undefined);
       })();
       return closePromise;
@@ -150,16 +175,20 @@ async function runCreateProject(
   isTerminal: () => boolean,
   failClosed: (
     state: WorkbenchCreateProjectState,
-  ) => WorkbenchCreateProjectResult,
-  terminalResult: Promise<WorkbenchCreateProjectResult>,
-): Promise<WorkbenchCreateProjectResult> {
+  ) => WorkbenchCreateProjectControllerResult,
+  terminalResult: Promise<WorkbenchCreateProjectControllerResult>,
+  selectedTargets: Map<number, string>,
+): Promise<WorkbenchCreateProjectControllerResult> {
+  let diagnostic: WorkbenchCreateProjectFailureDiagnostic | undefined;
   let state = options.stateStore.state;
   if (state.active === null) {
     const accepted = transitionWorkbenchCreateProject(state, {
       kind: "renderer-create-intent",
     });
     if (!accepted.applied || !(await safeWrite(options.stateStore, accepted.state))) {
-      return accepted.publicResults[0] ?? publicCreateProjectResult("unavailable");
+      return controllerResult(
+        accepted.publicResults[0] ?? publicCreateProjectResult("unavailable"),
+      );
     }
     state = accepted.state;
   }
@@ -167,25 +196,32 @@ async function runCreateProject(
   while (!isTerminal()) {
     state = options.stateStore.state;
     const active = state.active;
-    if (active === null) return publicCreateProjectResult("unavailable");
+    if (active === null) return controllerResult(publicCreateProjectResult("unavailable"));
     if (active.phase === "response-ready") {
       const delivered = transitionWorkbenchCreateProject(state, {
         kind: "deliver-result",
         operationNumber: active.operationNumber,
       });
       if (!delivered.applied) {
-        return delivered.publicResults[0] ?? publicCreateProjectResult("unavailable");
+        return controllerResult(
+          delivered.publicResults[0] ?? publicCreateProjectResult("unavailable"),
+        );
       }
       if (!(await safeWrite(options.stateStore, delivered.state))) {
         return active.createCommitted
           ? failClosed(state)
-          : terminalOutcome(state);
+          : controllerResult(terminalOutcome(state));
       }
-      return delivered.publicResults[0] ?? publicCreateProjectResult("unavailable");
+      const result = delivered.publicResults[0] ??
+        publicCreateProjectResult("unavailable");
+      return controllerResult(
+        result,
+        result.outcome === "unavailable" ? diagnostic : undefined,
+      );
     }
 
     const effectKind = readyEffect(active.phase);
-    if (effectKind === null) return publicCreateProjectResult("unavailable");
+    if (effectKind === null) return controllerResult(publicCreateProjectResult("unavailable"));
     const claimed = transitionWorkbenchCreateProject(state, {
       kind: "claim-effect",
       operationNumber: active.operationNumber,
@@ -194,31 +230,41 @@ async function runCreateProject(
     if (!claimed.applied || claimed.effects.length !== 1) {
       return active.createCommitted
         ? failClosed(state)
-        : publicCreateProjectResult("unavailable");
+          : controllerResult(publicCreateProjectResult("unavailable"));
     }
     if (!(await safeWrite(options.stateStore, claimed.state))) {
       return active.createCommitted
         ? failClosed(state)
-        : publicCreateProjectResult("unavailable");
+          : controllerResult(publicCreateProjectResult("unavailable"));
     }
-    if (isTerminal()) return terminalOutcome(claimed.state);
+    if (isTerminal()) return controllerResult(terminalOutcome(claimed.state));
 
     const effect = claimed.effects[0]!;
-    const event = await executeEffect(options, effect);
-    if (isTerminal()) return terminalOutcome(claimed.state);
+    const selectedTargetPath = selectedTargets.get(effect.operationNumber);
+    const execution = await executeEffect(options, effect, selectedTargetPath);
+    if (execution.selectedTargetPath !== undefined) {
+      selectedTargets.set(effect.operationNumber, execution.selectedTargetPath);
+    }
+    if (isTerminal()) return controllerResult(terminalOutcome(claimed.state));
     const recorded = transitionWorkbenchCreateProject(
       options.stateStore.state,
-      event,
+      execution.event,
     );
     if (!recorded.applied) {
       return effect.kind === "choose-save-target"
-        ? publicCreateProjectResult("unavailable")
+        ? controllerResult(publicCreateProjectResult("unavailable"))
         : failClosed(claimed.state);
     }
     if (!(await safeWrite(options.stateStore, recorded.state))) {
       return effect.kind === "choose-save-target"
-        ? publicCreateProjectResult("unavailable")
+        ? controllerResult(publicCreateProjectResult("unavailable"))
         : failClosed(claimed.state);
+    }
+    if (effect.kind === "create-if-absent") {
+      diagnostic = createFailureDiagnostic(
+        selectedTargetPath ?? "",
+        recorded.state.active?.createResult,
+      );
     }
   }
   return terminalResult;
@@ -227,39 +273,41 @@ async function runCreateProject(
 async function executeEffect(
   options: WorkbenchCreateProjectControllerOptions,
   effect: WorkbenchCreateProjectEffect,
-): Promise<Record<string, unknown>> {
+  selectedTargetPath: string | undefined,
+): Promise<WorkbenchCreateProjectEffectExecution> {
   if (effect.kind === "choose-save-target") {
     let nativeValue: unknown;
     try {
       nativeValue = await options.chooser.chooseProjectTarget();
     } catch {
-      return {
-        kind: "chooser-result",
-        operationNumber: effect.operationNumber,
-        result: "failed",
-        targetPath: null,
-        targetToken: null,
-      };
+      return { event: chooserResult(effect.operationNumber, "failed", null) };
     }
     return decodeChooserResult(effect.operationNumber, nativeValue);
   }
   if (effect.kind === "create-if-absent") {
     let result: string;
     try {
-      result = await options.filesystem.createIfAbsent(effect.targetPath);
+      result = selectedTargetPath === undefined
+        ? "create-failed-known-no-commit"
+        : await options.filesystem.createIfAbsent(selectedTargetPath);
     } catch {
       result = "unknown";
     }
-    return {
-      kind: "create-result",
-      operationNumber: effect.operationNumber,
-      result,
-    };
+    return { event: { kind: "create-result", operationNumber: effect.operationNumber, result } };
   }
 
   let result: WorkbenchCreateProjectRegistrationResult = "unknown";
   try {
-    const hostResult = await options.host.registerTrustedProject(effect.targetPath);
+    if (selectedTargetPath === undefined) {
+      return {
+        event: {
+          kind: "registration-result",
+          operationNumber: effect.operationNumber,
+          result,
+        },
+      };
+    }
+    const hostResult = await options.host.registerTrustedProject(selectedTargetPath);
     if (isCommittedHostResult(hostResult)) {
       result = "committed";
     } else {
@@ -269,29 +317,25 @@ async function executeEffect(
     result = "unknown";
   }
   return {
-    kind: "registration-result",
-    operationNumber: effect.operationNumber,
-    result,
+    event: {
+      kind: "registration-result",
+      operationNumber: effect.operationNumber,
+      result,
+    },
   };
 }
 
 function decodeChooserResult(
   operationNumber: number,
   value: unknown,
-): Record<string, unknown> {
+): WorkbenchCreateProjectEffectExecution {
   try {
     if (!hasExactDataProperties(value, ["canceled", "filePath"])) {
       throw new Error("malformed-native-result");
     }
     const result = value as { readonly canceled: unknown; readonly filePath: unknown };
     if (result.canceled === true && result.filePath === "") {
-      return {
-        kind: "chooser-result",
-        operationNumber,
-        result: "cancelled",
-        targetPath: null,
-        targetToken: null,
-      };
+      return { event: chooserResult(operationNumber, "cancelled", null) };
     }
     if (
       result.canceled === false &&
@@ -299,22 +343,30 @@ function decodeChooserResult(
     ) {
       const targetPath = normalize(result.filePath);
       return {
-        kind: "chooser-result",
-        operationNumber,
-        result: "selected",
-        targetPath,
-        targetToken: createWorkbenchCreateProjectTargetToken(targetPath),
+        event: chooserResult(
+          operationNumber,
+          "selected",
+          createWorkbenchCreateProjectTargetToken(targetPath),
+        ),
+        selectedTargetPath: targetPath,
       };
     }
   } catch {
     // Malformed, accessor-like, and proxy values are normalized below.
   }
+  return { event: chooserResult(operationNumber, "malformed", null) };
+}
+
+function chooserResult(
+  operationNumber: number,
+  result: "selected" | "cancelled" | "failed" | "malformed",
+  targetToken: string | null,
+): Record<string, unknown> {
   return {
     kind: "chooser-result",
     operationNumber,
-    result: "malformed",
-    targetPath: null,
-    targetToken: null,
+    result,
+    targetToken,
   };
 }
 
@@ -382,6 +434,36 @@ function terminalOutcome(
       ? "created-recovery-required"
       : "unavailable",
   );
+}
+
+function controllerResult(
+  result: WorkbenchCreateProjectResult,
+  diagnostic?: WorkbenchCreateProjectFailureDiagnostic,
+): WorkbenchCreateProjectControllerResult {
+  if (diagnostic === undefined) return result;
+  const privateResult = { outcome: result.outcome };
+  Object.defineProperty(privateResult, "diagnostic", {
+    value: diagnostic,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+  return Object.freeze(privateResult);
+}
+
+function createFailureDiagnostic(
+  targetPath: string,
+  result: WorkbenchCreateProjectCreateResult | null | undefined,
+): WorkbenchCreateProjectFailureDiagnostic | undefined {
+  if (
+    targetPath === "" ||
+    result === undefined ||
+    result === null ||
+    result === "created"
+  ) {
+    return undefined;
+  }
+  return Object.freeze({ reason: result, targetPath });
 }
 
 async function safeWrite(

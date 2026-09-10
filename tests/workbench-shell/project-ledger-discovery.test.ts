@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test, { type TestContext } from "node:test";
 
+import { hostedProjectView } from "./w26-hosted-project-view.ts";
+
 import type {
   NormalizedRuntimeEvent,
   ResumableAgentRuntimeAdapter,
@@ -177,7 +179,7 @@ function selectionKeyFor(
   label: string,
 ): string {
   if (!result.ok) assert.fail("Expected a live Project view.");
-  const project = result.view.projectSelection.projects.find(
+  const project = hostedProjectView(result).projectSelection.projects.find(
     (candidate) => candidate.label === label,
   );
   if (project === undefined) assert.fail(`Expected the ${label} Project.`);
@@ -262,7 +264,7 @@ async function strandOneHistory(t: TestContext, options: {
   const observation = observeHost(host);
   registerTestCleanup(t, observation.dispose);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   await submitOneSession(host);
   // The turn must reach a terminal status before the Project is switched away,
@@ -270,8 +272,7 @@ async function strandOneHistory(t: TestContext, options: {
   // completed conversation the owner is trying to get back.
   await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands.length === 1 &&
+      result.ok && "view" in result && result.view.commands.length === 1 &&
       result.view.commands[0]?.status === "completed",
   );
   const strandedSlot = (await readRegistry(options.dataDirectory)).records[0]!
@@ -279,7 +280,7 @@ async function strandOneHistory(t: TestContext, options: {
 
   assert.equal((await host.registerTrustedProject(options.otherDirectory)).ok, true);
   const both = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 2,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 2,
   );
   assert.deepEqual(
     await host.removeProject({
@@ -288,7 +289,7 @@ async function strandOneHistory(t: TestContext, options: {
     { status: "removed" },
   );
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
 
   const fixtureDataDirectory = join(
@@ -327,8 +328,7 @@ async function strandOneHistory(t: TestContext, options: {
   );
   await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.commands.length === 0 &&
       result.view.projectSelection.projects.some(
         (project) =>
@@ -357,20 +357,19 @@ test("removing and re-adding one Project adopts its only ledger without minting"
   const observation = observeHost(host);
   registerTestCleanup(t, observation.dispose);
   const initial = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   await submitOneSession(host);
   await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands.length === 1 &&
+      result.ok && "view" in result && result.view.commands.length === 1 &&
       result.view.commands[0]?.status === "completed",
   );
   const originalSlot = (await readRegistry(dataDirectory)).records[0]!.ledgerSlot;
 
   assert.equal((await host.registerTrustedProject(otherDirectory)).ok, true);
   const both = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 2,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 2,
   );
   assert.deepEqual(
     await host.removeProject({
@@ -379,7 +378,7 @@ test("removing and re-adding one Project adopts its only ledger without minting"
     { status: "removed" },
   );
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
 
   const filesBeforeReadd = await ledgerFiles(dataDirectory);
@@ -399,7 +398,7 @@ test("removing and re-adding one Project adopts its only ledger without minting"
     message: "Project was opened with its existing conversation history.",
   });
   const restored = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 2,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 2,
   );
   if (!restored.ok) assert.fail("Expected the returning Project.");
   const registered = (await readRegistry(dataDirectory)).records.find(
@@ -407,8 +406,8 @@ test("removing and re-adding one Project adopts its only ledger without minting"
   )!;
 
   assert.equal(registered.ledgerSlot, originalSlot);
-  assert.equal(restored.view.commands.length, 1);
-  assert.equal(restored.view.commands[0]?.status, "completed");
+  assert.equal(hostedProjectView(restored).commands.length, 1);
+  assert.equal(hostedProjectView(restored).commands[0]?.status, "completed");
   assert.deepEqual(await ledgerFiles(dataDirectory), filesBeforeReadd);
   assert.deepEqual(
     await fingerprintLedgers(dataDirectory),
@@ -435,7 +434,7 @@ test("a Project with no matching ledger mints one new slot and opens normally", 
   const observation = observeHost(host);
   registerTestCleanup(t, observation.dispose);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
 
   const filesBefore = await ledgerFiles(dataDirectory);
@@ -453,12 +452,11 @@ test("a Project with no matching ledger mints one new slot and opens normally", 
   });
   const opened = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[1]?.selected === true,
   );
   if (!opened.ok) assert.fail("Expected the new Project.");
-  assert.equal(opened.view.commands.length, 0);
+  assert.equal(hostedProjectView(opened).commands.length, 0);
   assert.equal((await ledgerFiles(dataDirectory)).length, filesBefore.length + 1);
   const record = (await readRegistry(dataDirectory)).records.find(
     (candidate) => candidate.canonicalDirectory === newDirectory,
@@ -468,8 +466,7 @@ test("a Project with no matching ledger mints one new slot and opens normally", 
   await submitOneSession(host);
   await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands.length === 1 &&
+      result.ok && "view" in result && result.view.commands.length === 1 &&
       result.view.commands[0]?.status === "completed",
   );
 });
@@ -490,7 +487,7 @@ test("two matching ledgers require the existing history choice without minting",
   const observation = observeHost(host);
   registerTestCleanup(t, observation.dispose);
   const withReturningProject = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 2,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 2,
   );
   assert.deepEqual(
     await host.removeProject({
@@ -502,7 +499,7 @@ test("two matching ledgers require the existing history choice without minting",
     { status: "removed" },
   );
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
 
   const candidates = discoverProjectLedgers({
@@ -550,8 +547,7 @@ test("two matching ledgers require the existing history choice without minting",
   );
   const restored = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.commands.length === 1,
   );
   assert.equal(restored.ok, true);
@@ -769,7 +765,7 @@ test("adopting a discovered history is a registry re-point that is fully reversi
     status: "adopted",
   });
   const restored = await observation.waitFor(
-    (result) => result.ok && result.view.commands.length === 1,
+    (result) => result.ok && "view" in result && result.view.commands.length === 1,
   );
   assert.equal(restored.ok, true);
 
@@ -810,7 +806,7 @@ test("adopting a discovered history is a registry re-point that is fully reversi
     { status: "adopted" },
   );
   await observation.waitFor(
-    (result) => result.ok && result.view.commands.length === 0,
+    (result) => result.ok && "view" in result && result.view.commands.length === 0,
   );
   assert.equal(
     (await readRegistry(dataDirectory)).records.find(
@@ -867,7 +863,7 @@ test("hiding an empty history persists without changing a ledger and refuses rec
     { status: "adopted" },
   );
   await observation.waitFor(
-    (result) => result.ok && result.view.commands.length === 1,
+    (result) => result.ok && "view" in result && result.view.commands.length === 1,
   );
   const secondDiscovery = await host.discoverProjectHistories({
     selectionKey: selectionKeyFor(observation.latest()!, "Hiding Project"),
@@ -1036,8 +1032,7 @@ test("a live turn blocks adoption, and the same choice succeeds once it finishes
   await submitOneSession(host);
   await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands.length === 1 &&
+      result.ok && "view" in result && result.view.commands.length === 1 &&
       (result.view.commands[0]?.status === "accepted" ||
         result.view.commands[0]?.status === "in-flight"),
   );
@@ -1064,7 +1059,7 @@ test("a live turn blocks adoption, and the same choice succeeds once it finishes
   adapter.releaseTurn();
   await observation.waitFor(
     (result) =>
-      result.ok && result.view.commands[0]?.status === "completed",
+      result.ok && "view" in result && result.view.commands[0]?.status === "completed",
   );
   assert.deepEqual(
     await host.adoptProjectHistory({ historyKey: target.historyKey }),

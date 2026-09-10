@@ -429,7 +429,7 @@ test("Codex status uses account/read refreshToken false and projects only recogn
         method: "initialize",
         params: {
           clientInfo: {
-            name: "unified-agent-workbench",
+            name: "synchronized-intellect-network",
             title: "Synchronized Intellect Network",
             version: "0.1.0",
           },

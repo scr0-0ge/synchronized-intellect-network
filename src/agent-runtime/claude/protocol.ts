@@ -8,7 +8,7 @@ import {
   type ClaudeSettingsObservationCollector,
 } from "./settings.ts";
 import type { ClaudeCatalogTransport } from "./transport.ts";
-import { ClaudeDiagnosticError } from "./diagnostics.ts";
+import { ClaudeDiagnosticError, productionClaudeDiagnosticObserver } from "./diagnostics.ts";
 
 const maximumProtocolLineLength = 1_048_576;
 const maximumInitializationFrames = 64;
@@ -42,10 +42,39 @@ export async function initializeClaudeCatalog(
   await sendControlRequest(transport, settingsRequestId, {
     subtype: "get_settings",
   });
-  const appliedSettings = readClaudeAppliedSettings(
-    await receiveControlResponse(transport, settingsRequestId, "get_settings"),
-    settingsObservation,
-  );
+  // Catalog discovery uses applied settings only to advertise a confirmed
+  // optional variant. Session start/resume still require their own strict
+  // settings confirmation before any input is sent.
+  let settings: unknown;
+  let settingsFailure: "protocol-invalid" | "runtime-unavailable" = "runtime-unavailable";
+  try {
+    settings = await receiveControlResponse(transport, settingsRequestId, "get_settings");
+  } catch (error) {
+    // Only a correlated rejection/unusable payload for this optional request
+    // degrades. Broken framing, turn-bearing frames and transport faults do not.
+    if (!(error instanceof ClaudeDiagnosticError) || error.category !== "runtime-unavailable") {
+      throw error;
+    }
+  }
+  let appliedSettings: ClaudeAppliedSettings | undefined;
+  if (settings !== undefined) {
+    try {
+      appliedSettings = readClaudeAppliedSettings(settings, settingsObservation);
+    } catch (error) {
+      if (!(error instanceof RuntimeAdapterError) || error.category !== "protocol-invalid") {
+        throw error;
+      }
+      settingsFailure = "protocol-invalid";
+    }
+  }
+  if (appliedSettings === undefined) {
+    productionClaudeDiagnosticObserver({
+      kind: "optional-data-unavailable",
+      category: settingsFailure,
+      gate: "catalog-settings",
+      row: null,
+    });
+  }
   return Object.freeze({
     catalog,
     ...(appliedSettings === undefined ? {} : { appliedSettings }),

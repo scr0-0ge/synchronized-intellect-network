@@ -285,7 +285,82 @@ test("raw third detail is exact for every runtime event and only streams agent t
   });
 });
 
-test("windowed timeline groups keep stable filtered-list identity across appends", async () => {
+test("collapsed event logs stay empty until disclosure or data-backed search reveals them", async () => {
+  await withActiveDisclosureModule(async ({
+    TimelineTurn,
+    createTimelineDisclosureStore,
+  }) => {
+    const events = Object.freeze([
+      Object.freeze({
+        kind: "turn-completed" as const,
+        status: "completed" as const,
+      }),
+    ] satisfies readonly WorkbenchTimelineEvent[]);
+    const collapsedHtml = renderToString(() =>
+      TimelineTurn({
+        command: commandWith({ status: "completed", timeline: events }),
+        turnKey: "command-7:turn:1:group:1",
+        events,
+        status: "completed",
+        active: false,
+        disclosureStore: createTimelineDisclosureStore(),
+      }),
+    );
+    const collapsedLog = collapsedHtml.match(
+      /<ol[^>]*class="event-log"[^>]*>[\s\S]*?<\/ol>/u,
+    )?.[0];
+    assert.ok(collapsedLog, "the disclosure keeps its controlled list in the DOM");
+    assert.match(collapsedLog, /\shidden(?:="")?/u);
+    assert.doesNotMatch(
+      collapsedLog,
+      /<li(?:\s|>)/u,
+      "a collapsed list must not eagerly mount event rows",
+    );
+
+    const searchedHtml = renderToString(() =>
+      TimelineTurn({
+        command: commandWith({ status: "completed", timeline: events }),
+        turnKey: "command-7:turn:1:group:1",
+        events,
+        status: "completed",
+        active: false,
+        searchQuery: "turn-completed",
+        disclosureStore: createTimelineDisclosureStore(),
+      }),
+    );
+    assert.match(
+      searchedHtml,
+      /<button[^>]*class="disclosure"[^>]*aria-expanded="true"/u,
+    );
+    assert.match(
+      searchedHtml,
+      /<mark[^>]*data-transcript-search-match[^>]*>turn-completed<\/mark>/u,
+      "search reads event data and mounts the matching row without depending on hidden DOM",
+    );
+
+    const failedEvents = Object.freeze([
+      Object.freeze({ kind: "failed" as const }),
+    ] satisfies readonly WorkbenchTimelineEvent[]);
+    const searchedFailureHtml = renderToString(() =>
+      TimelineTurn({
+        command: commandWith({ status: "failed", timeline: failedEvents }),
+        turnKey: "command-7:turn:2:group:1",
+        events: failedEvents,
+        status: "failed",
+        active: false,
+        searchQuery: "failed",
+        disclosureStore: createTimelineDisclosureStore(),
+      }),
+    );
+    assert.match(
+      searchedFailureHtml,
+      /<span class="ev-kind"><mark[^>]*data-transcript-search-match[^>]*>failed<\/mark><\/span><span><\/span>/u,
+      "revealing a failed event preserves its exact blank raw detail",
+    );
+  });
+});
+
+test("windowed timeline groups reconcile by stable business identity instead of window position", async () => {
   const source = await readFile(
     new URL("../../src/workbench-shell/renderer/transcript.tsx", import.meta.url),
     "utf8",
@@ -295,19 +370,27 @@ test("windowed timeline groups keep stable filtered-list identity across appends
     source.indexOf("const TimelineTurn: Component"),
   );
 
-  assert.match(timelineSource, /<Index each=\{props\.groups\}>/u);
-  assert.doesNotMatch(timelineSource, /<For each=\{props\.groups\}>/u);
+  assert.doesNotMatch(timelineSource, /<Index each=\{props\.groups\}>/u);
+  assert.match(timelineSource, /<For each=\{groupKeys\(\)\}>/u);
   assert.match(
     timelineSource,
-    /const groupIndex = \(\) => startIndex\(\) \+ index;/u,
+    /const groupIndex = \(\) => startIndex\(\) \+ index\(\);/u,
   );
   assert.match(
+    timelineSource,
+    /guidanceTurnOrdinalCopy\(group\(\)\.turnOrdinal\)/u,
+  );
+  assert.match(
+    timelineSource,
+    /turnOrdinalCopy\(group\(\)\.turnOrdinal\)/u,
+  );
+  assert.doesNotMatch(
     timelineSource,
     /turnOrdinalCopy\(groupIndex\(\) \+ 1\)/u,
   );
   assert.match(
     timelineSource,
-    /turnKey=\{`\$\{props\.command\.key\}:\$\{groupIndex\(\)\}`\}/u,
+    /turnKey=\{`\$\{props\.command\.key\}:\$\{groupKey\}`\}/u,
   );
 });
 
@@ -333,6 +416,13 @@ test("terminal, recovery, and implicit earlier groups default closed while the l
         groups: groupTimelineEvents(timeline),
         disclosureStore: createTimelineDisclosureStore(),
       }),
+    );
+    assert.deepEqual(
+      [...groupedHtml.matchAll(/data-transcript-group-key="([^"]+)"/gu)].map(
+        (match) => match[1],
+      ),
+      ["turn:1:group:1", "turn:2:group:1"],
+      "rendered groups expose the same source identity regardless of window position",
     );
     const disclosures = [...groupedHtml.matchAll(
       /<button[^>]*class="disclosure"[^>]*>[\s\S]*?<\/button>/gu,
@@ -374,7 +464,7 @@ test("terminal, recovery, and implicit earlier groups default closed while the l
       "1 event ▾",
     );
     assert.match(completedHtml, /<ol[^>]*class="event-log"[^>]*hidden/u);
-    assert.match(
+    assert.doesNotMatch(
       completedHtml,
       /<span class="ev-kind">turn-completed<\/span><span>completed<\/span>/u,
     );

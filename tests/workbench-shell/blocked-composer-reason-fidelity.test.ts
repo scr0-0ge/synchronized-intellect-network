@@ -32,6 +32,7 @@ import { createViteSsrTestServer } from "../helpers/vite-server.ts";
 import { copyLocaleDictionaries } from "../../src/workbench-shell/renderer/copy/composer-copy.ts";
 import type { WorkbenchHostedProjectView } from "../../src/workbench-shell/contract.ts";
 import {
+  hasHostedProjectView,
   initialRendererState,
   replaceProjectResult,
   replacementSessionRefusal,
@@ -75,13 +76,13 @@ const TERM_HOLDS: Readonly<
     (state: WorkbenchRendererState) => boolean
   >
 > = Object.freeze({
-  "project-view-failed": (state) => state.result?.ok !== true,
+  "project-view-failed": (state) => !hasHostedProjectView(state.result),
   "project-switch-pending": (state) => state.projectSwitch.phase === "pending",
   "project-open-pending": (state) => state.projectOpen.phase === "pending",
   "project-open-recovery-required": (state) =>
     state.projectOpen.phase === "recovery-required",
   "project-has-no-commands": (state) =>
-    state.result?.ok === true && state.result.view.commands.length === 0,
+    hasHostedProjectView(state.result) && state.result.view.commands.length === 0,
   "new-session-already-starting": (state) =>
     state.newSession.phase !== "inactive",
   "message-awaiting-acceptance": (state) => state.composer.phase === "pending",
@@ -90,7 +91,7 @@ const TERM_HOLDS: Readonly<
     state.profile.defaultPreference.phase === "pending",
   "no-selection": (state) => state.selectedKey === null,
   "selection-not-in-project": (state) =>
-    state.result?.ok === true &&
+    hasHostedProjectView(state.result) &&
     state.selectedKey !== null &&
     !state.result.view.commands.some(
       (command) => command.key === state.selectedKey,
@@ -253,6 +254,13 @@ test(
             expected[reason],
             `${locale}: the panel shows the wrong sentence for ${reason}`,
           );
+          if (reason === "no-selection") {
+            assert.match(
+              html,
+              new RegExp(dictionaries[locale].composerFeedbackCopy.footRequiresSelection, "u"),
+              `${locale}: the no-selection footer must remain visible when there really is no selection`,
+            );
+          }
         }
         const open = renderToString(() =>
           blockedComposer({
@@ -266,6 +274,19 @@ test(
           reasonText(open),
           null,
           `${locale}: the panel explains a refusal while the exit is open`,
+        );
+        assert.doesNotMatch(
+          open,
+          new RegExp(dictionaries[locale].composerFeedbackCopy.footRequiresSelection, "u"),
+          `${locale}: an enabled New Agent Session exit must not claim a selection is missing`,
+        );
+        const freshProfileCopy = dictionaries[locale].composerFeedbackCopy
+          .footStartsFreshProfile;
+        assert.ok(freshProfileCopy.length > 0);
+        assert.match(
+          open,
+          new RegExp(freshProfileCopy, "u"),
+          `${locale}: an enabled exit must say that the new Session gets a fresh profile selection`,
         );
       }
       setLocale("en");
@@ -488,7 +509,7 @@ function withPhases(
 function stageProps(
   state: WorkbenchRendererState,
 ): Readonly<Record<string, unknown>> {
-  const view: WorkbenchHostedProjectView = state.result?.ok
+  const view: WorkbenchHostedProjectView = hasHostedProjectView(state.result)
     ? state.result.view
     : visualFixture;
   return {

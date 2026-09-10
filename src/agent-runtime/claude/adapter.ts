@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type {
-  InterruptibleRuntimeBinding,
+  ControllableRuntimeBinding,
   ResumableAgentRuntimeAdapter,
   RuntimeCatalog,
   RuntimeModel,
@@ -10,10 +10,19 @@ import type {
   SessionProfile,
 } from "../index.ts";
 import { RuntimeAdapterError } from "../index.ts";
+import { hasUnpairedSurrogate } from "../vendor-wire.ts";
 import {
   createOfficialClaudeCatalogTransport,
   createOfficialClaudeSessionTransport,
+  productionClaudeCatalogProcessDependencies,
+  resolveClaudeProcessEnvironment,
+  type ClaudeCatalogProcessDependencies,
 } from "./process-transport.ts";
+import type {
+  ClaudeApiKeyStaticHealthyAuthMethod,
+  ClaudeEndpointAuthenticationMode,
+} from "./endpoint-authentication.ts";
+import { GLM_ENDPOINT_ENV_CONTRACT, type ClaudeEndpointEnvironmentSource } from "./endpoint-env-factory.ts";
 import { initializeClaudeCatalog } from "./protocol.ts";
 import {
   ClaudeRuntimeBinding,
@@ -23,6 +32,7 @@ import type {
   ClaudeCatalogTransportFactory,
   ClaudePermissionMode,
   ClaudeSessionTransportFactory,
+  ClaudeSessionTransportRequest,
   ClaudeToolPermissionHandler,
 } from "./transport.ts";
 import type { ProviderRequestBudget } from "../provider-request-budget.ts";
@@ -242,15 +252,52 @@ export interface ClaudePermissionHandlingOptions {
   readonly requestToolPermission?: ClaudeToolPermissionHandler;
 }
 
+/**
+ * Per-endpoint context that lets one ClaudeAdapter class serve several
+ * Runtime Endpoints (spec domain model: adapter : endpoint = 1 : N):
+ *
+ * - `environment`: every spawn (auth-status preflight included) builds its
+ *   process environment through the generic endpoint factory.
+ * - `authenticationMode`: authentication-gate semantics for this endpoint.
+ * - `staticCatalog`: when set, `inspect` serves this catalog without probing
+ *   the CLI, and session selection is validated against this catalog — the
+ *   CLI-reported catalog (which carries the CLI's built-in claude names) is
+ *   never trusted for model identity on such an endpoint.
+ * - `resolveStaticCatalogAugmentation`: persisted freshness enrollment that
+ *   joins that same catalog for both inspection and session validation.
+ */
+export interface ClaudeEndpointContext {
+  /** Per-endpoint spawn-environment descriptor (or profile-aware resolver). */
+  readonly environmentSource: ClaudeEndpointEnvironmentSource;
+  /**
+   * Source environment the factory reads endpoint tokens/URLs from. Defaults
+   * to the production process environment; composition roots pass an
+   * explicit object so tests (and embedding hosts) stay hermetic.
+   */
+  readonly sourceEnvironment?: NodeJS.ProcessEnv;
+  readonly authenticationMode: ClaudeEndpointAuthenticationMode;
+  /**
+   * api-key-static endpoints: the `authMethod` the healthy auth-status shape
+   * carries. `oauth_token` (default) for the env bearer-token endpoints,
+   * `api_key` for the claude-api endpoint (real Anthropic backend).
+   */
+  readonly apiKeyStaticHealthyAuthMethod?: ClaudeApiKeyStaticHealthyAuthMethod;
+  readonly staticCatalog?: RuntimeCatalog;
+  readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
+}
+
 export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
   readonly #createTransport: ClaudeCatalogTransportFactory;
-  readonly #createSessionTransport: ClaudeSessionTransportFactory;
+  readonly #createSessionTransport: ClaudeSessionTransportFactory | undefined;
   readonly #providerRequestBudget: ProviderRequestBudget | undefined;
   readonly #readPermissionMode: () => Promise<ClaudePermissionMode>;
   readonly #requestToolPermission: ClaudeToolPermissionHandler | undefined;
   readonly #onCatalogObservation: ClaudeCatalogObserver | undefined;
+  readonly #observeSubscriptionUsage: import("../index.ts").RuntimeSubscriptionUsageObserver | undefined;
   readonly #sessions = new Map<string, ClaudeSessionCapability>();
   readonly #sessionCapabilityStore: ClaudeSessionCapabilityStore | undefined;
+  readonly #endpointContext: ClaudeEndpointContext | undefined;
+  readonly #endpointDependencies: ClaudeCatalogProcessDependencies | undefined;
 
   constructor(
     createTransport?: ClaudeCatalogTransportFactory,
@@ -259,8 +306,11 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
     permissionHandling?: ClaudePermissionHandlingOptions,
     onCatalogObservation?: ClaudeCatalogObserver,
     sessionCapabilityStore?: ClaudeSessionCapabilityStore,
+    endpointContext?: ClaudeEndpointContext,
+    observeSubscriptionUsage?: import("../index.ts").RuntimeSubscriptionUsageObserver,
   ) {
     this.#sessionCapabilityStore = sessionCapabilityStore;
+    this.#observeSubscriptionUsage = observeSubscriptionUsage;
     if (sessionCapabilityStore !== undefined) {
       try {
         for (const [reference, persisted] of sessionCapabilityStore.load()) {
@@ -276,22 +326,33 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
         // (resume works within this run only); it never takes the adapter down.
       }
     }
+    this.#endpointContext = endpointContext;
+    this.#endpointDependencies =
+      endpointContext === undefined
+        ? undefined
+        : Object.freeze({
+            ...productionClaudeCatalogProcessDependencies,
+            ...(endpointContext.sourceEnvironment === undefined
+              ? {}
+              : { environment: endpointContext.sourceEnvironment }),
+            endpointEnvironment: endpointContext.environmentSource,
+            authenticationMode: endpointContext.authenticationMode,
+            ...(endpointContext.apiKeyStaticHealthyAuthMethod === undefined
+              ? {}
+              : {
+                  apiKeyStaticHealthyAuthMethod:
+                    endpointContext.apiKeyStaticHealthyAuthMethod,
+                }),
+          });
     this.#createTransport =
       createTransport ??
       ((projectDirectory) =>
         createOfficialClaudeCatalogTransport(
           projectDirectory,
-          undefined,
+          this.#endpointDependencies,
           providerRequestBudget,
         ));
-    this.#createSessionTransport =
-      createSessionTransport ??
-      ((request) =>
-        createOfficialClaudeSessionTransport(
-          request,
-          undefined,
-          providerRequestBudget,
-        ));
+    this.#createSessionTransport = createSessionTransport;
     this.#providerRequestBudget = providerRequestBudget;
     this.#readPermissionMode =
       permissionHandling?.readPermissionMode ??
@@ -305,6 +366,13 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
       (createTransport === undefined
         ? productionClaudeCatalogObserver
         : undefined);
+  }
+
+  usesStaticCatalogAugmentation(): boolean {
+    return (
+      this.#endpointContext?.staticCatalog !== undefined &&
+      this.#endpointContext.resolveStaticCatalogAugmentation !== undefined
+    );
   }
 
   #emitCatalogObservation(
@@ -322,6 +390,22 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
   async inspect(projectDirectory: string): Promise<RuntimeCatalog> {
     if (!isSafeText(projectDirectory, 32_768)) {
       throw new RuntimeAdapterError("invalid-input");
+    }
+    const staticCatalog = resolveStaticCatalog(this.#endpointContext);
+    const endpointDependencies = this.#endpointDependencies;
+    if (staticCatalog !== undefined && endpointDependencies !== undefined) {
+      // Static-catalog endpoints never probe the CLI for models. The endpoint
+      // environment is validated first (a missing token is an authentication
+      // state, reported without spawning anything), then the executable must
+      // be locatable for sessions to be possible at all.
+      resolveClaudeProcessEnvironment(endpointDependencies);
+      try {
+        await endpointDependencies.discoverExecutable();
+      } catch (error) {
+        if (error instanceof RuntimeAdapterError) throw error;
+        throw new RuntimeAdapterError("runtime-not-located");
+      }
+      return staticCatalog;
     }
     let transport;
     try {
@@ -363,16 +447,17 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
     return catalog!;
   }
 
-  async start(request: RuntimeStart): Promise<InterruptibleRuntimeBinding> {
+  async start(request: RuntimeStart): Promise<ControllableRuntimeBinding> {
     validateStartRequest(request);
     const permissionMode = await this.#capturePermissionMode();
     let transport;
+    let endpointUrl: string | undefined;
     try {
-      transport = await this.#createSessionTransport({
+      ({ transport, endpointUrl } = await this.#openSessionTransport({
         projectDirectory: request.projectDirectory,
         profile: request.profile,
         permissionMode,
-      });
+      }));
     } catch (error) {
       if (error instanceof RuntimeAdapterError) throw error;
       throw new RuntimeAdapterError("runtime-unavailable");
@@ -383,15 +468,18 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
         transport,
         this.#providerRequestBudget,
       );
-      const catalog = readClaudeRuntimeCatalog(
-        initialization.catalog,
-        initialization.appliedSettings,
-      );
-      const expectedModel = assertSessionSelection(
-        initialization.catalog,
-        catalog,
-        request.profile,
-      );
+      const staticCatalog = resolveStaticCatalog(this.#endpointContext);
+      const expectedModel =
+        staticCatalog !== undefined
+          ? assertStaticSessionSelection(staticCatalog, request.profile)
+          : assertSessionSelection(
+              initialization.catalog,
+              readClaudeRuntimeCatalog(
+                initialization.catalog,
+                initialization.appliedSettings,
+              ),
+              request.profile,
+            );
       assertAppliedSessionSettings(
         initialization.appliedSettings,
         request.profile,
@@ -406,6 +494,8 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
       keepRunning = true;
       return new ClaudeRuntimeBinding({
         transport,
+        observeSubscriptionUsage: this.#observeSubscriptionUsage,
+        endpointUrl,
         profile: capability.profile,
         opaqueSessionReference,
         expectedModel,
@@ -429,7 +519,7 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
     }
   }
 
-  async resume(request: RuntimeResume): Promise<InterruptibleRuntimeBinding> {
+  async resume(request: RuntimeResume): Promise<ControllableRuntimeBinding> {
     validateResumeRequest(request);
     const capability = this.#sessions.get(request.opaqueSessionReference);
     if (
@@ -441,13 +531,14 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
       throw new RuntimeAdapterError("unsupported-selection");
     }
     let transport;
+    let endpointUrl: string | undefined;
     try {
-      transport = await this.#createSessionTransport({
+      ({ transport, endpointUrl } = await this.#openSessionTransport({
         projectDirectory: request.projectDirectory,
         profile: request.profile,
         permissionMode: capability.permissionMode,
         resumeSessionIdentity: capability.sessionIdentity,
-      });
+      }));
     } catch (error) {
       if (error instanceof RuntimeAdapterError) throw error;
       throw new RuntimeAdapterError("runtime-unavailable");
@@ -458,15 +549,18 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
         transport,
         this.#providerRequestBudget,
       );
-      const catalog = readClaudeRuntimeCatalog(
-        initialization.catalog,
-        initialization.appliedSettings,
-      );
-      const expectedModel = assertSessionSelection(
-        initialization.catalog,
-        catalog,
-        request.profile,
-      );
+      const staticCatalog = resolveStaticCatalog(this.#endpointContext);
+      const expectedModel =
+        staticCatalog !== undefined
+          ? assertStaticSessionSelection(staticCatalog, request.profile)
+          : assertSessionSelection(
+              initialization.catalog,
+              readClaudeRuntimeCatalog(
+                initialization.catalog,
+                initialization.appliedSettings,
+              ),
+              request.profile,
+            );
       assertAppliedSessionSettings(
         initialization.appliedSettings,
         request.profile,
@@ -474,6 +568,8 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
       keepRunning = true;
       return new ClaudeRuntimeBinding({
         transport,
+        observeSubscriptionUsage: this.#observeSubscriptionUsage,
+        endpointUrl,
         profile: request.profile,
         opaqueSessionReference: request.opaqueSessionReference,
         expectedModel,
@@ -499,6 +595,26 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
     } finally {
       if (!keepRunning) await stopRejectedSessionTransport(transport);
     }
+  }
+
+  async #openSessionTransport(request: ClaudeSessionTransportRequest) {
+    // Resolve once: classification must describe the same endpoint descriptor
+    // used by the process, not a second read of mutable settings or credentials.
+    const source = this.#endpointContext?.environmentSource;
+    const resolved = typeof source === "function" ? source({ profile: request.profile }) : source;
+    const endpoint = resolved === undefined ? undefined : { ...resolved };
+    const environment = { ...(this.#endpointDependencies?.environment ?? process.env) };
+    const dependencies = this.#endpointDependencies === undefined ? undefined : {
+      ...this.#endpointDependencies, environment, endpointEnvironment: endpoint,
+    };
+    const endpointUrl = endpoint?.mode === "glm"
+      ? endpoint.baseUrl || environment[GLM_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar] ||
+        GLM_ENDPOINT_ENV_CONTRACT.defaultBaseUrl
+      : undefined;
+    const transport = this.#createSessionTransport === undefined
+      ? await createOfficialClaudeSessionTransport(request, dependencies, this.#providerRequestBudget)
+      : await this.#createSessionTransport(request);
+    return { transport, endpointUrl };
   }
 
   #persistSessionCapability(
@@ -598,6 +714,78 @@ function sameLockedProfileFields(
           right.executionMode === ultracodeExecutionMode))) &&
     left.accessMode === right.accessMode
   );
+}
+
+/**
+ * Static-catalog session selection (GLM endpoint). The selection model id IS
+ * the native wire name, so the returned expectation is exactly that name:
+ * the init handshake then asserts the CLI reports the endpoint's true model,
+ * and a claude alias on the wire fails the session instead of passing
+ * silently as a misattributed model identity.
+ */
+function assertStaticSessionSelection(
+  catalog: RuntimeCatalog,
+  profile: SessionProfile,
+): string {
+  const model = catalog.models.find(
+    (candidate) => candidate.id === profile.model,
+  );
+  if (
+    model === undefined ||
+    !model.effortLevels.includes(profile.effortLevel) ||
+    !catalog.executionModes.includes(profile.executionMode) ||
+    !catalog.accessModes.includes(profile.accessMode)
+  ) {
+    throw new RuntimeAdapterError("unsupported-selection");
+  }
+  return model.id;
+}
+
+function resolveStaticCatalog(
+  context: ClaudeEndpointContext | undefined,
+): RuntimeCatalog | undefined {
+  const catalog = context?.staticCatalog;
+  if (catalog === undefined) return undefined;
+  const augmentation = context?.resolveStaticCatalogAugmentation?.() ?? [];
+  return mergeStaticCatalogAugmentation(catalog, augmentation);
+}
+
+/**
+ * Append freshness enrollment to a static catalog. The resulting catalog is
+ * the adapter's inspected catalog and its start/resume validation catalog.
+ */
+export function mergeStaticCatalogAugmentation(
+  catalog: RuntimeCatalog,
+  augmentation: readonly RuntimeModel[],
+): RuntimeCatalog {
+  if (augmentation.length === 0) return catalog;
+  const known = new Set(catalog.models.map((model) => model.id));
+  const models = [...catalog.models];
+  for (const model of augmentation) {
+    if (model.effortLevels.length === 0 || known.has(model.id)) continue;
+    known.add(model.id);
+    models.push(
+      Object.freeze({
+        id: model.id,
+        ...(model.resolvedModel === undefined
+          ? {}
+          : { resolvedModel: model.resolvedModel }),
+        ...(model.displayName === undefined
+          ? {}
+          : { displayName: model.displayName }),
+        effortLevels: Object.freeze([...model.effortLevels]),
+        ...(model.effortLevelLabels === undefined
+          ? {}
+          : { effortLevelLabels: Object.freeze([...model.effortLevelLabels]) }),
+      }),
+    );
+  }
+  return Object.freeze({
+    runtime: catalog.runtime,
+    models: Object.freeze(models),
+    executionModes: catalog.executionModes,
+    accessModes: catalog.accessModes,
+  });
 }
 
 function assertSessionSelection(
@@ -907,24 +1095,14 @@ function isSafeClaudeCatalogKeyName(value: string): boolean {
   );
 }
 
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return true;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return true;
-    }
-  }
-  return false;
-}
 
 function assertAppliedSessionSettings(
   appliedSettings: ClaudeAppliedSettings | undefined,
   profile: SessionProfile,
 ): void {
+  if (appliedSettings === undefined) {
+    throw new RuntimeAdapterError("protocol-invalid");
+  }
   if (profile.executionMode === ultracodeExecutionMode) {
     if (
       appliedSettings?.effort !== ultracodeNativeEffort ||
@@ -935,10 +1113,9 @@ function assertAppliedSessionSettings(
     return;
   }
   if (
-    appliedSettings === undefined ||
     (profile.effortLevel !== "default" &&
       appliedSettings.effort !== profile.effortLevel) ||
-    appliedSettings.ultracode !== false
+    appliedSettings.ultracode === true
   ) {
     throw new RuntimeAdapterError("unsupported-selection");
   }

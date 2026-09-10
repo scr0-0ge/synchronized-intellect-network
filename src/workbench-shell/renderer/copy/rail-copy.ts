@@ -27,12 +27,19 @@ const englishCopy = {
     collapsedUnavailable: "This registered Project is unavailable.",
     collapseThisTitle: "Collapse this Project's Sessions",
     expandThisTitle: "Expand this Project's Sessions",
+    switchProjectTitle: "Switch to this Project",
+    cachedProjectReadOnlyNote:
+      "Cached view — read-only. Switch to this Project to select or rename a Session.",
+    sessionsNotLoadedNote:
+      "Sessions are not loaded in this run. Switch to this Project to load them.",
+    cachedSessionReadOnlyTitle:
+      "Cached view — read-only. Switch to this Project to select or rename this Session.",
     clearDraftBeforeSwitch: "Clear the local draft before switching Projects.",
     pendingActionBeforeSwitch:
       "Finish the pending action before switching Projects.",
-    openThisProject: "Open this Project",
     openDotTitle: "Open Project",
     closedState: "closed",
+    expandedState: "expanded",
     unavailableState: "unavailable",
     activeCountSuffix: " active Agent Sessions",
     countNotLoaded: "Session count not loaded",
@@ -85,6 +92,7 @@ const englishCopy = {
     `Remove ${label} from Workbench`,
   newSessionHereAriaCopy: (label: string): string =>
     `New Agent Session in ${label}`,
+  switchProjectAriaCopy: (label: string): string => `Switch to ${label}`,
   showMoreCopy: (count: number): string => `Show ${count} more`,
   archivedGroupCopy: (count: number): string => `Archived (${count})`,
   sessionRenameErrorCopy: (maxCodePoints: number): string =>
@@ -139,11 +147,18 @@ const simplifiedChineseCopy = {
     collapsedUnavailable: "此已注册项目不可用。",
     collapseThisTitle: "折叠此项目的智能体会话",
     expandThisTitle: "展开此项目的智能体会话",
+    switchProjectTitle: "切换到此项目",
+    cachedProjectReadOnlyNote:
+      "缓存视图——只读。切换到此项目后可选择或重命名会话。",
+    sessionsNotLoadedNote:
+      "本次运行尚未加载会话。切换到此项目即可加载。",
+    cachedSessionReadOnlyTitle:
+      "缓存视图——只读。切换到此项目后可选择或重命名此会话。",
     clearDraftBeforeSwitch: "切换项目前请先清除本地草稿。",
     pendingActionBeforeSwitch: "切换项目前请先完成待处理操作。",
-    openThisProject: "打开此项目",
     openDotTitle: "打开项目",
     closedState: "已关闭",
+    expandedState: "已展开",
     unavailableState: "不可用",
     activeCountSuffix: " 个活动智能体会话",
     countNotLoaded: "尚未加载会话数量",
@@ -192,6 +207,7 @@ const simplifiedChineseCopy = {
     `从 Workbench 中移除 ${label}`,
   newSessionHereAriaCopy: (label: string): string =>
     `在 ${label} 中新建智能体会话`,
+  switchProjectAriaCopy: (label: string): string => `切换到 ${label}`,
   showMoreCopy: (count: number): string => `再显示 ${count} 个`,
   archivedGroupCopy: (count: number): string => `已归档 (${count})`,
   sessionRenameErrorCopy: (maxCodePoints: number): string =>
@@ -284,6 +300,10 @@ export function removeProjectAriaCopy(label: string): string {
 
 export function newSessionHereAriaCopy(label: string): string {
   return currentLocaleCopy(copyLocaleDictionaries).newSessionHereAriaCopy(label);
+}
+
+export function switchProjectAriaCopy(label: string): string {
+  return currentLocaleCopy(copyLocaleDictionaries).switchProjectAriaCopy(label);
 }
 
 export function showMoreCopy(count: number): string {

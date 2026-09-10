@@ -554,6 +554,17 @@ ol, ul { padding: 0; list-style: none; }
 .proj-sessions { padding: 1px 0 6px 7px; }
 .proj[data-open="false"] .proj-sessions { display: none; }
 
+.project-cache-note {
+  margin: 4px 3px 5px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-sm);
+  color: var(--fg-2);
+  background: var(--bg-2);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 /* Session rows are one line by default. The selected row opens a second line
    with its endpoint and model — detail on demand, so density holds when four
    Projects are expanded at once. */
@@ -568,6 +579,17 @@ ol, ul { padding: 0; list-style: none; }
 }
 
 .session-row:hover { background: var(--bg-2); }
+
+.session-row.is-read-only {
+  border-color: var(--line-0);
+  color: var(--fg-3);
+  background: var(--bg-1);
+  box-shadow: inset 2px 0 0 var(--line-2);
+}
+
+.session-row.is-read-only:hover { background: var(--bg-1); }
+.session-row.is-read-only .sr-title { color: var(--fg-2); }
+.session-row.is-read-only .rt-dot { opacity: 0.5; }
 
 .session-row[aria-current="true"] {
   border-color: var(--line-1);
@@ -624,12 +646,6 @@ ol, ul { padding: 0; list-style: none; }
 .more-row:hover { color: var(--fg-1); background: var(--bg-2); }
 
 .session-row.is-hidden { display: none; }
-
-.proj-empty {
-  padding: 5px 8px 7px 21px;
-  color: var(--fg-3);
-  font-size: 11px;
-}
 
 /* Provider dot. Always accompanied by the provider's text label.
    The faint halo is what makes the locked hues read as neon rather than as
@@ -776,6 +792,14 @@ kbd {
   background: transparent;
 }
 
+.stage:has(> .prompt-suggestions) {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+}
+
+.stage:has(> .runtime-questions):has(> .prompt-suggestions) {
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+}
+
 .stage-head {
   display: flex;
   align-items: center;
@@ -785,6 +809,25 @@ kbd {
   padding: 0 16px;
   border-bottom: 1px solid var(--line-0);
 }
+
+.stage-head.has-continuation-stop {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 38px;
+  padding-block: 10px;
+  row-gap: 8px;
+}
+.continuation-stop-notice {
+  flex-basis: 100%;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  color: var(--fg-1);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.continuation-stop-notice strong { color: var(--fg-0); }
 
 .stage-title {
   display: flex;
@@ -812,6 +855,59 @@ kbd {
   overflow-y: auto;
   overflow-anchor: none;
   padding: 18px 0 26px;
+}
+
+.prompt-suggestions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 20px;
+  border-top: 1px solid var(--line-0);
+  background: var(--bg-1);
+}
+
+.prompt-suggestions-title {
+  flex: 0 0 auto;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.prompt-suggestion-list {
+  min-width: 0;
+  display: flex;
+  gap: 7px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.prompt-suggestion {
+  flex: 0 0 auto;
+  max-width: min(360px, 62vw);
+  overflow: hidden;
+  padding: 5px 9px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-sm);
+  color: var(--fg-1);
+  background: var(--bg-2);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-suggestion:hover {
+  border-color: var(--line-2);
+  color: var(--fg-0);
+  background: var(--bg-3);
+}
+
+.prompt-suggestion:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .transcript-jump-latest {
@@ -993,6 +1089,25 @@ kbd {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+/* Long prompts clamp to four lines until expanded (issue #6 case 5). The
+   stored text is never truncated — the class only limits the rendered box. */
+.turn-user .turn-body.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+.user-message-toggle {
+  margin-top: 4px;
+  border: none;
+  background: none;
+  padding: 0 0 0 14px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.user-message-toggle:hover { color: var(--fg-1); }
 
 .prose { font-size: 13.5px; line-height: 1.62; overflow-wrap: anywhere; }
 .prose p { margin: 0 0 10px; }
@@ -1080,6 +1195,18 @@ kbd {
 }
 
 @keyframes blink { 50% { opacity: 0; } }
+
+/* Same-turn activity note beside the working line (issue #6 case 4). */
+.turn-file-changes {
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.turn-progress {
+  color: var(--fg-2);
+  font-style: italic;
+}
 
 .working {
   display: inline-flex;
@@ -1550,6 +1677,20 @@ kbd {
 
 .composer-foot .grow { flex: 1 1 auto; }
 .composer-foot .count { font-family: var(--mono); font-size: 10.5px; }
+
+.composer > .auto-continue-help {
+  max-width: var(--reading-measure);
+  margin: 4px auto 0;
+  color: var(--fg-2);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
+.auto-continue-feedback {
+  color: var(--err);
+  white-space: pre-line;
+}
 
 /* Composer replacement when a selection cannot be continued safely. */
 .blocked-bar {
@@ -2117,9 +2258,27 @@ kbd {
   margin-top: 9px;
 }
 
+/* The row of buttons beside a provider's copy — up to four of them on the
+   API-key rows (Save / Reveal / Remove / Test connection).
+
+   `flex-wrap` and the ability to shrink are both load-bearing, and neither
+   works alone. `.provider` clips to its rounded corner (`overflow: hidden`,
+   which is what keeps the actions strip's square background inside the card),
+   so anything that overflows this row is not merely ugly — it is unreachable,
+   with no scrollbar and no gesture that recovers it. With `flex: 0 0 auto` the
+   row was sized at max-content and refused to shrink, so below roughly 440px
+   of card width the last button was cut off entirely: measured 80px of the
+   105px `Test connection` button gone at a 360px window, and again between
+   630px and 659px, where the Settings overlay hands 216px back to the rail.
+
+   Shrinking is allowed rather than forced: at ordinary widths there is no
+   deficit to distribute, so the row still sits on one line beside the copy
+   exactly as before. */
 .provider-binding-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  min-width: 0;
   gap: 7px;
 }
 
@@ -2264,6 +2423,45 @@ kbd {
   :root { --rail-w: 216px; --reading-inset: 16px; }
   .chip.chip-intensity { max-width: 180px; }
   .sb-item.sb-hide-narrow { display: none; }
+
+  .stage:has(> .prompt-suggestions) .prompt-suggestions {
+    padding-block: 4px;
+  }
+
+  .stage:has(> .prompt-suggestions) .composer {
+    padding-block: 6px;
+  }
+
+  .stage:has(> .prompt-suggestions) .target-bar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .stage:has(> .prompt-suggestions) .target-bar .tb-text {
+    flex-basis: calc(100% - 70px);
+  }
+
+  .stage:has(> .prompt-suggestions) .target-bar .new-session-button {
+    margin-left: auto;
+  }
+
+  .stage:has(> .prompt-suggestions) .controlbar {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
+
+  .stage:has(> .prompt-suggestions) .controlbar > .chip {
+    flex: 0 0 auto;
+  }
+
+  .stage:has(> .prompt-suggestions) .controlbar > .chip-spacer {
+    display: none;
+  }
+
+  .stage:has(> .prompt-suggestions) .input-shell textarea {
+    min-height: calc(2 * 1.55em);
+  }
 }
 
 /* A reader who asked for LESS motion must not be given more of it (F225).
@@ -2345,7 +2543,10 @@ kbd {
 }
 .project-action-list .btn { justify-content: center; }
 .proj-toggle[disabled] { cursor: not-allowed; opacity: 0.55; }
-.proj[data-open="false"] .proj-sessions.collapsed-note { display: block; }
+/* Issue #6 comment 3.3: the collapsed-Project note moved to the toggle's
+   title, so the anchor container must never spend rail height. :empty also
+   covers the pending-switch window, where data-open is briefly true. */
+.proj-sessions.collapsed-note:empty { display: none; }
 .rail-empty.compact { height: auto; min-height: 112px; padding: 18px 12px; }
 .rail-feedback {
   padding: 7px 10px;
@@ -2504,15 +2705,23 @@ kbd {
   white-space: nowrap;
 }
 .project-histories-hide { color: var(--fg-2); }
+/* The destructive button paints its own ground, so its legibility must be a
+   property of the button rather than of whatever is behind the window. It used
+   to mix `--err` — which is an INK token, pale salmon in dark tone — into the
+   surrounding `--bg-2`, and white on that measured 3.96:1 in dark, 3.93:1 with
+   transparency reduced and 4.01:1 in light with transparency reduced: under AA
+   in three of the four configurations, on the one control in the dialog that
+   destroys something. An opaque deep red carries the same danger reading and
+   holds white ink at 6.59:1 (8.07:1 on hover) in every one of them. */
 .removal-confirm-button {
   color: #fff;
-  border-color: color-mix(in srgb, var(--err) 78%, var(--line-2));
-  background: color-mix(in srgb, var(--err) 76%, var(--bg-2));
+  border-color: #7d2b23;
+  background: #a23a32;
 }
 .removal-confirm-button:hover:not(:disabled) {
   color: #fff;
-  border-color: var(--err);
-  background: color-mix(in srgb, var(--err) 88%, var(--bg-2));
+  border-color: #6d251e;
+  background: #8f2f26;
 }
 .failure-removal-feedback {
   max-width: 52ch;
@@ -2962,6 +3171,7 @@ kbd {
 
 @media (max-width: 620px) {
   :root { --rail-w: 180px; }
+  .settings { left: 0; }
   .body-grid,
   .body-grid.no-inspector,
   .body-grid.inspector-collapsed { grid-template-columns: var(--rail-w) minmax(0, 1fr); }
@@ -2975,4 +3185,31 @@ kbd {
   .sb-item.sb-mode { display: none; }
   .appearance-row { grid-template-columns: minmax(0, 1fr); gap: 9px; }
   .appearance-options { justify-content: flex-start; }
+}
+
+/* 360px is the supported minimum window width. Keeping the 180px rail beside
+   the Stage at that size left just 180px for a continuing Session: the target
+   bar, profile chips, and message field became a vertical stack that extended
+   below the window. Keep the rail available as a dock, but give the active
+   conversation the full reading line above it. Settings already covers the rail
+   at this width, so this dock remains specific to the Project surface. */
+@media (max-width: 480px) {
+  .body-grid:not(:has(.settings)),
+  .body-grid.no-inspector:not(:has(.settings)),
+  .body-grid.inspector-collapsed:not(:has(.settings)) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) 180px;
+  }
+
+  .body-grid:not(:has(.settings)) .stage {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .body-grid:not(:has(.settings)) .rail {
+    grid-column: 1;
+    grid-row: 2;
+    border-top: 1px solid var(--line-0);
+    border-right: 0;
+  }
 }

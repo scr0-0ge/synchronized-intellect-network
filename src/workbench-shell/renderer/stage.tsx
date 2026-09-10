@@ -1,14 +1,21 @@
 import { For, Show, type Component } from "solid-js";
-import type { WorkbenchCommandView, WorkbenchHostedProjectView } from "../contract.ts";
+import type {
+  WorkbenchCommandView,
+  WorkbenchHostedProjectView,
+  WorkbenchFamilyEndpointPreferences,
+} from "../contract.ts";
+import { defaultWorkbenchFamilyEndpointPreferences } from "../contract.ts";
+import { continuationCopy } from "./copy/continuation-copy.ts";
 import {
   canCancelNewAgentSessionMode,
   canCreateProject,
   canOpenProject,
-  directEndpointStatusRows,
+  directFacadeEndpointStatusRows,
   directInputMode,
   runtimeNotLocatedCopy,
   type WorkbenchComposerState,
   type WorkbenchDirectProfileState,
+  type WorkbenchFacadeSubscriptionAuthenticationInput,
   type WorkbenchNewSessionState,
   type WorkbenchProjectOpenState,
   type WorkbenchProjectSwitchState,
@@ -22,6 +29,7 @@ import {
 } from "./view-types.ts";
 import { ProjectActionsMenu } from "./project-rail.tsx";
 import { SessionTranscript, turnStateClass } from "./transcript.tsx";
+import { RuntimeQuestions } from "./user-input.tsx";
 import {
   BlockedComposer,
   UnavailableRuntimeComposer,
@@ -29,6 +37,7 @@ import {
 } from "./composer.tsx";
 import type { WorkbenchComposerHistoryNavigator } from "./composer-history.ts";
 import { commonCopy } from "./copy/common-copy.ts";
+import { composerFeedbackCopy } from "./copy/composer-copy.ts";
 import {
   endpointStatusDescriptionCopy,
   stageCopy,
@@ -36,6 +45,7 @@ import {
 
 export const WorkbenchStage: Component<{
   readonly active: boolean;
+  readonly projectScopeEpoch?: number;
   readonly view: WorkbenchHostedProjectView;
   readonly selected: WorkbenchCommandView | undefined;
   readonly composer: WorkbenchComposerState;
@@ -71,6 +81,8 @@ export const WorkbenchStage: Component<{
   readonly steerFeedback: string | null;
   readonly onSteer: (() => void) | undefined;
   readonly onSubmit: () => void;
+  readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
+  readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
 }> = (props) => {
   const rendererState = () => ({
     result: { ok: true as const, view: props.view },
@@ -84,6 +96,10 @@ export const WorkbenchStage: Component<{
   const mode = () => directInputMode(rendererState());
   const freshStartPresentation = () => props.newSession.phase !== "inactive";
   const emptyProject = () => props.view.commands.length === 0;
+  const promptSuggestions = () =>
+    mode() === "continue"
+      ? latestTurnPromptSuggestions(props.selected)
+      : Object.freeze([]);
 
   return (
     <main
@@ -109,6 +125,8 @@ export const WorkbenchStage: Component<{
           <>
             <RuntimeNotLocatedState
               profile={props.profile}
+              endpointPreferences={props.endpointPreferences}
+              subscriptionAuthentication={props.subscriptionAuthentication}
               onOpenProviders={props.onOpenProviders}
             />
             <UnavailableRuntimeComposer composer={props.composer} />
@@ -138,6 +156,8 @@ export const WorkbenchStage: Component<{
               onAccessMode={props.onAccessMode}
               onUseAsDefault={props.onUseAsDefault}
               onSubmit={props.onSubmit}
+              endpointPreferences={props.endpointPreferences}
+              subscriptionAuthentication={props.subscriptionAuthentication}
             />
           }
         >
@@ -146,6 +166,38 @@ export const WorkbenchStage: Component<{
             fallback={
               <>
                 <SessionTranscript command={props.selected} />
+                <RuntimeQuestions
+                  scopeKey={`${props.projectScopeEpoch ?? 0}/${props.selected?.key ?? ""}`}
+                  sessionKey={props.selected?.session?.metadataKey}
+                />
+                <Show when={promptSuggestions().length > 0}>
+                  <section
+                    class="prompt-suggestions"
+                    aria-label={stageCopy.suggestedFollowUps}
+                  >
+                    <span class="prompt-suggestions-title">
+                      {stageCopy.suggestedFollowUps}
+                    </span>
+                    <div class="prompt-suggestion-list">
+                      <For each={promptSuggestions()}>
+                        {(suggestion) => (
+                          <button
+                            type="button"
+                            class="prompt-suggestion"
+                            disabled={props.composer.draft.length > 0}
+                            title={props.composer.draft.length > 0 ? composerFeedbackCopy.suggestionRequiresEmptyDraft : suggestion}
+                            onClick={() => {
+                              if (props.composer.draft.length > 0) return;
+                              props.onDraft(suggestion);
+                            }}
+                          >
+                            {suggestion}
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  </section>
+                </Show>
                 <Show
                   when={
                     mode() !== "unavailable" ||
@@ -188,6 +240,8 @@ export const WorkbenchStage: Component<{
                     steerFeedback={props.steerFeedback}
                     onSteer={props.onSteer}
                     onSubmit={props.onSubmit}
+                    endpointPreferences={props.endpointPreferences}
+                    subscriptionAuthentication={props.subscriptionAuthentication}
                   />
                 </Show>
               </>
@@ -230,6 +284,8 @@ export const WorkbenchStage: Component<{
                 onAccessMode={props.onAccessMode}
                 onUseAsDefault={props.onUseAsDefault}
                 onSubmit={props.onSubmit}
+                endpointPreferences={props.endpointPreferences}
+                subscriptionAuthentication={props.subscriptionAuthentication}
               />
             </Show>
             <span class="sr-only">{stageCopy.srNewAgentSessionMode}</span>
@@ -239,6 +295,20 @@ export const WorkbenchStage: Component<{
     </main>
   );
 };
+
+function latestTurnPromptSuggestions(
+  command: WorkbenchCommandView | undefined,
+): readonly string[] {
+  const session = command?.session;
+  if (session === undefined) return Object.freeze([]);
+  const timeline = session.turns === undefined
+    ? session.timeline
+    : session.turns.at(-1)?.timeline ?? Object.freeze([]);
+  const terminal = timeline.at(-1);
+  return terminal?.kind === "turn-completed"
+    ? terminal.suggestions ?? Object.freeze([])
+    : Object.freeze([]);
+}
 
 const StageHeader: Component<{
   readonly view: WorkbenchHostedProjectView;
@@ -253,7 +323,7 @@ const StageHeader: Component<{
   readonly onOpenProject: () => void;
   readonly projectOpen: WorkbenchProjectOpenState;
 }> = (props) => (
-  <div class="stage-head">
+  <div class="stage-head" classList={{ "has-continuation-stop": !props.freshStart && props.command?.continuationStop !== undefined }}>
     <div class="stage-title">
       <Show when={!props.freshStart && props.command}>
         {(command) => (
@@ -321,6 +391,14 @@ const StageHeader: Component<{
         </button>
       </Show>
     </div>
+    <Show when={!props.freshStart && props.command?.continuationStop}>
+      {(stop) => (
+        <div class="continuation-stop-notice" role="status">
+          <strong>{continuationCopy.heading(stop().step, stop().limit)}</strong>
+          <span>{continuationCopy.reasons[stop().reason]}</span>
+        </div>
+      )}
+    </Show>
   </div>
 );
 
@@ -378,6 +456,8 @@ const EmptyProjectState: Component<{
   readonly onAccessMode: (key: string) => void;
   readonly onUseAsDefault: () => void;
   readonly onSubmit: () => void;
+  readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
+  readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
 }> = (props) => (
   <div class="stage-state">
     <div class="state-card empty-project-card">
@@ -409,6 +489,8 @@ const EmptyProjectState: Component<{
         onAccessMode={props.onAccessMode}
         onUseAsDefault={props.onUseAsDefault}
         onSubmit={props.onSubmit}
+        endpointPreferences={props.endpointPreferences}
+        subscriptionAuthentication={props.subscriptionAuthentication}
       />
       <div class="suggestions" aria-label={stageCopy.waysToStart}>
         <For each={stageCopy.suggestions}>
@@ -432,9 +514,16 @@ const EmptyProjectState: Component<{
 
 const RuntimeNotLocatedState: Component<{
   readonly profile: WorkbenchDirectProfileState;
+  readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
+  readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
   readonly onOpenProviders: () => void;
 }> = (props) => {
-  const rows = () => directEndpointStatusRows(props.profile);
+  const rows = () =>
+    directFacadeEndpointStatusRows(
+      props.profile,
+      props.endpointPreferences ?? defaultWorkbenchFamilyEndpointPreferences,
+      props.subscriptionAuthentication,
+    );
   return (
     <div class="stage-state runtime-not-located-state">
       <div class="state-card">

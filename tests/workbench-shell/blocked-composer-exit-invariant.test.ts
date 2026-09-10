@@ -44,6 +44,7 @@ import type {
 import {
   canEnterNewAgentSessionMode,
   enterNewAgentSessionMode,
+  hasHostedProjectView,
   initialRendererState,
   replaceProjectResult,
   replacementSessionRefusal,
@@ -391,7 +392,7 @@ function withPhases(
 function stageProps(
   state: WorkbenchRendererState,
 ): Readonly<Record<string, unknown>> {
-  const view: WorkbenchHostedProjectView = state.result?.ok
+  const view: WorkbenchHostedProjectView = hasHostedProjectView(state.result)
     ? state.result.view
     : visualFixture;
   return {

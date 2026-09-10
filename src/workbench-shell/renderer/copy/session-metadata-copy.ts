@@ -22,7 +22,7 @@ const englishCopy = {
     startingArchiveTitle: "A turn is starting; archive is unavailable.",
     runningArchiveTitle: "A turn is running; archive is unavailable.",
     recoveryArchiveTitle:
-      "This Session's last turn outcome was never established, so it cannot be archived. Delete it instead.",
+      "Confirm that this Session's final turn outcome is unknown to archive it. Archiving keeps it in Recovery required.",
     renamedFeedback: "Agent Session renamed.",
     archivedFeedback: "Agent Session archived.",
     restoredFeedback: "Agent Session restored.",
@@ -30,7 +30,7 @@ const englishCopy = {
     alreadyArchivedFeedback: "That Agent Session is already archived.",
     alreadyActiveFeedback: "That Agent Session is already active.",
     blockUnknownFeedback:
-      "Agent Session was not archived because turn activity could not be verified. If its last turn outcome was never established, archive stays unavailable and Delete is the way to clear the row.",
+      "Agent Session was not archived because turn activity could not be verified. Confirm that its final turn outcome is unknown to archive it; archiving keeps it in Recovery required.",
     invalidNameFeedback:
       "Agent Session was not renamed. Enter a non-empty name of at most 80 characters without control characters.",
     notFoundFeedback:
@@ -57,7 +57,7 @@ const simplifiedChineseCopy = {
     startingArchiveTitle: "回合正在启动；归档不可用。",
     runningArchiveTitle: "回合正在运行；归档不可用。",
     recoveryArchiveTitle:
-      "此智能体会话上一个回合的结果从未确定，因此无法归档。请改为删除。",
+      "确认此会话的最终结果未知后可将其归档；归档不会清除“需要恢复”状态。",
     renamedFeedback: "智能体会话已重命名。",
     archivedFeedback: "智能体会话已归档。",
     restoredFeedback: "智能体会话已恢复。",
@@ -65,7 +65,7 @@ const simplifiedChineseCopy = {
     alreadyArchivedFeedback: "该智能体会话已归档。",
     alreadyActiveFeedback: "该智能体会话已处于活动状态。",
     blockUnknownFeedback:
-      "因无法验证回合活动，智能体会话未归档。如果上一个回合的结果从未确定，归档将持续不可用；请通过“删除”清除此行。",
+      "智能体会话未归档，因为无法验证回合活动。确认其最终结果未知后可归档；归档不会清除“需要恢复”状态。",
     invalidNameFeedback:
       "智能体会话未重命名。请输入不含控制字符、长度不超过 80 个字符的非空名称。",
     notFoundFeedback: "该智能体会话已不可用。项目视图已刷新。",

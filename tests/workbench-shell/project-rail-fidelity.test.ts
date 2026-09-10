@@ -35,9 +35,19 @@ interface ProjectRailModule {
   ) => unknown;
 }
 
+interface SessionRailRowModule {
+  readonly SessionRailRow: (
+    props: Readonly<Record<string, unknown>>,
+  ) => unknown;
+}
+
 interface ProjectRailDisclosureState {
   readonly scopeEpoch: number;
-  readonly selectedProjectExpanded: boolean;
+  readonly projects: readonly ProjectRailProjectDisclosureState[];
+}
+
+interface ProjectRailProjectDisclosureState {
+  readonly expanded: boolean;
   readonly overflowAvailable: boolean;
   readonly overflowExpanded: boolean;
   readonly activeCount: number;
@@ -46,15 +56,17 @@ interface ProjectRailDisclosureState {
 }
 
 type ProjectRailDisclosureAction =
-  | Readonly<{ type: "toggle-selected-project" }>
-  | Readonly<{ type: "toggle-overflow" }>
-  | Readonly<{ type: "toggle-archived" }>;
+  | Readonly<{ type: "toggle-project"; projectIndex: number }>
+  | Readonly<{ type: "toggle-overflow"; projectIndex: number }>
+  | Readonly<{ type: "toggle-archived"; projectIndex: number }>;
 
 interface ProjectRailStateModule {
   readonly initialProjectRailDisclosureState: (
     scopeEpoch: number,
     activeCount: number,
     archivedCount: number,
+    selectedProjectIndex?: number,
+    projectCount?: number,
   ) => ProjectRailDisclosureState;
   readonly reduceProjectRailDisclosure: (
     state: ProjectRailDisclosureState,
@@ -68,6 +80,8 @@ interface ProjectRailReconcileModule extends ProjectRailStateModule {
     scopeEpoch: number,
     activeCount: number,
     archivedCount: number,
+    selectedProjectIndex?: number,
+    projectCount?: number,
   ) => ProjectRailDisclosureState;
 }
 
@@ -112,6 +126,15 @@ function sourceSection(source: string, start: string, end: string): string {
   const section = source.slice(startIndex, endIndex);
   assert.notEqual(section.trim(), "", `empty section: ${start} … ${end}`);
   return section;
+}
+
+function projectDisclosure(
+  state: ProjectRailDisclosureState,
+  projectIndex = 0,
+): ProjectRailProjectDisclosureState {
+  const project = state.projects[projectIndex];
+  assert.ok(project, `Project ${projectIndex} has disclosure state`);
+  return project;
 }
 
 test("rail foot is the one accessible Settings entry beside the shortened New Session action", async () => {
@@ -217,43 +240,93 @@ test("Project-folder collapse preserves the overflow choice and Show fewer rever
     const initial = stateModule.initialProjectRailDisclosureState(4, 7, 0);
     assert.deepEqual(initial, {
       scopeEpoch: 4,
-      selectedProjectExpanded: true,
-      overflowAvailable: true,
-      overflowExpanded: false,
-      activeCount: 7,
-      archivedCount: 0,
-      archivedExpanded: false,
+      projects: [
+        {
+          expanded: true,
+          overflowAvailable: true,
+          overflowExpanded: false,
+          activeCount: 7,
+          archivedCount: 0,
+          archivedExpanded: false,
+        },
+      ],
     });
     assert.equal(Object.isFrozen(initial), true);
+    assert.equal(Object.isFrozen(initial.projects), true);
 
     const showingAll = stateModule.reduceProjectRailDisclosure(initial, {
       type: "toggle-overflow",
+      projectIndex: 0,
     });
     assert.deepEqual(showingAll, {
       ...initial,
-      overflowExpanded: true,
+      projects: [
+        {
+          ...projectDisclosure(initial),
+          overflowExpanded: true,
+        },
+      ],
     });
 
     const folderCollapsed = stateModule.reduceProjectRailDisclosure(
       showingAll,
-      { type: "toggle-selected-project" },
+      { type: "toggle-project", projectIndex: 0 },
     );
     assert.deepEqual(folderCollapsed, {
       ...showingAll,
-      selectedProjectExpanded: false,
+      projects: [
+        {
+          ...projectDisclosure(showingAll),
+          expanded: false,
+        },
+      ],
     });
 
     const folderReopened = stateModule.reduceProjectRailDisclosure(
       folderCollapsed,
-      { type: "toggle-selected-project" },
+      { type: "toggle-project", projectIndex: 0 },
     );
     assert.deepEqual(folderReopened, showingAll);
 
     const showingFive = stateModule.reduceProjectRailDisclosure(
       folderReopened,
-      { type: "toggle-overflow" },
+      { type: "toggle-overflow", projectIndex: 0 },
     );
     assert.deepEqual(showingFive, initial);
+  });
+});
+
+test("expanding a second Project preserves the first Project disclosure", async () => {
+  await withProjectRailReconcileModule((stateModule) => {
+    const initial = stateModule.initialProjectRailDisclosureState(4, 2, 0, 0, 2);
+    const twoExpanded = stateModule.reduceProjectRailDisclosure(initial, {
+      type: "toggle-project",
+      projectIndex: 1,
+    });
+
+    assert.deepEqual(
+      twoExpanded.projects.flatMap((project, index) =>
+        project.expanded ? [index] : [],
+      ),
+      [0, 1],
+      "opening Project 2 must not collapse Project 1",
+    );
+
+    const selectedSecond = stateModule.reconcileProjectRailDisclosure(
+      initial,
+      5,
+      4,
+      0,
+      1,
+      2,
+    );
+    assert.deepEqual(
+      selectedSecond.projects.flatMap((project, index) =>
+        project.expanded ? [index] : [],
+      ),
+      [0, 1],
+      "a completed Project switch restores the target without closing the prior Project",
+    );
   });
 });
 
@@ -262,6 +335,7 @@ test("Session append preserves overflow while drop then growth normalizes it col
     const initial = stateModule.initialProjectRailDisclosureState(9, 7, 0);
     const showingAll = stateModule.reduceProjectRailDisclosure(initial, {
       type: "toggle-overflow",
+      projectIndex: 0,
     });
 
     const appended = stateModule.reconcileProjectRailDisclosure(
@@ -270,8 +344,16 @@ test("Session append preserves overflow while drop then growth normalizes it col
       8,
       0,
     );
-    assert.deepEqual(appended, { ...showingAll, activeCount: 8 });
-    assert.equal(appended.overflowExpanded, true);
+    assert.deepEqual(appended, {
+      ...showingAll,
+      projects: [
+        {
+          ...projectDisclosure(showingAll),
+          activeCount: 8,
+        },
+      ],
+    });
+    assert.equal(projectDisclosure(appended).overflowExpanded, true);
     assert.equal(
       stateModule.reconcileProjectRailDisclosure(showingAll, 9, 7, 0),
       showingAll,
@@ -286,9 +368,14 @@ test("Session append preserves overflow while drop then growth normalizes it col
     );
     assert.deepEqual(dropped, {
       ...appended,
-      overflowAvailable: false,
-      overflowExpanded: false,
-      activeCount: 5,
+      projects: [
+        {
+          ...projectDisclosure(appended),
+          overflowAvailable: false,
+          overflowExpanded: false,
+          activeCount: 5,
+        },
+      ],
     });
     assert.equal(Object.isFrozen(dropped), true);
 
@@ -300,33 +387,39 @@ test("Session append preserves overflow while drop then growth normalizes it col
     );
     assert.deepEqual(grown, {
       ...dropped,
-      overflowAvailable: true,
-      overflowExpanded: false,
-      activeCount: 6,
+      projects: [
+        {
+          ...projectDisclosure(dropped),
+          overflowAvailable: true,
+          overflowExpanded: false,
+          activeCount: 6,
+        },
+      ],
     });
 
     const folderCollapsed = stateModule.reduceProjectRailDisclosure(
       showingAll,
-      { type: "toggle-selected-project" },
+      { type: "toggle-project", projectIndex: 0 },
     );
-    assert.deepEqual(
-      stateModule.reconcileProjectRailDisclosure(
-        folderCollapsed,
-        10,
-        8,
-        0,
-      ),
-      {
-        scopeEpoch: 10,
-        selectedProjectExpanded: true,
-        overflowAvailable: true,
-        overflowExpanded: false,
-        activeCount: 8,
-        archivedCount: 0,
-        archivedExpanded: false,
-      },
-      "one actual scope epoch resets folder open and overflow collapsed",
+    const restored = stateModule.reconcileProjectRailDisclosure(
+      folderCollapsed,
+      10,
+      8,
+      0,
     );
+    assert.deepEqual(restored, {
+      scopeEpoch: 10,
+      projects: [
+        {
+          expanded: true,
+          overflowAvailable: true,
+          overflowExpanded: true,
+          activeCount: 8,
+          archivedCount: 0,
+          archivedExpanded: false,
+        },
+      ],
+    });
   });
 });
 
@@ -575,7 +668,7 @@ test("zero through five Sessions render ordinarily with no overflow control", as
   });
 });
 
-test("nonselected available Project stays an honest real switch with no selected-only facts", async () => {
+test("nonselected Project disclosure stays separate from its explicit switch action", async () => {
   await withProjectRailModule(async ({ ProjectRail }) => {
     const html = renderProjectRail(ProjectRail, viewWithCommandCount(7));
     const sections = projectSections(html);
@@ -587,17 +680,25 @@ test("nonselected available Project stays an honest real switch with no selected
     assert.match(nonselectedAvailable, /data-open="false"/u);
     assert.match(toggle, /type="button"/u);
     assert.match(toggle, /aria-expanded="false"/u);
-    assert.match(toggle, /title="Open this Project"/u);
+    assert.match(
+      toggle,
+      /aria-label="Expand Atlas Fieldnotes Agent Sessions"/u,
+    );
+    assert.match(toggle, /title="Expand this Project's Sessions"/u);
+    assert.doesNotMatch(nonselectedAvailable, /class="proj-empty"/u);
     assert.doesNotMatch(toggle, /disabled/u);
     assert.doesNotMatch(toggle, /aria-current/u);
     assert.doesNotMatch(nonselectedAvailable, /class="proj-open-dot"/u);
+    const switchAction = projectSwitchButton(nonselectedAvailable);
+    assert.equal(attributeValue(switchAction, "aria-label"), "Switch to Atlas Fieldnotes");
+    assert.equal(
+      attributeValue(switchAction, "title"),
+      "Opening this Project loads its Sessions.",
+    );
+    assert.doesNotMatch(switchAction, /disabled/u);
     assert.match(
       nonselectedAvailable,
       /aria-label="Session count not loaded">—<\/span>/u,
-    );
-    assert.match(
-      nonselectedAvailable,
-      /Opening this Project loads its Sessions\./u,
     );
     assert.doesNotMatch(nonselectedAvailable, /class="session-row(?: [^"]*)?"/u);
     assert.doesNotMatch(nonselectedAvailable, /Agent Session 0\d/u);
@@ -617,8 +718,107 @@ test("nonselected available Project stays an honest real switch with no selected
     );
     assert.match(
       railSource,
-      /if \(project\.selected\) \{[\s\S]*?toggle-selected-project[\s\S]*?\} else \{\s*props\.onSelectProject\(index\(\)\);\s*\}/u,
+      /class="proj-toggle registered-project-button"[\s\S]*?onClick=\{\(\) =>\s*updateDisclosure\(\{\s*type: "toggle-project",\s*projectIndex: index\(\),\s*\}\)\s*\}/u,
     );
+    assert.match(
+      railSource,
+      /class="icon-btn project-switch-trigger"[\s\S]*?onClick=\{\(\) => props\.onSelectProject\(index\(\)\)\}/u,
+    );
+  });
+});
+
+test("cached nonselected Session rows look read-only and make no rename promise", async () => {
+  await withSessionRailRowModule(({ SessionRailRow }) => {
+    const command = visualFixture.commands[0];
+    assert.ok(command?.session);
+    const html = renderToString(() =>
+      SessionRailRow({
+        command,
+        selected: false,
+        disabled: true,
+        readOnly: true,
+        mutationPending: false,
+        removalPending: false,
+        onSelect: noOp,
+        onMutate: async () => ({ status: "unchanged" }),
+        onRequestRecoveryArchiveConfirmation: noOp,
+        onRequestRemoval: noOp,
+      }),
+    );
+    const row = sessionRowButton(html, command.label);
+
+    assert.equal(hasBooleanAttribute(row, "disabled"), true);
+    assert.equal(attributeValue(row, "aria-keyshortcuts"), undefined);
+    assert.equal(
+      attributeValue(row, "title"),
+      "Cached view — read-only. Switch to this Project to select or rename this Session.",
+    );
+    assert.match(attributeValue(row, "class") ?? "", /\bis-read-only\b/u);
+    assert.doesNotMatch(html, /class="session-row-actions"/u);
+  });
+
+  const source = await readFile(
+    new URL(
+      "../../src/workbench-shell/renderer/project-rail.tsx",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  assert.match(source, /\{railCopy\.cachedProjectReadOnlyNote\}/u);
+});
+
+test("adding one Project preserves existing disclosure choices", async () => {
+  await withProjectRailReconcileModule((stateModule) => {
+    const initial = stateModule.initialProjectRailDisclosureState(4, 2, 0, 0, 3);
+    const twoExpanded = stateModule.reduceProjectRailDisclosure(initial, {
+      type: "toggle-project",
+      projectIndex: 1,
+    });
+    const appended = stateModule.reconcileProjectRailDisclosure(
+      twoExpanded,
+      5,
+      1,
+      0,
+      3,
+      4,
+    );
+
+    assert.deepEqual(
+      appended.projects.flatMap((project, index) =>
+        project.expanded ? [index] : [],
+      ),
+      [0, 1, 3],
+    );
+    assert.deepEqual(appended.projects[0], twoExpanded.projects[0]);
+    assert.deepEqual(appended.projects[1], twoExpanded.projects[1]);
+  });
+});
+
+test("an unloaded nonselected disclosure explains the per-run cache boundary", async () => {
+  await withInjectedProjectRailModule((projectRailModule) => {
+    const initial = projectRailModule.initialProjectRailDisclosureState(
+      0,
+      7,
+      0,
+      0,
+      3,
+    );
+    const secondExpanded = projectRailModule.reduceProjectRailDisclosure(initial, {
+      type: "toggle-project",
+      projectIndex: 1,
+    });
+    const sections = projectSections(
+      renderInjectedProjectRail(projectRailModule, secondExpanded),
+    );
+    const second = sections[1];
+    assert.ok(second);
+
+    assert.match(second, /data-open="true"/u);
+    assert.match(
+      second,
+      /class="project-cache-note"[^>]*>Sessions are not loaded in this run\. Switch to this Project to load them\.<\/p>/u,
+    );
+    assert.doesNotMatch(second, /class="session-row(?: [^"]*)?"/u);
   });
 });
 
@@ -678,8 +878,8 @@ test("production Session rows bind Archive disabled state and title to the durab
       ["failed", false, "Archive Agent Session"],
       [
         "recovery-required",
-        true,
-        "This Session's last turn outcome was never established, so it cannot be archived. Delete it instead.",
+        false,
+        "Confirm that this Session's final turn outcome is unknown to archive it. Archiving keeps it in Recovery required.",
       ],
     ] as const) {
       const html = renderProjectRail(
@@ -849,13 +1049,20 @@ test("long non-ASCII active and archived names retain exact action names and con
 
 test("rendered collapse and reopen preserve selected Project facts and expanded overflow", async () => {
   await withInjectedProjectRailModule((projectRailModule) => {
-    const initial = projectRailModule.initialProjectRailDisclosureState(0, 7, 0);
+    const initial = projectRailModule.initialProjectRailDisclosureState(
+      0,
+      7,
+      0,
+      0,
+      3,
+    );
     const showingAll = projectRailModule.reduceProjectRailDisclosure(initial, {
       type: "toggle-overflow",
+      projectIndex: 0,
     });
     const folderCollapsed = projectRailModule.reduceProjectRailDisclosure(
       showingAll,
-      { type: "toggle-selected-project" },
+      { type: "toggle-project", projectIndex: 0 },
     );
 
     const collapsed = selectedProjectSection(
@@ -889,7 +1096,7 @@ test("rendered collapse and reopen preserve selected Project facts and expanded 
 
     const folderReopened = projectRailModule.reduceProjectRailDisclosure(
       folderCollapsed,
-      { type: "toggle-selected-project" },
+      { type: "toggle-project", projectIndex: 0 },
     );
     const reopened = selectedProjectSection(
       renderInjectedProjectRail(projectRailModule, folderReopened),
@@ -909,7 +1116,7 @@ test("rendered collapse and reopen preserve selected Project facts and expanded 
 
     const showingFive = projectRailModule.reduceProjectRailDisclosure(
       folderReopened,
-      { type: "toggle-overflow" },
+      { type: "toggle-overflow", projectIndex: 0 },
     );
     const five = selectedProjectSection(
       renderInjectedProjectRail(projectRailModule, showingFive),
@@ -1119,6 +1326,14 @@ function projectToggle(section: string): string {
   return button;
 }
 
+function projectSwitchButton(section: string): string {
+  const button = section.match(
+    /<button[^>]*class="icon-btn project-switch-trigger"[^>]*>/u,
+  )?.[0];
+  assert.ok(button, "the Project switch is a separate native button");
+  return button;
+}
+
 function overflowButton(section: string): string {
   const button = section.match(
     /<button[^>]*class="more-row"[^>]*>[\s\S]*?<\/button>/u,
@@ -1241,6 +1456,41 @@ async function withProjectRailStateModule(
   }
 }
 
+async function withSessionRailRowModule(
+  assertion: (projectRailModule: SessionRailRowModule) => Promise<void> | void,
+): Promise<void> {
+  const exposeSessionRailRow: Plugin = {
+    name: "expose-session-rail-row",
+    enforce: "pre",
+    transform(source, id) {
+      if (
+        id
+          .replaceAll("\\", "/")
+          .endsWith("/src/workbench-shell/renderer/project-rail.tsx")
+      ) {
+        return `${source}\nexport { SessionRailRow };`;
+      }
+    },
+  };
+  const server = await createViteSsrTestServer({
+    appType: "custom",
+    configFile: false,
+    logLevel: "silent",
+    plugins: [exposeSessionRailRow, solid({ ssr: true })],
+    root: repositoryRoot,
+    server: { middlewareMode: true },
+  });
+
+  try {
+    const projectRailModule = (await server.ssrLoadModule(
+      "/src/workbench-shell/renderer/project-rail.tsx",
+    )) as SessionRailRowModule;
+    await assertion(projectRailModule);
+  } finally {
+    await server.close();
+  }
+}
+
 async function withProjectRailReconcileModule(
   assertion: (
     projectRailModule: ProjectRailReconcileModule,
@@ -1334,8 +1584,10 @@ async function withInjectedProjectRailModule(
       const signalSource = `  const [disclosure, setDisclosure] = createSignal(
     initialProjectRailDisclosureState(
       props.projectScopeEpoch,
-      activeCommands().length,
-      archivedCommands().length,
+      selectedActiveCommands().length,
+      selectedArchivedCommands().length,
+      selectedProjectIndex(),
+      props.view.projectSelection.projects.length,
     ),
   );`;
       const injectedSignalSource = `  const injectedDisclosure = (
@@ -1347,8 +1599,10 @@ async function withInjectedProjectRailModule(
     injectedDisclosure ??
       initialProjectRailDisclosureState(
         props.projectScopeEpoch,
-        activeCommands().length,
-        archivedCommands().length,
+        selectedActiveCommands().length,
+        selectedArchivedCommands().length,
+        selectedProjectIndex(),
+        props.view.projectSelection.projects.length,
       ),
   );`;
       assert.ok(

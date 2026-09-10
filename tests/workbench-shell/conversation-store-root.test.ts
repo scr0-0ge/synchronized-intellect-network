@@ -8,11 +8,11 @@ import { resolveConversationStoreRoot } from "../../src/workbench-shell/conversa
 test("owner and silently redirected launch contexts resolve one canonical conversation store", () => {
   const ownerProfile = "C:\\Users\\owner";
   const roaming = "C:\\Users\\owner\\AppData\\Roaming";
-  const ownerElectronUserData = win32.join(roaming, "unified-agent-workbench");
+  const ownerElectronUserData = win32.join(roaming, "synchronized-intellect-network");
   const redirectedRoaming =
     "C:\\Users\\owner\\AppData\\Local\\Packages\\AgentContainer\\LocalCache\\Roaming";
   const containerElectronUserData =
-    win32.join(redirectedRoaming, "unified-agent-workbench");
+    win32.join(redirectedRoaming, "synchronized-intellect-network");
 
   const ownerRoot = resolveConversationStoreRoot({
     platform: "win32",
@@ -29,14 +29,14 @@ test("owner and silently redirected launch contexts resolve one canonical conver
 
   assert.equal(
     ownerRoot,
-    win32.join(roaming, "unified-agent-workbench", "workbench-project-host"),
+    win32.join(roaming, "synchronized-intellect-network", "workbench-project-host"),
   );
   assert.equal(containerRoot, ownerRoot);
 });
 
 test("an explicit user-data directory remains an isolated conversation store", () => {
   const isolatedProfile =
-    "C:\\AgentFixtures\\seeded-profile\\unified-agent-workbench";
+    "C:\\AgentFixtures\\seeded-profile\\synchronized-intellect-network";
 
   assert.equal(
     resolveConversationStoreRoot({
@@ -55,6 +55,7 @@ test("an explicit isolated launch refuses every ordinary recovery root", () => {
   for (const discoverableProfile of [
     "Electron",
     "unified-agent-workbench",
+    "synchronized-intellect-network",
     "Unified Agent Workbench",
   ]) {
     const explicitUserDataDirectory = win32.join(
@@ -82,7 +83,7 @@ test("Windows root resolution fails closed without an absolute owner or isolated
       resolveConversationStoreRoot({
         platform: "win32",
         roamingAppDataDirectory: undefined,
-        electronUserDataDirectory: "C:\\Redirected\\unified-agent-workbench",
+        electronUserDataDirectory: "C:\\Redirected\\synchronized-intellect-network",
       }),
     { message: "canonical-conversation-store-root-unavailable" },
   );
@@ -125,6 +126,16 @@ test("production wires every conversation-store consumer through the resolved ro
   assert.match(
     source,
     /createHistoricalRecoveryLibrary\(\{\s+dataDirectory: join\(electronUserDataDirectory, "history-recovery-v1"\)/u,
+  );
+  assert.match(
+    source,
+    /const recoveryUserDataDirectory = dirname\(projectHostDataDirectory\);/u,
+    "discovery must classify the actual physical conversation store as current",
+  );
+  assert.match(
+    source,
+    /readAppDataDirectory: \(\) =>\s+process\.platform === "win32" && explicitUserDataDirectory === undefined\s+\? dirname\(recoveryUserDataDirectory\)\s+: app\.getPath\("appData"\),\s+currentUserDataDirectory: recoveryUserDataDirectory,/u,
+    "ordinary Windows recovery must find historical siblings in physical Roaming, not redirected Electron appData",
   );
   assert.match(
     source,

@@ -237,7 +237,7 @@ test("fake native acquisition reaches the accepted Host with byte-stable cancel/
   registerTestClosable(t, host);
   await waitForProject(
     host,
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   const registryPath = join(dataDirectory, "project-registry-v1.json");
   const ipcMain = new FakeIpcMain();

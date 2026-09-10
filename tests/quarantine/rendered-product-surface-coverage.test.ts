@@ -419,153 +419,91 @@ const BASELINE_SINGLE_TONE_TARGETS: Readonly<Record<string, readonly TextTarget[
  * to report 100%. Each digest seals the sorted surfaceId/signature/text keys;
  * any addition, removal, rename, or substitution requires an explicit census
  * update instead of silently moving the denominator.
+ * Automatic continuation adds one help node on 13 states in both tones (26
+ * sites); all prior sites remain. Its English and Chinese content is exercised
+ * by auto-continue-composer-entry.test.ts; this inventory measures English.
  */
 const FROZEN_BREADTH_INVENTORY: Readonly<Record<string, BreadthInventorySeal>> =
   Object.freeze({
-    "f123-empty-project-dark": { count: 71, sha256: "ea5fd50eaf79b7fc5e7c0f9a6e4ee00970cf2c966c468543756c7c8fdd068588" },
-    "f123-empty-project-light": { count: 75, sha256: "2a64f05288417de61a4dc5c3d4d6b5af6e5c760cdaeb1be808af2470e6e64e76" },
-    "f123-code-copy-idle-dark": { count: 113, sha256: "750072d4ff535225c346e2219dd13517cf6bb1ea46d63d44bf1905fee2ccf2c4" },
-    "f123-code-copy-idle-light": { count: 113, sha256: "2ceff70b975591b3517363e053c3c9fde3bc863fdd96801be39c114d54d3a3d2" },
-    "f123-code-copy-copied-dark": { count: 113, sha256: "b83628715c38393305aeb4ef760c8dc27ce917302493d6be45569faa86805c49" },
-    "f123-code-copy-copied-light": { count: 113, sha256: "c6d3de22fa79c14fc5631c445f48b33361779d717cef506beefcfd596d4fd17f" },
-    "f123-expanded-event-log-dark": { count: 126, sha256: "3baf81f921033b66bb3071e85292e99ed34a852eeb28daba0bbad125c793a947" },
-    "f123-expanded-event-log-light": { count: 126, sha256: "ddd49ca059922587b416a4285f6b62461003d4def2a2e3ce0b2832e308e3b406" },
-    "f123-failed-command-blocked-dark": { count: 82, sha256: "12daf93dae73bbf2ec402e94e8234057eb7ee8dad7cb7c82cf15f5a81bdafcdc" },
-    "f123-failed-command-blocked-light": { count: 85, sha256: "53b0f311efff1682dee4efdff686bc19d3ecfb5e503005707aafd961cbc1db57" },
-    "f123-recovery-required-blocked-dark": { count: 92, sha256: "ce44fc26f3aa6232575478f419de763fafa973250e3c7c56695e015ef6ca5bec" },
-    "f123-recovery-required-blocked-light": { count: 92, sha256: "c7366f6a2abfc8232d036f900a1c4f799a4b5e4b849081ea04c61c380547c3d9" },
-    "f123-active-turn-interrupt-dark": { count: 120, sha256: "4b9df6d3a9f4758ad9c8f09afe567452cc27c9f725ae7b21bd027162615c2cea" },
-    "f123-active-turn-interrupt-light": { count: 120, sha256: "bf79126d35b9fe9dce08bac25546383a264d837c6631556c217a1e5d3d7c274b" },
-    "f123-interrupted-turn-dark": { count: 112, sha256: "93b6a6278310ca0a18e408f41f63769d345f6a052dc24730c1a26906e286ed46" },
-    "f123-interrupted-turn-light": { count: 112, sha256: "3dfbc6e29938a6077b021eb1dd46fb13abf3f4afd068f493b587cdbb458b44f7" },
-    "f123-new-session-mode-dark": { count: 62, sha256: "43cb3369bc7c7000538f131bf886339c32d204cc8d37d0232d915fb2345d9b42" },
-    "f123-new-session-mode-light": { count: 62, sha256: "c1e4fd3fd4f5c09622d88c77a9d47d01d07568b3dbaa4217910f3b7897c560db" },
-    "f123-endpoint-picker-dark": { count: 79, sha256: "0a0db3f9e78d121f89b1d25c05518dd9f1df6b15353ffcb51ac2e0415d5574d4" },
-    "f123-endpoint-picker-light": { count: 79, sha256: "469727cc1d812079fa094ec439a475908d93100228496a8e3b3ebe665db4c512" },
-    "f123-model-picker-dark": { count: 78, sha256: "ed48396137281b22bb542cf312649e94d3dd3b14d01a9b87356ec62366f43966" },
-    "f123-model-picker-light": { count: 78, sha256: "8089b4018609f29b283cfc6c473d30fc0ebb4b47fcf7a9babfd3f813521b9fb0" },
-    "f123-work-intensity-picker-dark": { count: 85, sha256: "950f9bbb6f5aaf9aaf96c53532f46d29c1620bb7c2578266691bb1d1469eab49" },
-    "f123-work-intensity-picker-light": { count: 85, sha256: "f020ac229cdb8cf5ebc699ba36670495cc72fea304b989ff0dad7be61cfc62ce" },
-    "f123-profile-loading-dark": { count: 74, sha256: "2a1c4e6a1a14949915d46cef243a7d551e7faea85d2fde2b13eaf56572f8e0d1" },
-    "f123-profile-loading-light": { count: 74, sha256: "633965ce6ff0107b06d6abdee9bb73ef3a1b3b07a0e4752e35f150b2c2bff427" },
-    "f123-profile-unavailable-dark": { count: 76, sha256: "214a14ea55417b38edad7d2f0f1057290909fbf3134395e48045b202fab4d815" },
-    "f123-profile-unavailable-light": { count: 76, sha256: "64e3e242bfaa8b455602a3d889e6f2be4954c16d7c4e4c0aaf76d56c7c3d8da1" },
-    "f123-profile-without-default-dark": { count: 77, sha256: "906009c968884ac1565f55c7f719bcb050a20065714784e5e0008e3159f03c3d" },
-    "f123-profile-without-default-light": { count: 77, sha256: "7dc807ce11f5cc2614d236339d3879f15f9014a9fc16944597a8e9eb19e4b67d" },
-    // Resealed by worker 477. The denominator did not move -- both stay at 55
-    // text sites -- and 40 of the 42 surfaces hashed byte-identical. Only these
-    // two changed, and only because the runtime-not-located detail sentence
-    // was replaced: "No lookup path is exposed." became "Not found under any
-    // name that was checked.", the string public issue #2 names as the defect.
-    "f123-runtime-not-located-dark": { count: 55, sha256: "6473e22c1f946f32aa0145071bfc10374cdec675830a71c6e886037be3e6d1d5" },
-    "f123-runtime-not-located-light": { count: 55, sha256: "5d0f5a6c4e39babb13834b136e79187a1f0f790c55d23951c6f27f59af9a2c2e" },
-    "f123-archived-session-list-dark": { count: 113, sha256: "be1990583859504e4c6dfc76f47f17fffcea34572e65b52da7a8ab8347af9294" },
-    "f123-archived-session-list-light": { count: 113, sha256: "cbba8325bb2e543e9b55d66151fdbae5ba500c5eabfa2b6110fa63fd142de240" },
-    "f123-archived-session-blocked-dark": { count: 99, sha256: "767d276443007729b839f4e1a96fa1e8119a7997236308b6046a1f3716a59e40" },
-    "f123-archived-session-blocked-light": { count: 99, sha256: "1a69df6ae8fb4ffb5a3b42e2a6b8d443982d8bd3c22fa8744e43c09f9e969284" },
-    "f123-submission-pending-dark": { count: 114, sha256: "9c0e02adf5532476265442a6d50dc2acea3e3ea84ca3ebdc6c455a12220bfa0b" },
-    "f123-submission-pending-light": { count: 114, sha256: "771b4751e6a55266c49120a965496f0509b39a81539534fb547287dc4908429e" },
-    "f123-submission-error-dark": { count: 114, sha256: "20043674249660f1da149593282cac70540941c2748ed1631d33ca6a01769dc8" },
-    "f123-submission-error-light": { count: 114, sha256: "f4b4a0c598b0ae154c66959694c7d448978f0cbf45336d3fd6dedbd213adc094" },
-    "f123-unavailable-registered-project-dark": { count: 59, sha256: "1a6bc219b0acf269da04fd126918adfde285bacbec834f3bd3cf69a01ffd2e46" },
-    "f123-unavailable-registered-project-light": { count: 59, sha256: "c92033fbfeddc39a90bc8b6e6ad17a3bf818139c0f91a45cb3e46fe61c6e238d" },
+    /* 2026-09-08 causal re-seal: beadc5c intentionally moved the two
+       collapsed-Project notes from painted .proj-empty rows to each Project
+       toggle's title so collapsed Projects pack tightly. Reverting that commit
+       restores div.proj-empty (available copy) and div.proj-empty#2
+       (unavailable copy) on every surface; restoring it removes both again.
+       cdecbf5 also intentionally replaced three rendered "Unknown" profile
+       values with "Pending observation" on the active-turn surfaces and "Not
+       observed" on the interrupted-turn surfaces, changing those four hashes
+       without changing their counts. */
+    "f123-empty-project-dark": { count: 70, sha256: "7e7988fa27f40a4978625192e5be88849d7d07cd0fc2481b93231a63373bb1da" },
+    "f123-empty-project-light": { count: 74, sha256: "4c4451784413c7db1c1dc5648276a02be01e3e767399d4daa83a9fca14bcd19a" },
+    "f123-code-copy-idle-dark": { count: 112, sha256: "b0645766f8518ec108f62ef2bb54a28d6fa0b7a2c0aa5a275eebf75e568fdc86" },
+    "f123-code-copy-idle-light": { count: 112, sha256: "985dc5e5f67167bc97e0c61f516077076b680058b9ba2476d11dcc03b2e49e14" },
+    "f123-code-copy-copied-dark": { count: 112, sha256: "f8d474caba8b0c6edbe4ddcee0d6b0c742147f098e1c30bf51fc2a23eed82cba" },
+    "f123-code-copy-copied-light": { count: 112, sha256: "bed668c55e8b1d6dbd04ae29b18bedd77426ffeded73887d49cfc4ef4129732a" },
+    "f123-expanded-event-log-dark": { count: 125, sha256: "146b551957e610adfd9ec4c4a823755cb050326000957f6f3b5ee0ebc35f8bb7" },
+    "f123-expanded-event-log-light": { count: 125, sha256: "abed095014aeeffcca4877c2300f7c44af9cba5e5591fff31bcef50c3282604c" },
+    /* A selected blocked Session names its fresh-profile exit instead of falsely
+       claiming the current selection is missing; measured site counts stay fixed. */
+    "f123-failed-command-blocked-dark": { count: 80, sha256: "2b544c2a46bccdf87c0d578a7a8bc49f05b6f2b2774c88a96e44c5ccb1794e57" },
+    "f123-failed-command-blocked-light": { count: 83, sha256: "945e424778ba16e38b4effda84acd458e9342ab2762240b809431107a248ee9c" },
+    "f123-recovery-required-blocked-dark": { count: 90, sha256: "57bb9f8167d944de939369009725a904c1a44573a911d2fd5ae5100d12c21be3" },
+    "f123-recovery-required-blocked-light": { count: 90, sha256: "83093a2eb037e543c530acb72214c14cfbe966f573a6707942739a49501c4af1" },
+    "f123-active-turn-interrupt-dark": { count: 118, sha256: "6be82827f2068252591a2a005d612c13f182516223923b1b6dc58275d0c08d77" },
+    "f123-active-turn-interrupt-light": { count: 118, sha256: "db4fa1a4e8a271ff68e098b320ad24f9d01c65eefd8bfedf3e5608d12e1c2a2d" },
+    "f123-interrupted-turn-dark": { count: 111, sha256: "b29c8a1406f7e90e204273e9af0f05f2bc82ec7dd1d84d4b92d694358c80c8cf" },
+    "f123-interrupted-turn-light": { count: 111, sha256: "13a090f20065e6c95b47ce9ca86a048ff614193cf023dfcbb2af3f31384a446e" },
+    "f123-new-session-mode-dark": { count: 61, sha256: "510d3d662a777b1a6cdacba34daa2e90aac947b62186b9d63c9c094d164d3b35" },
+    "f123-new-session-mode-light": { count: 61, sha256: "720b8ec5d1b894a09276c69c6083df4f59bdda3855658e64805efd3e10c34d6f" },
+    /* Ticket 25 census re-seal (worker 20): the family facades renamed the
+       desktop segment labels ("Codex desktop"/"Claude Code desktop" became
+       "Subscription") and the hidden family backends left the picker,
+       statusbar and runtime-not-located surfaces, so every surface carrying
+       endpoint secondary text re-seals from the post-facade measurement.
+       Counts are unchanged everywhere: no text site left the census, the
+       substitutions are the renamed segment labels and the merged rows. */
+    "f123-endpoint-picker-dark": { count: 77, sha256: "55f5b557812673d0e3f339482ae65b83fecaf3f4a7d3a570626a95a0e17fbef6" },
+    "f123-endpoint-picker-light": { count: 77, sha256: "72b4daacec49b3b9ff02d2399aa9b630f2b9da0187c505c3c459a46ab276c3c0" },
+    "f123-model-picker-dark": { count: 77, sha256: "194758df010d0fe2befc9f019f5f84d2f3d48c50927bce516fb49fa376bdb4e8" },
+    "f123-model-picker-light": { count: 77, sha256: "760159ace33a4069383d50a6d6fb793db6c9354e1cb8d4705a4b32138f6f19d2" },
+    "f123-work-intensity-picker-dark": { count: 84, sha256: "11da8753af4f2e973112af8398e341009b1ffc4f135689a92eeec70161b37d76" },
+    "f123-work-intensity-picker-light": { count: 84, sha256: "39eb55f67fa85254228c9a3d89c68670b0d0e0865e82cd4be500bce70b84dc18" },
+    "f123-profile-loading-dark": { count: 73, sha256: "323238766cab0522a895546b4731850e20d1a3f56750d4ddfc64bd73e69bcec8" },
+    "f123-profile-loading-light": { count: 73, sha256: "54e2fa3cb5ec053955565931e0fbaf1659dea850fcd41c165044a1a91d5321d4" },
+    "f123-profile-unavailable-dark": { count: 74, sha256: "0eaa53cca57fbddc50f36d981214462912a00ac1df3e2819c93ec48cab408b85" },
+    "f123-profile-unavailable-light": { count: 74, sha256: "0ab91c875d7a4864458db263ab500cbb8f641129a1da25910190b50ea351c170" },
+    "f123-profile-without-default-dark": { count: 75, sha256: "ac8a081509771342f291b912a2f81f44a0a5d4ff9feac5b75d3b2a2b6e497719" },
+    "f123-profile-without-default-light": { count: 75, sha256: "bea31d228f45512a98edad827358fefae6c1fdf5ae37916f92e4788ede0b68af" },
+    /* main-resync census re-seal (worker 19): both lines of descent edited the
+       runtime-not-located surface independently -- the lane's WO23 reworded the
+       runtimeBoundary sentence ("never asks for a password, API key, or token"
+       became "never asks for or stores subscription credentials; a provider
+       API key saved in Settings is encrypted with your OS user account."),
+       and main's worker 477 replaced "No lookup path is exposed." with "Not
+       found under any name that was checked." (issue #2). The merged tree
+       carries BOTH sentences, so neither sealed hash was valid any more;
+       re-sealed from the post-merge rendered-surface measurement. */
+    "f123-runtime-not-located-dark": { count: 53, sha256: "5b39a05bdc7fae09f6d813872800c5271115a833804ca62c2e711e66a801d615" },
+    "f123-runtime-not-located-light": { count: 53, sha256: "2f400d6ff3b0c991279f261da35ac8451d959690c0f95a763c75a9fe42416d5c" },
+    "f123-archived-session-list-dark": { count: 112, sha256: "dd143599f232b9163cc810b4c9f593f8952a49544250f62627661f31ac1451fd" },
+    "f123-archived-session-list-light": { count: 112, sha256: "eb21d602e3895187ba6dc7dff1f3b1db49aeb9aacc438058594361bdc2018b9d" },
+    /* The archived blocked surface carries the same selected-Session footer. */
+    "f123-archived-session-blocked-dark": { count: 97, sha256: "e961effb95d5942af252fd5ad8c982c18a050c51ba7cca77047e59b0232be062" },
+    "f123-archived-session-blocked-light": { count: 97, sha256: "bd7be25b75d3b00fcd1f93ae6feebcdf74a08c464149f15218bf8ff05be7a862" },
+    "f123-submission-pending-dark": { count: 113, sha256: "857d7cf2c885bbc39c384e6b5d6e2f0f31e75b58860ed890eacb0ef278dcbb90" },
+    "f123-submission-pending-light": { count: 113, sha256: "af998d01191535efe4ed378abe76b1722551f2128106d9e2bf22304c60676028" },
+    "f123-submission-error-dark": { count: 113, sha256: "546f190318093b83b27a496a56c81bc56d40efafdb867ea691fac8ee995be8b8" },
+    "f123-submission-error-light": { count: 113, sha256: "9b68eb5047e5b15ac1b5290190dcf47f0a989bd1ec028fb26c7490c90732ba2a" },
+    "f123-unavailable-registered-project-dark": { count: 58, sha256: "900c36a254a71df7a0fc431795151da39958e8a59a84c17ad60da86c5deef4b4" },
+    "f123-unavailable-registered-project-light": { count: 58, sha256: "5c2b83116d462bf453cec7ba542838376b5f1c84ec906677a6ded283e51e46ef" },
   });
 
 /*
  * Widening is allowed to discover product defects, not to erase them. This is
  * an exact ratchet: a new failure, deterioration > 0.05, a changed threshold,
- * or an entry that has since passed all fails the suite. The issue report owns
- * the product follow-up; this Work Order owns tests only.
+ * or an entry that has since passed all fails the suite. Keep only active,
+ * owner-reserved shortfalls here; the current rendered inventory has none.
  */
-const DARK_SEND_KBD_SHORTFALL_SURFACES = Object.freeze([
-  "f123-active-turn-interrupt-dark",
-  "f123-archived-session-list-dark",
-  "f123-code-copy-copied-dark",
-  "f123-code-copy-idle-dark",
-  "f123-empty-project-dark",
-  "f123-endpoint-picker-dark",
-  "f123-expanded-event-log-dark",
-  "f123-interrupted-turn-dark",
-  "f123-new-session-mode-dark",
-  "f123-profile-loading-dark",
-  "f123-profile-unavailable-dark",
-  "f123-profile-without-default-dark",
-  "f123-runtime-not-located-dark",
-  "f123-submission-pending-dark",
-  "f123-unavailable-registered-project-dark",
-]);
-
-const EXPECTED_BREADTH_SHORTFALLS: readonly ExpectedBreadthShortfall[] = Object.freeze([
-  ...DARK_SEND_KBD_SHORTFALL_SURFACES.map((surfaceId) => ({
-    surfaceId,
-    signature: "kbd#2",
-    text: "Ctrl ↵",
-    measuredRatio: 3.835,
-    threshold: 4.5,
-    reason:
-      "The dark Send-button shortcut uses the known tertiary palette shortfall; product palette remediation is outside this test-only Work Order.",
-  })),
-  {
-    surfaceId: "f123-model-picker-dark",
-    signature: "kbd#2",
-    text: "Ctrl ↵",
-    measuredRatio: 3.951,
-    threshold: 4.5,
-    reason:
-      "The picker changes the measured ground but leaves the dark Send-button shortcut below AA; product remediation is out of scope.",
-  },
-  ...[
-    ["span.rt-codex.rt-name", "Codex", 3.944],
-    ["span.rt-codex.sr-model", "Solution 5.6", 3.944],
-    ["span.sep", "·", 4.421],
-  ].map(([signature, text, measuredRatio]) => ({
-    surfaceId: "f123-archived-session-blocked-light",
-    signature: String(signature),
-    text: String(text),
-    measuredRatio: Number(measuredRatio),
-    threshold: 4.5,
-    reason:
-      "Light archived-session runtime metadata is below AA on its measured row ground; report only under this Work Order.",
-  })),
-  ...[
-    ["f123-endpoint-picker-dark", "span.endpoint-status-label", "· Catalog ready", 3.932],
-    ["f123-endpoint-picker-dark", "span.opt-sub", "Codex desktop", 3.932],
-    ["f123-endpoint-picker-light", "span.endpoint-status-label", "· Catalog ready", 4.233],
-    ["f123-endpoint-picker-light", "span.opt-sub", "Codex desktop", 4.278],
-  ].map(([surfaceId, signature, text, measuredRatio]) => ({
-    surfaceId: String(surfaceId),
-    signature: String(signature),
-    text: String(text),
-    measuredRatio: Number(measuredRatio),
-    threshold: 4.5,
-    reason:
-      "Endpoint secondary/status text is below AA on the measured picker ground; product remediation belongs to a follow-up.",
-  })),
-  ...[
-    ["f123-work-intensity-picker-dark", "span.count", "0 / 8,000", 2.884],
-    [
-      "f123-work-intensity-picker-dark",
-      "span#2",
-      "Your draft stays local until the Session is durably accepted.",
-      2.884,
-    ],
-    ["f123-work-intensity-picker-light", "span.count", "0 / 8,000", 3.264],
-    [
-      "f123-work-intensity-picker-light",
-      "span#2",
-      "Your draft stays local until the Session is durably accepted.",
-      3.264,
-    ],
-  ].map(([surfaceId, signature, text, measuredRatio]) => ({
-    surfaceId: String(surfaceId),
-    signature: String(signature),
-    text: String(text),
-    measuredRatio: Number(measuredRatio),
-    threshold: 4.5,
-    reason:
-      "Work-intensity draft/count tertiary text is below AA on the measured picker ground; report only under this Work Order.",
-  })),
-]);
+const EXPECTED_BREADTH_SHORTFALLS: readonly ExpectedBreadthShortfall[] = Object.freeze([]);
 
 const REQUESTS = Object.freeze(
   PROJECT_SURFACES.flatMap((surface) =>

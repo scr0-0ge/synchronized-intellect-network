@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { hostedProjectView } from "./w26-hosted-project-view.ts";
+
 import {
   reconstructWorkbenchProjectSelectionRequest,
   sanitizeWorkbenchCreateProjectResult,
@@ -47,9 +49,11 @@ test("the hosted Project public boundary reconstructs path-free snapshots and re
     },
   });
   assert.equal(sanitizedView.ok, true);
-  if (!sanitizedView.ok) assert.fail("Expected a sanitized hosted view.");
+  if (!sanitizedView.ok || "empty" in sanitizedView) {
+    assert.fail("Expected a sanitized hosted view.");
+  }
   assert.deepEqual(
-    sanitizedView.view.projectSelection.projects.map((project) =>
+    hostedProjectView(sanitizedView).projectSelection.projects.map((project) =>
       Object.keys(project).sort(),
     ),
     [
@@ -260,22 +264,25 @@ test("the hosted Project boundary preserves exact user text and fails closed on 
     hostedResult({ kind: "user-message", text }),
   );
   assert.equal(exact.ok, true);
-  if (!exact.ok) assert.fail("Expected the exact public user event.");
-  assert.deepEqual(exact.view.commands[0]?.session?.timeline, [
+  if (!exact.ok || "empty" in exact) {
+    assert.fail("Expected the exact public user event.");
+  }
+  const exactView = exact.view;
+  assert.deepEqual(exactView.commands[0]?.session?.timeline, [
     { kind: "user-message", text },
   ]);
   assert.equal(
-    exact.view.commands[0]?.session?.removalKey,
+    exactView.commands[0]?.session?.removalKey,
     sessionRemovalKey,
   );
   assert.equal(
-    exact.view.commands[0]?.session?.timeline[0]?.kind === "user-message"
-      ? exact.view.commands[0].session.timeline[0].text
+    exactView.commands[0]?.session?.timeline[0]?.kind === "user-message"
+      ? exactView.commands[0].session.timeline[0].text
       : undefined,
     text,
   );
-  assert.equal(Object.isFrozen(exact.view.commands[0]?.session?.timeline), true);
-  assert.equal(Object.isFrozen(exact.view.commands[0]?.session?.timeline[0]), true);
+  assert.equal(Object.isFrozen(exactView.commands[0]?.session?.timeline), true);
+  assert.equal(Object.isFrozen(exactView.commands[0]?.session?.timeline[0]), true);
 
   const extraKey = sanitizeWorkbenchHostedProjectResult(
     hostedResult({

@@ -921,8 +921,11 @@ test("profile loading inspects once and exposes every safe model relation with t
     "loadDirectSessionProfile",
     "mutateSessionMetadata",
     "observeProject",
+    "observeUserInput",
     "readTurnActivity",
+    "readUserInput",
     "removeSession",
+    "respondToUserInput",
     "steerActiveTurn",
     "submitDirectInput",
     "useDirectSessionProfileAsDefault",
@@ -1171,7 +1174,7 @@ test("two fake endpoints resolve independent defaults from one endpoint-keyed ve
         {
           ok: true,
           status: "saved",
-          message: "Codex Session Profile default was durably saved.",
+          message: "Session Profile default was durably saved.",
         },
       );
     }
@@ -1584,7 +1587,7 @@ test("one valid exact-snapshot default request performs one preference write and
   assert.deepEqual(result, {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
   });
   assert.equal(Object.isFrozen(result), true);
   assert.deepEqual(preferences.savedSelections, [
@@ -1611,8 +1614,11 @@ test("one valid exact-snapshot default request performs one preference write and
     "loadDirectSessionProfile",
     "mutateSessionMetadata",
     "observeProject",
+    "observeUserInput",
     "readTurnActivity",
+    "readUserInput",
     "removeSession",
+    "respondToUserInput",
     "steerActiveTurn",
     "submitDirectInput",
     "useDirectSessionProfileAsDefault",
@@ -1934,7 +1940,7 @@ test("an in-flight default save keeps its captured mapping across refresh and de
   assert.deepEqual(await save, {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
   });
   await close;
   assert.equal(closeSettled, true);
@@ -2082,7 +2088,7 @@ test("catalog-default and replacement loads do not coalesce, never default-fallb
     {
       ok: true,
       status: "saved",
-      message: "Codex Session Profile default was durably saved.",
+      message: "Session Profile default was durably saved.",
     },
   );
   assert.equal(preferences.saveCalls, 1);
@@ -2308,6 +2314,7 @@ test("an exact loaded selection returns durable acceptance before the chosen Cod
   const databasePath = join(temporaryDirectory, "direct.sqlite");
   await mkdir(projectDirectory);
   const adapter = new HeldSuccessfulAdapter();
+  registerTestCleanup(t, () => adapter.release());
   const backend = await createRegisteredWorkbenchBackend(t, {
     projectDirectory,
     databasePath,
@@ -2362,8 +2369,11 @@ test("an exact loaded selection returns durable acceptance before the chosen Cod
     "loadDirectSessionProfile",
     "mutateSessionMetadata",
     "observeProject",
+    "observeUserInput",
     "readTurnActivity",
+    "readUserInput",
     "removeSession",
+    "respondToUserInput",
     "steerActiveTurn",
     "submitDirectInput",
     "useDirectSessionProfileAsDefault",
@@ -3332,8 +3342,11 @@ test("production backend observes the real ProjectChannel with zero act or runti
     "loadDirectSessionProfile",
     "mutateSessionMetadata",
     "observeProject",
+    "observeUserInput",
     "readTurnActivity",
+    "readUserInput",
     "removeSession",
+    "respondToUserInput",
     "steerActiveTurn",
     "submitDirectInput",
     "useDirectSessionProfileAsDefault",
@@ -3434,6 +3447,15 @@ function endpointDiscovery(
     statuses: [
       { endpointId: "codex-desktop", category: codexCategory },
       { endpointId: "claude-code-desktop", category: claudeCategory },
+      // The legacy single-adapter path leaves the static-key endpoints
+      // (GLM, Kimi, DeepSeek, kimi-platform, claude-api, codex-api) not
+      // inspected; they have no legacy runtime to inspect.
+      { endpointId: "glm-coding-plan", category: "not-inspected" },
+      { endpointId: "kimi-code", category: "not-inspected" },
+      { endpointId: "deepseek-api", category: "not-inspected" },
+      { endpointId: "kimi-platform", category: "not-inspected" },
+      { endpointId: "claude-api", category: "not-inspected" },
+      { endpointId: "codex-api", category: "not-inspected" },
     ],
   };
 }

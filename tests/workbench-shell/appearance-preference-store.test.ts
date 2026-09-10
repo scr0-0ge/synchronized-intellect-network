@@ -155,7 +155,7 @@ test("Ask when needed survives a clean restart without resetting appearance and 
     "ask-when-needed",
   );
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 5,
+    schemaVersion: 7,
     appearance: {
       tone: "dark",
       crt: "blocks",
@@ -164,6 +164,11 @@ test("Ask when needed survives a clean restart without resetting appearance and 
       language: "en",
     },
     claudePermissionHandling: "ask-when-needed",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-desktop",
+      kimi: "kimi-code",
+    },
     runtimeExecutables: { codex: "", claude: "" },
   });
   await reopened.close();
@@ -196,6 +201,240 @@ test("Claude permission handling save admits only the two exact choices before t
   await store.close();
 });
 
+test("family endpoint preferences round-trip per family, default from a v4 document, and admit only the exact members", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const filePath = join(directory, "appearance.json");
+  await writeFile(
+    filePath,
+    `${JSON.stringify({
+      schemaVersion: 4,
+      appearance: {
+        tone: "light",
+        crt: "full",
+        phosphor: "amber",
+        phosphorTier: "c",
+        language: "zh-CN",
+      },
+      claudePermissionHandling: "ask-when-needed",
+    })}\n`,
+    "utf8",
+  );
+  const store = createRegisteredAppearancePreferenceStore(t, { filePath });
+
+  // A v4 document carries no endpoint preferences: the per-family defaults
+  // (each exactly the automatic order) serve.
+  assert.deepEqual(await store.readEndpointPreferences(), {
+    claude: "claude-code-desktop",
+    codex: "codex-desktop",
+    kimi: "kimi-code",
+  });
+
+  // Each family's slot saves and reads back on its own.
+  assert.equal(
+    await store.saveEndpointPreference("kimi-platform"),
+    "kimi-platform",
+  );
+  assert.equal(await store.saveEndpointPreference("claude-api"), "claude-api");
+  assert.equal(await store.saveEndpointPreference("codex-api"), "codex-api");
+  assert.deepEqual(await store.readEndpointPreferences(), {
+    claude: "claude-api",
+    codex: "codex-api",
+    kimi: "kimi-platform",
+  });
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
+    schemaVersion: 7,
+    appearance: {
+      tone: "light",
+      crt: "full",
+      phosphor: "amber",
+      phosphorTier: "c",
+      language: "zh-CN",
+    },
+    claudePermissionHandling: "ask-when-needed",
+    endpointPreference: {
+      claude: "claude-api",
+      codex: "codex-api",
+      kimi: "kimi-platform",
+    },
+    runtimeExecutables: { codex: "", claude: "" },
+  });
+  await store.close();
+
+  const reopened = createRegisteredAppearancePreferenceStore(t, { filePath });
+  assert.deepEqual(await reopened.readEndpointPreferences(), {
+    claude: "claude-api",
+    codex: "codex-api",
+    kimi: "kimi-platform",
+  });
+  assert.equal(
+    await reopened.readClaudePermissionHandling(),
+    "ask-when-needed",
+  );
+  await reopened.close();
+
+  const invalid = createRegisteredAppearancePreferenceStore(t, {
+    filePath: join(directory, "invalid.json"),
+  });
+  const saveUnknown = invalid.saveEndpointPreference as unknown as (
+    value: unknown,
+  ) => Promise<unknown>;
+  for (const value of [
+    null,
+    true,
+    "kimi",
+    "kimi-deployment",
+    "auto",
+    "claude",
+    "codex-desktop ",
+  ]) {
+    await rejectsAppearance(saveUnknown(value), "preferences-invalid");
+  }
+  await invalid.close();
+});
+
+// Ticket 25 migration: the pre-family v6 document carries the Kimi facade
+// preference under its old kimi-only key; the family record reads the kimi
+// value verbatim and defaults claude/codex (subscription first).
+test("a v6 document's kimiEndpointPreference migrates into the endpointPreference record's kimi slot", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const filePath = join(directory, "v6-migration.json");
+  const v6Bytes = `${JSON.stringify({
+    schemaVersion: 6,
+    appearance: {
+      tone: "light",
+      crt: "full",
+      phosphor: "amber",
+      phosphorTier: "c",
+      language: "zh-CN",
+    },
+    claudePermissionHandling: "ask-when-needed",
+    kimiEndpointPreference: "kimi-platform",
+    runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
+  })}\n`;
+  await writeFile(filePath, v6Bytes, "utf8");
+  const store = createRegisteredAppearancePreferenceStore(t, { filePath });
+
+  assert.deepEqual(await store.readEndpointPreferences(), {
+    claude: "claude-code-desktop",
+    codex: "codex-desktop",
+    kimi: "kimi-platform",
+  });
+  assert.deepEqual(await store.readRuntimeExecutables(), {
+    codex: "D:\\codex\\codex.exe",
+    claude: "",
+  });
+  assert.equal(await readFile(filePath, "utf8"), v6Bytes);
+  // The next write upgrades the document to the v7 family record.
+  await store.saveEndpointPreference("codex-api");
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
+    schemaVersion: 7,
+    appearance: {
+      tone: "light",
+      crt: "full",
+      phosphor: "amber",
+      phosphorTier: "c",
+      language: "zh-CN",
+    },
+    claudePermissionHandling: "ask-when-needed",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-api",
+      kimi: "kimi-platform",
+    },
+    runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
+  });
+  await store.close();
+});
+
+// A v7 record with a member under the wrong family key fails closed.
+test("a v7 endpointPreference record with a misplaced family value fails closed without rewrite", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const filePath = join(directory, "v7-invalid.json");
+  const bytes =
+    '{"schemaVersion":7,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en"},"claudePermissionHandling":"without-asking","endpointPreference":{"claude":"codex-desktop","codex":"codex-desktop","kimi":"kimi-code"},"runtimeExecutables":{"codex":"","claude":""}}';
+  await writeFile(filePath, bytes, "utf8");
+  const store = createRegisteredAppearancePreferenceStore(t, { filePath });
+  await rejectsAppearance(store.readEndpointPreferences(), "preferences-invalid");
+  assert.equal(await readFile(filePath, "utf8"), bytes);
+  await store.close();
+});
+
+// main-resync: both lines minted a v5 with their own third field. The merged
+// reader tells the two shapes apart by exact key set and defaults the field
+// the document never carried; only v6 carries both.
+test("both schemaVersion 5 lineages stay readable and default the field they never wrote", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const appearance = {
+    tone: "light",
+    crt: "full",
+    phosphor: "amber",
+    phosphorTier: "c",
+    language: "zh-CN",
+  };
+
+  const lanePath = join(directory, "lane-v5.json");
+  await writeFile(
+    lanePath,
+    `${JSON.stringify({
+      schemaVersion: 5,
+      appearance,
+      claudePermissionHandling: "ask-when-needed",
+      kimiEndpointPreference: "kimi-platform",
+    })}\n`,
+    "utf8",
+  );
+  const laneStore = createRegisteredAppearancePreferenceStore(t, {
+    filePath: lanePath,
+  });
+  assert.deepEqual(await laneStore.readEndpointPreferences(), {
+    claude: "claude-code-desktop",
+    codex: "codex-desktop",
+    kimi: "kimi-platform",
+  });
+  assert.deepEqual(await laneStore.readRuntimeExecutables(), {
+    codex: "",
+    claude: "",
+  });
+  await laneStore.close();
+
+  const mainPath = join(directory, "main-v5.json");
+  await writeFile(
+    mainPath,
+    `${JSON.stringify({
+      schemaVersion: 5,
+      appearance,
+      claudePermissionHandling: "ask-when-needed",
+      runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
+    })}\n`,
+    "utf8",
+  );
+  const mainStore = createRegisteredAppearancePreferenceStore(t, {
+    filePath: mainPath,
+  });
+  assert.deepEqual(await mainStore.readRuntimeExecutables(), {
+    codex: "D:\\codex\\codex.exe",
+    claude: "",
+  });
+  assert.deepEqual(await mainStore.readEndpointPreferences(), {
+    claude: "claude-code-desktop",
+    codex: "codex-desktop",
+    kimi: "kimi-code",
+  });
+  await mainStore.close();
+});
+
 test("one exact non-default appearance survives a clean store restart and cannot pollute direct-profile preferences", async (t) => {
   const directory = await createTestDirectory(
     t,
@@ -221,9 +460,14 @@ test("one exact non-default appearance survives a clean store restart and cannot
   assert.equal(
     await readFile(appearancePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 5,
+      schemaVersion: 7,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
+      endpointPreference: {
+        claude: "claude-code-desktop",
+        codex: "codex-desktop",
+        kimi: "kimi-code",
+      },
       runtimeExecutables: { codex: "", claude: "" },
     })}\n`,
   );
@@ -287,6 +531,9 @@ test("old, malformed, extra, repeated, and non-exact appearance documents fail c
     '{"schemaVersion":4,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en"},"claudePermissionHandling":"future-mode"}',
     '{"schemaVersion":4,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en"},"claudePermissionHandling":"without-asking","extra":true}',
     '{"schemaVersion":4,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en"}}',
+    '{"schemaVersion":5,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en"},"claudePermissionHandling":"without-asking","kimiEndpointPreference":"kimi-deployment"}',
+    '{"schemaVersion":5,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en"},"claudePermissionHandling":"without-asking","kimiEndpointPreference":"kimi-platform","extra":true}',
+    '{"schemaVersion":5,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en"},"claudePermissionHandling":"without-asking"}',
     '{"schemaVersion":3,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral","phosphorTier":"b","language":"en","language":"zh-CN"}}',
     '{"schemaVersion":1,"schemaVersion":1,"appearance":{"tone":"dark","crt":"screen","phosphor":"neutral"}}',
     '{"schemaVersion":1,"appearance":{"tone":"dark","tone":"light","crt":"screen","phosphor":"neutral"}}',
@@ -428,9 +675,14 @@ test("close flushes an in-flight appearance save and rejects every later operati
   assert.equal(
     await readFile(filePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 5,
+      schemaVersion: 7,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
+      endpointPreference: {
+        claude: "claude-code-desktop",
+        codex: "codex-desktop",
+        kimi: "kimi-code",
+      },
       runtimeExecutables: { codex: "", claude: "" },
     })}\n`,
   );

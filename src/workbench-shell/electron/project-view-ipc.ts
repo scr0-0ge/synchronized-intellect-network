@@ -1,4 +1,8 @@
 import {
+  WORKBENCH_READ_USER_INPUT_CHANNEL,
+  WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
+  WORKBENCH_USER_INPUT_CHANGED_CHANNEL,
+  type WorkbenchUserInputBridge,
   WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL,
   WORKBENCH_CREATE_PROJECT_CHANNEL,
   WORKBENCH_DISCOVER_PROJECT_HISTORIES_CHANNEL,
@@ -81,6 +85,7 @@ import {
   sanitizeWorkbenchDirectSessionProfileResult,
   sanitizeWorkbenchSubmissionResult,
   sanitizeWorkbenchHostedProjectResult,
+  createWorkbenchProjectTransferEncoder,
   sanitizeWorkbenchInterruptResult,
   sanitizeWorkbenchSteerResult,
   sanitizeWorkbenchOpenProjectResult,
@@ -91,10 +96,12 @@ import {
 } from "../result-sanitizer.ts";
 import type { WorkbenchCreateProjectController } from "../create-project-controller.ts";
 
+import { reconstructUserInputRead, reconstructUserInputResponse, sanitizeUserInputResult, sanitizeUserInputResponseResult } from "../user-input-sanitizer.ts";
+
 type BoundaryListener = (...values: unknown[]) => unknown;
 
 export interface RendererSender {
-  send(channel: typeof WORKBENCH_PROJECT_VIEW_CHANNEL, value: unknown): void;
+  send(channel: typeof WORKBENCH_PROJECT_VIEW_CHANNEL | typeof WORKBENCH_USER_INPUT_CHANGED_CHANNEL, value: unknown): void;
   isDestroyed(): boolean;
   on(event: string, listener: BoundaryListener): void;
   removeListener(event: string, listener: BoundaryListener): void;
@@ -121,6 +128,8 @@ export interface IpcMainBoundary {
   ): void;
   handle(
     channel:
+      | typeof WORKBENCH_READ_USER_INPUT_CHANNEL
+      | typeof WORKBENCH_RESPOND_USER_INPUT_CHANNEL
       | typeof WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL
       | typeof WORKBENCH_CREATE_PROJECT_CHANNEL
       | typeof WORKBENCH_DISCOVER_PROJECT_HISTORIES_CHANNEL
@@ -139,6 +148,8 @@ export interface IpcMainBoundary {
   ): void;
   removeHandler(
     channel:
+      | typeof WORKBENCH_READ_USER_INPUT_CHANNEL
+      | typeof WORKBENCH_RESPOND_USER_INPUT_CHANNEL
       | typeof WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL
       | typeof WORKBENCH_CREATE_PROJECT_CHANNEL
       | typeof WORKBENCH_DISCOVER_PROJECT_HISTORIES_CHANNEL
@@ -156,7 +167,7 @@ export interface IpcMainBoundary {
   ): void;
 }
 
-export interface ProjectViewSource {
+export interface ProjectViewSource extends Partial<WorkbenchUserInputBridge> {
   observeProject(listener: WorkbenchHostedProjectListener): () => void;
   registerTrustedProject(
     directory: string,
@@ -212,6 +223,7 @@ type ObservationRecord = {
   awaitingAcquisitionView: boolean;
   readonly sender: RendererSender;
   sourceDispose: () => void;
+  encode: ReturnType<typeof createWorkbenchProjectTransferEncoder>;
 };
 
 type RecoveryObservationPhase =
@@ -274,6 +286,7 @@ export function installWorkbenchProjectViewIpc(options: {
       awaitingAcquisitionView: false,
       sender,
       sourceDispose: () => undefined,
+      encode: createWorkbenchProjectTransferEncoder(),
     };
     activeObservation = record;
     if (options.source === null) {
@@ -284,8 +297,11 @@ export function installWorkbenchProjectViewIpc(options: {
       const sourceDispose = options.source.observeProject((result) =>
         sendResult(record, result),
       );
-      record.sourceDispose = sourceDispose;
-      if (!record.active) sourceDispose();
+      const disposeInput = options.source.observeUserInput?.(() => {
+        if (record.active && !record.sender.isDestroyed()) record.sender.send(WORKBENCH_USER_INPUT_CHANGED_CHANNEL, null);
+      });
+      record.sourceDispose = () => { sourceDispose(); disposeInput?.(); };
+      if (!record.active) record.sourceDispose();
     } catch {
       sendResult(record, publicHostedProjectFailure());
     }
@@ -334,7 +350,7 @@ export function installWorkbenchProjectViewIpc(options: {
     }
     const sanitized = sanitizeWorkbenchHostedProjectResult(result);
     try {
-      record.sender.send(WORKBENCH_PROJECT_VIEW_CHANNEL, sanitized);
+      record.sender.send(WORKBENCH_PROJECT_VIEW_CHANNEL, record.encode(sanitized));
     } catch {
       endObservation(record);
       return;
@@ -344,6 +360,8 @@ export function installWorkbenchProjectViewIpc(options: {
         record.awaitingAcquisitionView = true;
       }
       if (!record.awaitingAcquisitionView) endObservation(record);
+    } else if ("empty" in sanitized) {
+      record.awaitingAcquisitionView = false;
     } else {
       record.awaitingAcquisitionView = false;
       observeRecoveryView();
@@ -415,6 +433,22 @@ export function installWorkbenchProjectViewIpc(options: {
         ),
       publicInterruptUnavailable(),
     );
+  };
+
+  const readUserInputHandler: BoundaryListener = async (...values) => {
+    const request = values.length === 2 ? reconstructUserInputRead(values[1]) : undefined;
+    if (disposed || !actionOpen || acquisitionPending() || !owningSender(values[0], options.window) ||
+        !request || !options.source?.readUserInput) return { ok: false };
+    try { return sanitizeUserInputResult(await options.source.readUserInput(request)); }
+    catch { return { ok: false }; }
+  };
+  const respondUserInputHandler: BoundaryListener = async (...values) => {
+    const request = values.length === 2 ? reconstructUserInputResponse(values[1]) : undefined;
+    if (disposed || !actionOpen || acquisitionPending() || !owningSender(values[0], options.window) ||
+        !request || !options.source?.respondToUserInput) return { status: "unavailable" };
+    // Q&A must not join a queue whose running turn is waiting for this very answer.
+    try { return sanitizeUserInputResponseResult(await options.source.respondToUserInput(request)); }
+    catch { return { status: "unavailable" }; }
   };
 
   const steerHandler: BoundaryListener = async (...values) => {
@@ -807,9 +841,12 @@ export function installWorkbenchProjectViewIpc(options: {
     }
     createProjectPending = true;
     try {
-      const result = sanitizeWorkbenchCreateProjectResult(
-        await options.createProjectController.createProject(),
-      );
+      const controllerResult =
+        await options.createProjectController.createProject();
+      // `diagnostic`, when present, is a non-enumerable in-memory handoff for
+      // the later public failure contract. Do not log, persist, or forward it
+      // through the current contract until that contract can whitelist it.
+      const result = sanitizeWorkbenchCreateProjectResult(controllerResult);
       if (
         disposed ||
         !actionOpen ||
@@ -863,6 +900,8 @@ export function installWorkbenchProjectViewIpc(options: {
   options.ipcMain.handle(WORKBENCH_SELECT_PROJECT_CHANNEL, selectProjectHandler);
   options.ipcMain.handle(WORKBENCH_SUBMIT_CHANNEL, submitHandler);
   options.ipcMain.handle(WORKBENCH_INTERRUPT_CHANNEL, interruptHandler);
+  options.ipcMain.handle(WORKBENCH_READ_USER_INPUT_CHANNEL, readUserInputHandler);
+  options.ipcMain.handle(WORKBENCH_RESPOND_USER_INPUT_CHANNEL, respondUserInputHandler);
   options.ipcMain.handle(WORKBENCH_STEER_CHANNEL, steerHandler);
   options.ipcMain.handle(
     WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
@@ -902,6 +941,8 @@ export function installWorkbenchProjectViewIpc(options: {
       options.ipcMain.removeHandler(WORKBENCH_SELECT_PROJECT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_SUBMIT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_INTERRUPT_CHANNEL);
+      options.ipcMain.removeHandler(WORKBENCH_READ_USER_INPUT_CHANNEL);
+      options.ipcMain.removeHandler(WORKBENCH_RESPOND_USER_INPUT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_STEER_CHANNEL);
       options.ipcMain.removeHandler(
         WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,

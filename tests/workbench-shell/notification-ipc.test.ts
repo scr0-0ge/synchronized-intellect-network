@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL } from "../../src/workbench-shell/notification-bridge.ts";
+import {
+  WORKBENCH_NOTIFICATION_ACTIVATED_CHANNEL,
+  WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL,
+} from "../../src/workbench-shell/notification-bridge.ts";
 import {
   installWorkbenchNotificationIpc as installNotificationIpcBoundary,
   type WorkbenchNotificationIpcMainBoundary,
@@ -15,11 +18,16 @@ import { createWorkbenchLifecycleController } from "../../src/workbench-shell/el
 
 type Listener = (...values: unknown[]) => void;
 
-const request = Object.freeze({ title: "Agent Session 01", body: "The Agent turn completed." });
-const invalidRequest = Object.freeze({
-  shown: false as const,
-  reason: "invalid-request" as const,
+const rendererInstanceKey =
+  "renderer-instance:00000000-0000-4000-8000-000000000040";
+const request = Object.freeze({
+  title: "Agent Session 01",
+  body: "The Agent turn completed.",
+  commandKey: "command-7",
+  projectScopeEpoch: 3,
+  rendererInstanceKey,
 });
+const noDeliveryResult = undefined;
 
 class FakeIpcMain implements WorkbenchNotificationIpcMainBoundary {
   readonly handlers = new Map<string, Listener>();
@@ -45,7 +53,9 @@ class FakeIpcMain implements WorkbenchNotificationIpcMainBoundary {
 
 class FakeSender implements WorkbenchNotificationRendererSender {
   destroyed = false;
+  sendFailure: unknown;
   readonly listeners = new Map<string, Set<Listener>>();
+  readonly messages: Array<Readonly<{ channel: string; value: unknown }>> = [];
 
   isDestroyed(): boolean {
     return this.destroyed;
@@ -59,6 +69,11 @@ class FakeSender implements WorkbenchNotificationRendererSender {
 
   removeListener(event: string, listener: Listener): void {
     this.listeners.get(event)?.delete(listener);
+  }
+
+  send(channel: string, value: unknown): void {
+    if (this.sendFailure !== undefined) throw this.sendFailure;
+    this.messages.push({ channel, value });
   }
 
   emit(event: string): void {
@@ -237,11 +252,14 @@ test("an unfocused owning renderer receives exactly one OS toast per accepted re
   ]);
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: true },
+    noDeliveryResult,
   );
   assert.equal(stub.created.length, 1);
   const toast = stub.created[0];
-  assert.deepEqual({ title: toast?.title, body: toast?.body }, request);
+  assert.deepEqual(
+    { title: toast?.title, body: toast?.body },
+    { title: request.title, body: request.body },
+  );
   assert.equal(toast?.showCalls, 1);
   assert.equal(toast?.listeners.get("click")?.size, 1);
   assert.equal(toast?.listeners.get("close")?.size, 1);
@@ -265,14 +283,14 @@ test("a focused window suppresses the toast without poisoning later requests", a
   window.focused = true;
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: false, reason: "window-focused" },
+    noDeliveryResult,
   );
   assert.equal(stub.created.length, 0);
 
   window.focused = false;
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: true },
+    noDeliveryResult,
   );
   binding.dispose();
 });
@@ -291,7 +309,7 @@ test("foreign, destroyed, malformed, oversized, and extra-argument requests neve
 
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, intruder, request),
-    invalidRequest,
+    noDeliveryResult,
   );
   const malformedPayloads = [
     undefined,
@@ -305,6 +323,25 @@ test("foreign, destroyed, malformed, oversized, and extra-argument requests neve
     { title: "title", body: "  " },
     { title: "t".repeat(81), body: "body" },
     { title: "title", body: "b".repeat(241) },
+    { title: "legacy-title", body: "legacy-body" },
+    {
+      ...request,
+      commandKey: "command-0",
+      projectScopeEpoch: 3,
+      rendererInstanceKey,
+    },
+    {
+      ...request,
+      commandKey: "command-7",
+      projectScopeEpoch: -1,
+      rendererInstanceKey,
+    },
+    {
+      ...request,
+      commandKey: "command-7",
+      projectScopeEpoch: 3,
+      rendererInstanceKey: "renderer-instance:forged",
+    },
     { title: "title", body: "body", extra: true },
   ];
   for (const payload of malformedPayloads) {
@@ -314,7 +351,7 @@ test("foreign, destroyed, malformed, oversized, and extra-argument requests neve
         owner,
         payload,
       ),
-      invalidRequest,
+      noDeliveryResult,
     );
   }
   let accessorReads = 0;
@@ -334,7 +371,7 @@ test("foreign, destroyed, malformed, oversized, and extra-argument requests neve
       owner,
       accessorPayload,
     ),
-    invalidRequest,
+    noDeliveryResult,
   );
   assert.equal(accessorReads, 0, "main never invokes renderer-owned accessors");
   assert.deepEqual(
@@ -344,12 +381,12 @@ test("foreign, destroyed, malformed, oversized, and extra-argument requests neve
       request,
       "extra",
     ),
-    invalidRequest,
+    noDeliveryResult,
   );
   owner.destroyed = true;
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, owner, request),
-    invalidRequest,
+    noDeliveryResult,
   );
   assert.equal(stub.created.length, 0);
   binding.dispose();
@@ -398,6 +435,71 @@ test("activating the toast restores, shows, and focuses the main window", async 
   );
 });
 
+test("activating a targeted toast asks the renderer to select the completed Session", async () => {
+  const ipc = new FakeIpcMain();
+  const sender = new FakeSender();
+  const window = new FakeWindow(sender);
+  const stub = createNotificationStub();
+  const binding = installWorkbenchNotificationIpc({
+    ipcMain: ipc,
+    window,
+    notification: stub.notification,
+  });
+
+  await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, {
+    ...request,
+    commandKey: "command-7",
+    projectScopeEpoch: 3,
+    rendererInstanceKey,
+  });
+  const toast = stub.created[0];
+  assert.ok(toast);
+
+  toast.emit("click");
+  assert.deepEqual(sender.messages, [
+    {
+      channel: WORKBENCH_NOTIFICATION_ACTIVATED_CHANNEL,
+      value: {
+        commandKey: "command-7",
+        projectScopeEpoch: 3,
+        rendererInstanceKey,
+      },
+    },
+  ]);
+  assert.equal(window.showCalls, 1);
+  assert.equal(window.focusCalls, 1);
+  binding.dispose();
+});
+
+test("an activation transport failure still foregrounds the window and keeps its selection", async () => {
+  const ipc = new FakeIpcMain();
+  const sender = new FakeSender();
+  const window = new FakeWindow(sender);
+  const stub = createNotificationStub();
+  const binding = installWorkbenchNotificationIpc({
+    ipcMain: ipc,
+    window,
+    notification: stub.notification,
+  });
+
+  await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, {
+    ...request,
+    commandKey: "command-8",
+    projectScopeEpoch: 3,
+    rendererInstanceKey,
+  });
+  const toast = stub.created[0];
+  assert.ok(toast);
+  sender.sendFailure = new Error("PRIVATE_RENDERER_GONE");
+
+  toast.emit("click");
+  assert.equal(window.showCalls, 1);
+  assert.equal(window.focusCalls, 1);
+  assert.deepEqual(sender.messages, []);
+  assert.equal(toast.listeners.get("click")?.size, 0);
+  binding.dispose();
+});
+
 test("click releases toast authority even when the OS never emits close", async () => {
   const ipc = new FakeIpcMain();
   const sender = new FakeSender();
@@ -411,7 +513,7 @@ test("click releases toast authority even when the OS never emits close", async 
 
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: true },
+    noDeliveryResult,
   );
   const toast = stub.created[0];
   assert.ok(toast);
@@ -503,7 +605,7 @@ test("asynchronous native failure releases toast authority", async () => {
 
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: true },
+    noDeliveryResult,
   );
   const toast = stub.created[0];
   assert.ok(toast);
@@ -532,7 +634,7 @@ test("silent OS suppression remains best-effort and teardown-safe", async () => 
   // show models the API surface when Windows silently suppresses a toast.
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: true },
+    noDeliveryResult,
   );
   const toast = stub.created[0];
   assert.ok(toast);
@@ -559,28 +661,28 @@ test("platforms without notification support degrade silently instead of rejecti
   stub.setSupported(false);
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: false, reason: "notifications-unavailable" },
+    noDeliveryResult,
   );
 
   stub.setSupported(true);
   stub.failSupportCheck(new Error("PRIVATE_SUPPORT_CHECK_FAILURE"));
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: false, reason: "notifications-unavailable" },
+    noDeliveryResult,
   );
 
   stub.failSupportCheck(undefined);
   stub.failConstruction(new Error("PRIVATE_CONSTRUCTION_FAILURE"));
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: false, reason: "notifications-unavailable" },
+    noDeliveryResult,
   );
 
   stub.failConstruction(undefined);
   stub.failShow(new Error("PRIVATE_SHOW_FAILURE"));
   assert.deepEqual(
     await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-    { shown: false, reason: "notifications-unavailable" },
+    noDeliveryResult,
   );
 
   assert.equal(stub.created.length, 1);
@@ -588,10 +690,6 @@ test("platforms without notification support degrade silently instead of rejecti
   assert.equal(stub.created[0]?.listeners.get("click")?.size, 0);
   assert.equal(stub.created[0]?.listeners.get("close")?.size, 0);
   assert.equal(stub.created[0]?.listeners.get("failed")?.size, 0);
-  assert.equal(
-    JSON.stringify(invalidRequest).includes("PRIVATE_"),
-    false,
-  );
   binding.dispose();
 });
 
@@ -613,7 +711,7 @@ test("renderer or window termination closes toast authority and dispose is idemp
 
     assert.deepEqual(
       await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-      { shown: true },
+      noDeliveryResult,
     );
     if (terminalEvent === "closed") window.emit(terminalEvent);
     else sender.emit(terminalEvent);
@@ -630,7 +728,7 @@ test("renderer or window termination closes toast authority and dispose is idemp
     );
     assert.deepEqual(
       await ipc.invoke(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL, sender, request),
-      { shown: false, reason: "bridge-closed" },
+      noDeliveryResult,
     );
 
     binding.dispose();
@@ -704,14 +802,30 @@ test("main.ts wires exactly one notification binding and tears it down on every 
     source,
     /notificationIpc = installWorkbenchNotificationIpc\(\{\s*ipcMain,\s*window: createdWindow,\s*notification: Notification,\s*platform: process\.platform,\s*\}\);/u,
   );
+  // Cleared before it is disposed (issue 172), so a dispose that fails cannot
+  // leave the binding live for a second attempt from the "closed" handler.
   assert.match(
     source,
-    /function disposeNotificationIpcBinding\(\): void \{\s*notificationIpc\?\.dispose\(\);\s*notificationIpc = null;\s*\}/u,
+    /function disposeNotificationIpcBinding\(\): void \{[\s\S]*?const closing = notificationIpc;\s*notificationIpc = null;\s*closing\?\.dispose\(\);\s*\}/u,
   );
+  // The lifecycle drain and the window's "closed" handler now reach it through
+  // the one shared teardown list rather than each calling it directly, so the
+  // direct call sites are the two startup-failure exits. The count is still
+  // exact, and the list membership is asserted separately.
   assert.equal(
     source.split("disposeNotificationIpcBinding();").length - 1,
-    4,
-    "lifecycle shutdown, window close, and both startup-failure exits dispose the binding",
+    2,
+    "both startup-failure exits dispose the binding directly",
+  );
+  assert.match(
+    source,
+    /\{ name: "notificationIpc", run: disposeNotificationIpcBinding \}/u,
+    "and the shared teardown list carries it for the drain and the window close",
+  );
+  assert.equal(
+    source.split("disposeWindowScopedBindings();").length - 1,
+    2,
+    "the shared list runs on exactly two paths: the lifecycle drain and the window close",
   );
   assert.match(
     source,

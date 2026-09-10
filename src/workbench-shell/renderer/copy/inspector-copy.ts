@@ -42,7 +42,8 @@ const englishCopy = {
     contextLabel: "Context",
     independenceNote:
       "Execution Mode and Access Mode are chosen separately from each other and from the model and intensity. Neither is downgraded silently.",
-    unknownValue: "Unknown",
+    unobservedValue: "Not observed",
+    pendingObservationValue: "Pending observation",
   },
   ordinalPositionCopy: (current: string, total: string): string =>
     `${current} of ${total}`,
@@ -90,7 +91,8 @@ const simplifiedChineseCopy = {
     contextLabel: "上下文",
     independenceNote:
       "执行模式和访问模式彼此独立选择，也独立于模型和工作强度。两者都不会被静默降级。",
-    unknownValue: "未知",
+    unobservedValue: "未观测到生效值",
+    pendingObservationValue: "生效值待观测",
   },
   ordinalPositionCopy: (current: string, total: string): string =>
     `第 ${current} 个，共 ${total} 个`,

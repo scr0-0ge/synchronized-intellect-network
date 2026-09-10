@@ -10,8 +10,9 @@ import type { RequestedSessionProfileProjection } from "../coordinator/index.ts"
 import type {
   WorkbenchDirectSessionProfileSelection,
   WorkbenchModelOption,
-  WorkbenchRuntimeEndpointOption,
   WorkbenchRuntimeEndpointDiscovery,
+  WorkbenchRuntimeEndpointDiscoveryCategory,
+  WorkbenchRuntimeEndpointOption,
   WorkbenchRuntimeEndpointId,
   WorkbenchSessionProfileOption,
   WorkbenchWorkIntensityOption,
@@ -19,6 +20,10 @@ import type {
   WorkbenchReplacementPrefill,
 } from "./contract.ts";
 import { publicRuntimeEndpointDiscovery } from "./contract.ts";
+import {
+  areRegisteredEndpointIdsInOrder,
+  WORKBENCH_RUNTIME_ENDPOINT_IDS,
+} from "./runtime-endpoint-identity.ts";
 import { workbenchModelPresentationLabel } from "./model-presentation.ts";
 
 const opaqueEffortSelectionCatalogRuntime = "runtime-endpoint-directory";
@@ -120,13 +125,17 @@ export function createDirectSessionProfileSnapshot(options: {
   readonly endpoints: readonly DirectSessionProfileEndpointCatalog[];
   readonly endpointDiscovery: WorkbenchRuntimeEndpointDiscovery;
   readonly desiredDefault?: DirectSessionProfileDesiredDefault;
+  /** Registered endpoint roster backing this snapshot; defaults to the canonical registration order. */
+  readonly endpointIds?: readonly WorkbenchRuntimeEndpointId[];
 }): DirectSessionProfileSnapshot {
   if (!isStableNonProxyDataGraph(options)) {
     throw new Error("invalid-endpoints");
   }
+  const endpointIds = options.endpointIds ?? WORKBENCH_RUNTIME_ENDPOINT_IDS;
   const endpointDiscovery = reconstructCoherentEndpointDiscovery(
     options.endpoints,
     options.endpointDiscovery,
+    endpointIds,
   );
   if (
     options.endpoints.length === 0 ||
@@ -550,52 +559,53 @@ function createSnapshotValue(
 function reconstructCoherentEndpointDiscovery(
   endpoints: readonly DirectSessionProfileEndpointCatalog[],
   endpointDiscovery: unknown,
+  endpointIds: readonly WorkbenchRuntimeEndpointId[],
 ): WorkbenchRuntimeEndpointDiscovery | undefined {
   try {
     if (
       !isExactDataRecord(endpointDiscovery, ["statuses"]) ||
-      !isDenseArray(endpointDiscovery.statuses) ||
-      endpointDiscovery.statuses.length !== 2
+      !isDenseArray(endpointDiscovery.statuses, endpointIds.length) ||
+      endpointDiscovery.statuses.length !== endpointIds.length
     ) {
       return undefined;
     }
     const statuses = endpointDiscovery.statuses;
-    const codexStatus = statuses[0];
-    const claudeStatus = statuses[1];
-    if (
-      !isExactDataRecord(codexStatus, ["category", "endpointId"]) ||
-      codexStatus.endpointId !== "codex-desktop" ||
-      !isDiscoveryCategory(codexStatus.category) ||
-      !isExactDataRecord(claudeStatus, ["category", "endpointId"]) ||
-      claudeStatus.endpointId !== "claude-code-desktop" ||
-      !isClaudeDiscoveryCategory(claudeStatus.category)
-    ) {
+    const categories: WorkbenchRuntimeEndpointDiscoveryCategory[] = [];
+    const readyIds: WorkbenchRuntimeEndpointId[] = [];
+    for (const [index, endpointId] of endpointIds.entries()) {
+      const status = statuses[index];
+      if (
+        !isExactDataRecord(status, ["category", "endpointId"]) ||
+        status.endpointId !== endpointId ||
+        !isDiscoveryCategory(status.category)
+      ) {
+        return undefined;
+      }
+      categories.push(status.category);
+      if (status.category === "catalog-ready") {
+        readyIds.push(endpointId);
+      }
+    }
+    if (!areRegisteredEndpointIdsInOrder(
+      endpoints.map((endpoint) => endpoint.endpointId),
+      endpointIds,
+    )) {
       return undefined;
     }
-    const endpointIds = endpoints.map((endpoint) => endpoint.endpointId);
+    const catalogEndpointIds = endpoints.map(
+      (endpoint) => endpoint.endpointId,
+    );
     if (
-      new Set(endpointIds).size !== endpointIds.length ||
-      endpointIds.some(
-        (endpointId, index) =>
-          endpointId !== "codex-desktop" &&
-          endpointId !== "claude-code-desktop" ||
-          (index > 0 &&
-            endpointIds[index - 1] === "claude-code-desktop" &&
-            endpointId === "codex-desktop"),
+      readyIds.length === catalogEndpointIds.length &&
+      readyIds.every(
+        (endpointId, index) => endpointId === catalogEndpointIds[index],
       )
     ) {
-      return undefined;
-    }
-    const readyIds = [codexStatus, claudeStatus]
-      .filter((status) => status.category === "catalog-ready")
-      .map((status) => status.endpointId);
-    if (
-      readyIds.length === endpointIds.length &&
-      readyIds.every((endpointId, index) => endpointId === endpointIds[index])
-    ) {
       return publicRuntimeEndpointDiscovery(
-        codexStatus.category,
-        claudeStatus.category,
+        categories.map((category, index) => ({
+          endpointId: endpointIds[index]!,
+          category,
+        })),
       );
     }
     return undefined;
@@ -613,12 +623,6 @@ function isDiscoveryCategory(value: unknown): value is
     value === "inspection-failed" ||
     value === "not-inspected"
   );
-}
-
-function isClaudeDiscoveryCategory(
-  value: unknown,
-): value is WorkbenchRuntimeEndpointDiscovery["statuses"][1]["category"] {
-  return isDiscoveryCategory(value);
 }
 
 function isExactDataRecord(
@@ -655,27 +659,33 @@ function isExactDataRecord(
   }
 }
 
-function isDenseArray(value: unknown): value is unknown[] {
+function isDenseArray(
+  value: unknown,
+  expectedLength: number,
+): value is unknown[] {
   try {
     if (
       nodeUtilTypes.isProxy(value) ||
       !Array.isArray(value) ||
       Object.getPrototypeOf(value) !== Array.prototype ||
-      value.length !== 2
+      value.length !== expectedLength
     ) {
       return false;
     }
+    const expectedKeys = [
+      ...Array.from({ length: expectedLength }, (_, index) => String(index)),
+      "length",
+    ];
     const keys = Reflect.ownKeys(value);
     return (
-      keys.length === 3 &&
-      ["0", "1", "length"].every((key) => {
+      keys.length === expectedKeys.length &&
+      keys.every(
+        (key) => typeof key === "string" && expectedKeys.includes(key),
+      ) &&
+      expectedKeys.every((key) => {
         const descriptor = Object.getOwnPropertyDescriptor(value, key);
         return descriptor !== undefined && "value" in descriptor;
-      }) &&
-      keys.every(
-        (key) =>
-          typeof key === "string" && ["0", "1", "length"].includes(key),
-      )
+      })
     );
   } catch {
     return false;

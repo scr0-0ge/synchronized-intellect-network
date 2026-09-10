@@ -151,7 +151,7 @@ test("removal feedback distinguishes in-flight and unknown blocks without claimi
     {
       tone: "alert",
       message:
-        "Project was not removed because turn activity could not be verified. Keep the Workbench open and try again when activity is known.",
+        "Project was not removed because turn activity could not be verified. Switch to another Project, then remove this Project from the Workbench; its recorded conversation history remains available when you reopen it.",
     },
   );
 });

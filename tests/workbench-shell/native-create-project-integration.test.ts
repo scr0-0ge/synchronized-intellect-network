@@ -59,7 +59,7 @@ test("production create makes one empty target, publishes/selects it before succ
   });
   registerTestClosable(t, host);
   await waitForProject(host, (value) =>
-    value.ok && value.view.project.label === "Fallback Project"
+    value.ok && "view" in value && value.view.project.label === "Fallback Project"
   );
 
   const openedStore = await openWorkbenchCreateProjectStateStore({ dataDirectory });
@@ -75,7 +75,7 @@ test("production create makes one empty target, publishes/selects it before succ
   const tracedHost = tracingHost(host, trace);
   let chooserCalls = 0;
   const dispose = host.observeProject((value) => {
-    if (value.ok && value.view.project.label === "Created Project") {
+    if (value.ok && "view" in value && value.view.project.label === "Created Project") {
       trace.push("view-target");
     }
   });
@@ -147,7 +147,7 @@ test("production create makes one empty target, publishes/selects it before succ
   });
   registerTestClosable(t, restartedHost);
   await waitForProject(restartedHost, (value) =>
-    value.ok && value.view.project.label === "Created Project"
+    value.ok && "view" in value && value.view.project.label === "Created Project"
   );
   const restartedStore = await openWorkbenchCreateProjectStateStore({ dataDirectory });
   assert.equal(restartedStore.ok, true);

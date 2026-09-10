@@ -20,6 +20,59 @@ import {
 const counts = Object.freeze({ projects: 1, sessions: 1, commands: 2, updates: 4 });
 const emptyCounts = Object.freeze({ projects: 0, sessions: 0, commands: 0, updates: 0 });
 
+test("shared counts in a valid snapshot are accepted", (t) => {
+  const clone = t.mock.method(globalThis, "structuredClone");
+  const valid = validSnapshotResult("shared-counts");
+  const sources = [valid.snapshot.sources[0], {
+    ...valid.snapshot.sources[0], sourceKey: "source-2", label: "Historical store 2",
+  }];
+  assert.equal(sources[0]!.counts, sources[1]!.counts);
+  const shared = { ...valid, snapshot: { ...valid.snapshot, sources } };
+  assert.deepEqual(sanitizeHistoryRecoverySnapshotResult(shared, valid.requestKey), shared);
+  assert.equal(clone.mock.callCount(), 1);
+});
+
+test("self-cycles and multi-node cycles stop before cloning", { timeout: 5_000 }, (t) => {
+  const clone = t.mock.method(globalThis, "structuredClone");
+  const valid = validSnapshotResult("cyclic-counts");
+  const self: Record<string, unknown> = {};
+  self.self = self;
+  const left: Record<string, unknown> = {};
+  const right = { left };
+  left.right = right;
+  for (const counts of [self, left]) {
+    clone.mock.resetCalls();
+    const result = sanitizeHistoryRecoverySnapshotResult({
+      ...valid, snapshot: { ...valid.snapshot, sources: [{ ...valid.snapshot.sources[0], counts }] },
+    }, valid.requestKey);
+    assert.equal(result.status, "unavailable");
+    // A later shape check must not disguise a cycle accepted by the graph walk.
+    assert.equal(clone.mock.callCount(), 0);
+  }
+});
+
+test("shared diamond graphs are inspected without expanding every path", { timeout: 5_000 }, (t) => {
+  const clone = t.mock.method(globalThis, "structuredClone");
+  let diamond: object = {};
+  for (let depth = 0; depth < 40; depth += 1) diamond = { left: diamond, right: diamond };
+  // The graph gate accepts a DAG without expanding every path through it. The
+  // exact request shape still rejects this unsupported field afterward.
+  assert.equal(reconstructHistoryRecoverySnapshotRequest({ version: 1, requestKey: "diamond", diamond }).ok, false);
+  assert.equal(clone.mock.callCount(), 1);
+});
+
+test("graph inspection retains the node and property limits", { timeout: 5_000 }, (t) => {
+  const clone = t.mock.method(globalThis, "structuredClone");
+  for (const graph of [
+    Array.from({ length: 100_000 }, () => ({})),
+    Object.fromEntries(Array.from({ length: 200_001 }, (_, index) => [String(index), null])),
+  ]) {
+    clone.mock.resetCalls();
+    assert.equal(reconstructHistoryRecoverySnapshotRequest({ version: 1, requestKey: "bounded", graph }).ok, false);
+    assert.equal(clone.mock.callCount(), 0, "reject over-budget graphs before structured cloning");
+  }
+});
+
 test("all four request families reconstruct exact closed branches", () => {
   assert.equal(
     reconstructHistoryRecoverySnapshotRequest({ version: 1, requestKey: "request-1" }).ok,

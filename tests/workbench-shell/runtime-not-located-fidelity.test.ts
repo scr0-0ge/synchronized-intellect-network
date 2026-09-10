@@ -126,8 +126,12 @@ test("runtime-not-located start surface follows screen 04 without changing ordin
       const endpointRows = checklist.match(/<li(?:\s[^>]*)?>[\s\S]*?<\/li>/gu) ?? [];
       assert.equal(endpointRows.length, 2);
       assert.deepEqual(endpointRows.map(plainText), [
-        "● Codex · Runtime not located Codex desktop. Not found under any name that was checked.",
-        "● Claude · Runtime not located Claude Code desktop. Not found under any name that was checked.",
+        // Ticket 25: the family facade merges the desktop row into the
+        // family entry; with no subscription and no API key the family
+        // shows its unconfigured guidance (never the desktop-only
+        // lookup detail — that moved to the Claude/Codex settings card).
+        "● Codex · Runtime not located Subscription. Codex has no signed-in subscription and no saved API key. Sign in, or add a Codex API key, on the Codex card in Settings.",
+        "● Claude · Runtime not located Subscription. Claude has no signed-in subscription and no saved API key. Sign in, or add a Claude API key, on the Claude card in Settings.",
       ]);
       assert.match(
         runtimeWithHistory,
@@ -138,7 +142,7 @@ test("runtime-not-located start surface follows screen 04 without changing ordin
         /\bConnected\b|\bInstalled\b|Signed in as|\bActive\b|local ·|checked[- ]at|\d{4}-\d{2}-\d{2}T/iu,
       );
       assert.ok(
-        /<p class="runtime-boundary-copy">Sign-in happens in each provider's own app\. The Workbench never asks for a password, API key, or token, never reads a credential file, and never stores credentials\.<\/p>/u.test(
+        /<p class="runtime-boundary-copy">Sign-in happens in each provider's own app\. The Workbench never asks for or stores subscription credentials; a provider API key saved in Settings is encrypted with your OS user account\.<\/p>/u.test(
           runtimeWithHistory,
         ),
         "credential-boundary paragraph matches screen 04",

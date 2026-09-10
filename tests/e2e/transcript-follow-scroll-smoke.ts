@@ -83,8 +83,8 @@ try {
   await observe("A3-measured-anchor", async () =>
     observeMeasuredAnchor(page),
   );
-  await observe("A4-recycled-disclosure", async () =>
-    observeRecycledDisclosure(page),
+  await observe("A4-keyed-disclosure", async () =>
+    observeKeyedDisclosure(page),
   );
   await observe("A5-short-transcript-follow", async () =>
     observeShortTranscript(page),
@@ -308,12 +308,20 @@ async function observeMeasuredAnchor(page: Page): Promise<unknown> {
   return Object.freeze(result);
 }
 
-async function observeRecycledDisclosure(page: Page): Promise<unknown> {
+async function observeKeyedDisclosure(page: Page): Promise<unknown> {
   const turnCount = 80;
-  const targetIndex = turnCount - 2;
   await openFixture(page, turnCount);
+  const initial = await transcriptMetrics(page);
+  assert.notEqual(initial.firstGroup, null);
+  assert.notEqual(initial.lastGroup, null);
+  const targetIndex = Math.floor(
+    ((initial.firstGroup ?? 0) + (initial.lastGroup ?? 0)) / 2,
+  );
+  const targetKey = `turn:${targetIndex + 1}:group:1`;
+  const targetSelector =
+    `.timeline-group[data-transcript-group-key="${targetKey}"]`;
   const target = page.locator(
-    `.timeline-group[data-transcript-group-index="${targetIndex}"] .disclosure`,
+    `${targetSelector} .disclosure`,
   );
   await target.waitFor({ state: "visible" });
   assert.equal(await target.getAttribute("aria-expanded"), "false");
@@ -321,41 +329,146 @@ async function observeRecycledDisclosure(page: Page): Promise<unknown> {
   assert.equal(await target.getAttribute("aria-expanded"), "true");
   const controlId = await target.getAttribute("aria-controls");
   assert.ok(controlId);
+  const originalGroup = await page.locator(targetSelector).elementHandle();
+  assert.ok(originalGroup);
+  const selectedText = await page.locator(targetSelector).evaluate((group) => {
+    const paragraph = group.querySelector(".turn-body.prose p");
+    if (paragraph === null) throw new Error("missing target response paragraph");
+    const selection = window.getSelection();
+    if (selection === null) throw new Error("missing document selection");
+    selection.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(paragraph);
+    selection.addRange(range);
+    return selection.toString();
+  });
+  assert.match(selectedText, new RegExp(`Seeded response ${targetIndex + 1}\\.1`, "u"));
 
   await page.evaluate(() => {
     const scroller = document.querySelector<HTMLElement>(".transcript");
     if (scroller === null) throw new Error("missing transcript scroller");
-    scroller.scrollTop = Math.max(0, scroller.scrollTop - 6_000);
+    scroller.scrollTop = Math.max(0, scroller.scrollTop - 800);
     scroller.dispatchEvent(new Event("scroll"));
   });
   await page.waitForFunction(
-    (index) =>
-      document.querySelector(
-        `.timeline-group[data-transcript-group-index="${index}"]`,
-      ) === null,
-    targetIndex,
+    ({ firstGroup, key }) => {
+      const first = document.querySelector<HTMLElement>(".timeline-group");
+      return (
+        Number(first?.dataset.transcriptGroupIndex) !== firstGroup &&
+        document.querySelector(
+          `.timeline-group[data-transcript-group-key="${key}"]`,
+        ) !== null
+      );
+    },
+    { firstGroup: initial.firstGroup, key: targetKey },
   );
-  const recycledGroup = await page.evaluate((id) => {
-    const recycled = document
-      .querySelector(`[aria-controls="${CSS.escape(id)}"]`)
-      ?.closest<HTMLElement>(".timeline-group");
-    return recycled?.dataset.transcriptGroupIndex ?? null;
-  }, controlId);
-  assert.notEqual(recycledGroup, null, "the exact TimelineTurn instance must be recycled");
-  assert.notEqual(Number(recycledGroup), targetIndex);
+  const overlap = await originalGroup.evaluate(
+    (group, { key, expectedText }) => {
+      const current = document.querySelector(
+        `.timeline-group[data-transcript-group-key="${key}"]`,
+      );
+      const selection = window.getSelection();
+      const selectedGroup = selection?.anchorNode?.parentElement?.closest<HTMLElement>(
+        ".timeline-group",
+      );
+      return {
+        sameNode: current === group,
+        connected: group.isConnected,
+        controlId: group.querySelector(".disclosure")?.getAttribute("aria-controls"),
+        expanded: group.querySelector(".disclosure")?.getAttribute("aria-expanded"),
+        selectedText: selection?.toString() ?? "",
+        selectedGroupKey: selectedGroup?.dataset.transcriptGroupKey ?? null,
+        selectionMatches: selection?.toString() === expectedText,
+      };
+    },
+    { key: targetKey, expectedText: selectedText },
+  );
+  assert.deepEqual(overlap, {
+    sameNode: true,
+    connected: true,
+    controlId,
+    expanded: "true",
+    selectedText,
+    selectedGroupKey: targetKey,
+    selectionMatches: true,
+  });
+
+  await page.evaluate(() => {
+    const scroller = document.querySelector<HTMLElement>(".transcript");
+    if (scroller === null) throw new Error("missing transcript scroller");
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForFunction(
+    (key) =>
+      document.querySelector(
+        `.timeline-group[data-transcript-group-key="${key}"]`,
+      ) === null,
+    targetKey,
+  );
+  assert.equal(
+    await page.locator(`[aria-controls="${controlId}"]`).count(),
+    0,
+    "a keyed turn leaving the window must unmount instead of lending its DOM to another turn",
+  );
 
   await page.locator(".transcript-jump-latest").click();
   await waitForBottom(page, turnCount - 1);
   await target.waitFor({ state: "visible" });
   const returnedControlId = await target.getAttribute("aria-controls");
   const returnedExpanded = await target.getAttribute("aria-expanded");
+  assert.notEqual(returnedControlId, controlId);
   assert.equal(returnedExpanded, "true");
+
+  await page.evaluate(() => {
+    const scroller = document.querySelector<HTMLElement>(".transcript");
+    if (scroller === null) throw new Error("missing transcript scroller");
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForFunction(
+    (key) =>
+      document.querySelector(
+        `.timeline-group[data-transcript-group-key="${key}"]`,
+      ) === null,
+    targetKey,
+  );
+  const query = `Seeded user turn ${targetIndex + 1}`;
+  await page.locator(".transcript-search-input").fill(query);
+  const filteredTarget = page.locator(targetSelector);
+  await filteredTarget.waitFor({ state: "visible" });
+  const searchResult = await filteredTarget.evaluate((group, expected) => {
+    const mark = Array.from(
+      group.querySelectorAll<HTMLElement>("mark[data-transcript-search-match]"),
+    ).find((candidate) => candidate.textContent === expected);
+    const scroller = group.closest<HTMLElement>(".transcript");
+    if (mark === undefined || scroller === null) {
+      throw new Error("missing target search match");
+    }
+    const matchRect = mark.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    return {
+      renderedIndex: Number(group.dataset.transcriptGroupIndex),
+      expanded: group.querySelector(".disclosure")?.getAttribute("aria-expanded"),
+      markedText: mark.textContent,
+      visible:
+        matchRect.top >= scrollerRect.top && matchRect.bottom <= scrollerRect.bottom,
+    };
+  }, query);
+  assert.deepEqual(searchResult, {
+    renderedIndex: 0,
+    expanded: "true",
+    markedText: query,
+    visible: true,
+  });
   return Object.freeze({
     targetIndex,
+    targetKey,
     controlId,
-    recycledGroup: Number(recycledGroup),
+    overlap,
     returnedControlId,
     returnedExpanded,
+    searchResult,
   });
 }
 

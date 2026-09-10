@@ -22,6 +22,7 @@ const englishCopy = {
     emptyProjectBody:
       "This Project is registered and empty. Whatever you send first starts a new Agent Session on the endpoint you pick below.",
     waysToStart: "Ways to start",
+    suggestedFollowUps: "Suggested follow-ups",
     suggestions: [
       "Explain how this Project is laid out",
       "Find and fix the failing tests",
@@ -31,7 +32,7 @@ const englishCopy = {
     endpointStatusListLabel: "Endpoint status",
     openSettings: "Open Settings",
     runtimeBoundary:
-      "Sign-in happens in each provider's own app. The Workbench never asks for a password, API key, or token, never reads a credential file, and never stores credentials.",
+      "Sign-in happens in each provider's own app. The Workbench never asks for or stores subscription credentials; a provider API key saved in Settings is encrypted with your OS user account.",
   },
   endpointStatusDescriptionCopy: (
     endpointLabel: string,
@@ -53,6 +54,7 @@ const simplifiedChineseCopy = {
     emptyProjectBody:
       "此项目已注册且为空。你发送的第一条内容会在下方所选端点上启动新的智能体会话。",
     waysToStart: "可以这样开始",
+    suggestedFollowUps: "建议的追问",
     suggestions: [
       "说明此项目的结构",
       "查找并修复失败的测试",
@@ -62,7 +64,7 @@ const simplifiedChineseCopy = {
     endpointStatusListLabel: "端点状态",
     openSettings: "打开设置",
     runtimeBoundary:
-      "登录在各提供方自己的应用中完成。Workbench 绝不会索取密码、API 密钥或令牌，也不会读取凭据文件或存储凭据。",
+      "登录在各提供方自己的应用中完成。Workbench 绝不索取或存储订阅凭据；在设置中保存的提供方 API 密钥由你的操作系统账户加密。",
   },
   endpointStatusDescriptionCopy: (
     endpointLabel: string,

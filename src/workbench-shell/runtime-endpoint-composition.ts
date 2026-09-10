@@ -15,12 +15,44 @@ import type {
 import { RuntimeAdapterError } from "../agent-runtime/index.ts";
 import {
   ClaudeAdapter,
+  mergeStaticCatalogAugmentation,
   type ClaudePermissionHandlingOptions,
   type ClaudeSessionCapabilityStore,
 } from "../agent-runtime/claude/adapter.ts";
+import type { ClaudeSessionTransportFactory } from "../agent-runtime/claude/transport.ts";
+import type { RuntimeEndpointExecutionLocation } from "../agent-runtime/runtime-endpoint-directory.ts";
+import {
+  GLM_DEFAULT_MODEL_ID,
+  GLM_ENDPOINT_ENV_CONTRACT,
+  createGlmEndpointContext,
+  glmIsolatedClaudeConfigDir,
+} from "../agent-runtime/claude/glm-catalog.ts";
+import {
+  KIMI_DEFAULT_MODEL_ID,
+  createKimiEndpointContext,
+  kimiIsolatedClaudeConfigDir,
+} from "../agent-runtime/claude/kimi-catalog.ts";
+import {
+  DEEPSEEK_DEFAULT_MODEL_ID,
+  createDeepseekEndpointContext,
+  deepseekIsolatedClaudeConfigDir,
+} from "../agent-runtime/claude/deepseek-catalog.ts";
+import {
+  createClaudeApiEndpointContext,
+} from "../agent-runtime/claude/claude-api-endpoint.ts";
 import { CodexAdapter } from "../agent-runtime/codex-adapter.ts";
 import type { CodexCatalogObservation } from "../agent-runtime/codex-adapter.ts";
 import type { OfficialRuntimeTransportFactory } from "../agent-runtime/codex/transport.ts";
+import {
+  KIMI_PLATFORM_DEFAULT_MODEL_ID,
+  createKimiPlatformEndpointContext,
+  kimiPlatformIsolatedCodexHomeDir,
+} from "../agent-runtime/codex/kimi-platform-catalog.ts";
+import {
+  CODEX_API_DEFAULT_MODEL_ID,
+  createCodexApiEndpointContext,
+  codexApiIsolatedCodexHomeDir,
+} from "../agent-runtime/codex/codex-api-catalog.ts";
 import type { ProviderRequestBudget } from "../agent-runtime/provider-request-budget.ts";
 import {
   parseDurableAuthenticationContext,
@@ -36,11 +68,15 @@ import {
 import { LEGACY_CODEX_DIRECT_SESSION_PROFILE_ENDPOINT_KEY } from "./preference-store.ts";
 import {
   publicRuntimeEndpointDiscovery,
+  publicUniformRuntimeEndpointDiscovery,
   type WorkbenchDirectSessionProfileLoadRequest,
   type WorkbenchRuntimeEndpointDiscovery,
   type WorkbenchRuntimeEndpointDiscoveryCategory,
   type WorkbenchRuntimeEndpointId,
 } from "./contract.ts";
+import {
+  isRegisteredRuntimeEndpointId,
+} from "./runtime-endpoint-identity.ts";
 import {
   createWorkbenchRuntimeEndpointAdapter,
   type WorkbenchContinuationRuntimeResumeContext,
@@ -62,6 +98,8 @@ import type {
 import { workbenchModelPresentationLabel } from "./model-presentation.ts";
 
 const claudeEndpointPreferenceKey = "claude-code-desktop";
+// Historical v1 identity for durable selection keys, not the product brand.
+// Renaming this would invalidate existing model/profile preference references.
 const selectionNamespace = "unified-agent-workbench/runtime-endpoint/v1";
 
 /**
@@ -129,6 +167,249 @@ export function createProductionCodexAdapter(
   );
 }
 
+/**
+ * The production construction of the GLM Coding Plan endpoint adapter: the
+ * same ClaudeAdapter class carrying a GLM endpoint context (per-endpoint env
+ * factory, api-key-static authentication, static catalog). The key source is
+ * the endpoint secret envelope store when one is wired via
+ * `resolveGlmAuthToken` (ADR 0022), with the `GLM_ANTHROPIC_AUTH_TOKEN`
+ * environment variable as the P2 fallback (read from `environment`);
+ * with neither source the session start reports token-missing exactly as
+ * before. Nothing is ever written to disk by this factory itself.
+ */
+export function createProductionGlmRuntimeAdapter(options: {
+  readonly providerRequestBudget?: ProviderRequestBudget;
+  readonly claudePermissionHandling?: ClaudePermissionHandlingOptions;
+  readonly claudeSessionCapabilityStore?: ClaudeSessionCapabilityStore;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly configDirectory?: string;
+  /** Live store-backed token resolver; `undefined` result falls back to env. */
+  readonly resolveGlmAuthToken?: () => string | undefined;
+  readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
+  readonly createSessionTransport?: ClaudeSessionTransportFactory;
+}): ResumableAgentRuntimeAdapter {
+  const environment = options.environment ?? process.env;
+  const endpointContext = createGlmEndpointContext({
+    baseUrl: readGlmEndpointBaseUrl(environment),
+    configDir:
+      options.configDirectory ?? glmIsolatedClaudeConfigDir(),
+    sourceEnvironment: environment,
+    ...(options.resolveGlmAuthToken === undefined
+      ? {}
+      : { resolveAuthToken: options.resolveGlmAuthToken }),
+  });
+  return new ClaudeAdapter(
+    undefined,
+    options.createSessionTransport,
+    options.providerRequestBudget,
+    options.claudePermissionHandling,
+    undefined,
+    options.claudeSessionCapabilityStore,
+    options.resolveStaticCatalogAugmentation === undefined
+      ? endpointContext
+      : Object.freeze({
+          ...endpointContext,
+          resolveStaticCatalogAugmentation:
+            options.resolveStaticCatalogAugmentation,
+        }),
+  );
+}
+
+function readGlmEndpointBaseUrl(source: NodeJS.ProcessEnv): string | undefined {
+  const value = source[GLM_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar];
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : undefined;
+}
+
+/**
+ * The production construction of the Kimi Code endpoint adapter (WO16 Part
+ * 2): the same ClaudeAdapter class carrying the Kimi endpoint context
+ * (ticket 11 design of record). Key source and env fallback follow the GLM
+ * pattern — store-backed resolver via `resolveKimiAuthToken`, else
+ * `KIMI_CODE_ANTHROPIC_AUTH_TOKEN` from `environment`; with neither, session
+ * start reports token-missing. The isolated CLAUDE_CONFIG_DIR is Kimi's own.
+ */
+export function createProductionKimiRuntimeAdapter(options: {
+  readonly providerRequestBudget?: ProviderRequestBudget;
+  readonly claudePermissionHandling?: ClaudePermissionHandlingOptions;
+  readonly claudeSessionCapabilityStore?: ClaudeSessionCapabilityStore;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly configDirectory?: string;
+  /** Live store-backed token resolver; `undefined` result falls back to env. */
+  readonly resolveKimiAuthToken?: () => string | undefined;
+  readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
+}): ResumableAgentRuntimeAdapter {
+  const environment = options.environment ?? process.env;
+  const endpointContext = createKimiEndpointContext({
+    configDir:
+      options.configDirectory ?? kimiIsolatedClaudeConfigDir(),
+    sourceEnvironment: environment,
+    ...(options.resolveKimiAuthToken === undefined
+      ? {}
+      : { resolveAuthToken: options.resolveKimiAuthToken }),
+  });
+  return new ClaudeAdapter(
+    undefined,
+    undefined,
+    options.providerRequestBudget,
+    options.claudePermissionHandling,
+    undefined,
+    options.claudeSessionCapabilityStore,
+    options.resolveStaticCatalogAugmentation === undefined
+      ? endpointContext
+      : Object.freeze({
+          ...endpointContext,
+          resolveStaticCatalogAugmentation:
+            options.resolveStaticCatalogAugmentation,
+        }),
+  );
+}
+
+/**
+ * The production construction of the DeepSeek API endpoint adapter (WO16
+ * Part 2): the same ClaudeAdapter class carrying the DeepSeek endpoint
+ * context (ticket 12 design of record). Key source and env fallback follow
+ * the GLM pattern — store-backed resolver via `resolveDeepseekAuthToken`,
+ * else `DEEPSEEK_ANTHROPIC_AUTH_TOKEN` from `environment`. The isolated
+ * CLAUDE_CONFIG_DIR is DeepSeek's own.
+ */
+export function createProductionDeepseekRuntimeAdapter(options: {
+  readonly providerRequestBudget?: ProviderRequestBudget;
+  readonly claudePermissionHandling?: ClaudePermissionHandlingOptions;
+  readonly claudeSessionCapabilityStore?: ClaudeSessionCapabilityStore;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly configDirectory?: string;
+  /** Live store-backed token resolver; `undefined` result falls back to env. */
+  readonly resolveDeepseekAuthToken?: () => string | undefined;
+  readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
+}): ResumableAgentRuntimeAdapter {
+  const environment = options.environment ?? process.env;
+  const endpointContext = createDeepseekEndpointContext({
+    configDir:
+      options.configDirectory ?? deepseekIsolatedClaudeConfigDir(),
+    sourceEnvironment: environment,
+    ...(options.resolveDeepseekAuthToken === undefined
+      ? {}
+      : { resolveAuthToken: options.resolveDeepseekAuthToken }),
+  });
+  return new ClaudeAdapter(
+    undefined,
+    undefined,
+    options.providerRequestBudget,
+    options.claudePermissionHandling,
+    undefined,
+    options.claudeSessionCapabilityStore,
+    options.resolveStaticCatalogAugmentation === undefined
+      ? endpointContext
+      : Object.freeze({
+          ...endpointContext,
+          resolveStaticCatalogAugmentation:
+            options.resolveStaticCatalogAugmentation,
+        }),
+  );
+}
+
+/**
+ * The production construction of the kimi-platform endpoint adapter (ticket
+ * 17): the same CodexAdapter class carrying the kimi-platform endpoint
+ * context — the workbench-owned isolated CODEX_HOME (seeded with the custom
+ * model_provider pointing at the CN platform's OpenAI face), the key source
+ * chain (endpoint secret envelope store via `resolveKimiPlatformApiKey`,
+ * `KIMI_PLATFORM_API_KEY` environment fallback), and the static catalog of
+ * platform-face model names. A spawn environment is the only place the key
+ * value ever lives; nothing here writes to disk beyond the seeded home.
+ */
+export function createProductionKimiPlatformRuntimeAdapter(options: {
+  readonly providerRequestBudget?: ProviderRequestBudget;
+  readonly environment?: NodeJS.ProcessEnv;
+  /** Isolated CODEX_HOME (default: the %APPDATA%-pattern workbench home). */
+  readonly codexHomeDirectory?: string;
+  /** Live store-backed key resolver; `undefined` result falls back to env. */
+  readonly resolveKimiPlatformApiKey?: () => string | undefined;
+}): ResumableAgentRuntimeAdapter {
+  const environment = options.environment ?? process.env;
+  return new CodexAdapter(
+    undefined,
+    options.providerRequestBudget,
+    undefined,
+    createKimiPlatformEndpointContext({
+      codexHome:
+        options.codexHomeDirectory ?? kimiPlatformIsolatedCodexHomeDir(),
+      sourceEnvironment: environment,
+      ...(options.resolveKimiPlatformApiKey === undefined
+        ? {}
+        : { resolveApiKey: options.resolveKimiPlatformApiKey }),
+    }),
+  );
+}
+
+/**
+ * The production construction of the claude-api endpoint adapter (ticket
+ * 21): the same ClaudeAdapter class carrying the claude-api endpoint
+ * context — the dedicated `CLAUDE_API_KEY` source (envelope store via
+ * `resolveClaudeApiKey`, environment fallback), injected as
+ * ANTHROPIC_API_KEY after the standard cleanse, with the real CLI catalog
+ * (no static override) and the `api_key` healthy auth-status shape. No
+ * config-directory isolation: the backend is Anthropic itself.
+ */
+export function createProductionClaudeApiRuntimeAdapter(options: {
+  readonly providerRequestBudget?: ProviderRequestBudget;
+  readonly claudePermissionHandling?: ClaudePermissionHandlingOptions;
+  readonly claudeSessionCapabilityStore?: ClaudeSessionCapabilityStore;
+  readonly environment?: NodeJS.ProcessEnv;
+  /** Live store-backed key resolver; `undefined` result falls back to env. */
+  readonly resolveClaudeApiKey?: () => string | undefined;
+}): ResumableAgentRuntimeAdapter {
+  const environment = options.environment ?? process.env;
+  return new ClaudeAdapter(
+    undefined,
+    undefined,
+    options.providerRequestBudget,
+    options.claudePermissionHandling,
+    undefined,
+    options.claudeSessionCapabilityStore,
+    createClaudeApiEndpointContext({
+      sourceEnvironment: environment,
+      ...(options.resolveClaudeApiKey === undefined
+        ? {}
+        : { resolveApiKey: options.resolveClaudeApiKey }),
+    }),
+  );
+}
+
+/**
+ * The production construction of the codex-api endpoint adapter (ticket
+ * 21): the same CodexAdapter class carrying the codex-api endpoint context
+ * — the workbench-owned isolated CODEX_HOME (seeded with the CLI's own
+ * openai provider on the responses wire, `env_key` OPENAI_API_KEY), the key
+ * source chain (endpoint secret envelope store via `resolveCodexApiKey`,
+ * dedicated `CODEX_API_KEY` environment fallback), the static gpt-5.x
+ * catalog (chatgpt-account gate skipped), remote-backed execution.
+ */
+export function createProductionCodexApiRuntimeAdapter(options: {
+  readonly providerRequestBudget?: ProviderRequestBudget;
+  readonly environment?: NodeJS.ProcessEnv;
+  /** Isolated CODEX_HOME (default: the %APPDATA%-pattern workbench home). */
+  readonly codexHomeDirectory?: string;
+  /** Live store-backed key resolver; `undefined` result falls back to env. */
+  readonly resolveCodexApiKey?: () => string | undefined;
+}): ResumableAgentRuntimeAdapter {
+  const environment = options.environment ?? process.env;
+  return new CodexAdapter(
+    undefined,
+    options.providerRequestBudget,
+    undefined,
+    createCodexApiEndpointContext({
+      codexHome: options.codexHomeDirectory ?? codexApiIsolatedCodexHomeDir(),
+      sourceEnvironment: environment,
+      ...(options.resolveCodexApiKey === undefined
+        ? {}
+        : { resolveApiKey: options.resolveCodexApiKey }),
+    }),
+  );
+}
+
 interface RuntimeDefinition {
   readonly endpointId: WorkbenchRuntimeEndpointId;
   readonly preferenceKey: string;
@@ -136,7 +417,17 @@ interface RuntimeDefinition {
   readonly endpointLabel: string;
   readonly adapter: ResumableAgentRuntimeAdapter;
   readonly directStart: "supported" | "inspect-only";
+  /** Registration execution location; local desktop runtimes omit it. */
+  readonly executionLocation?: RuntimeEndpointExecutionLocation;
   readonly desiredNativeDefault?: SessionProfile;
+  /**
+   * Per-definition diagnostic mapping for inspection failures. Endpoints in the
+   * claude family map provider failures to private diagnostics; endpoints
+   * without a mapping stay publicly classified only.
+   */
+  readonly diagnosticFromError?: (
+    error: unknown,
+  ) => ReturnType<typeof claudeDiagnosticFromError>;
 }
 
 interface RuntimeEndpointComposition {
@@ -164,7 +455,14 @@ export interface RuntimeEndpointCompositionDiscovery {
 export async function createProductionRuntimeEndpointAdapter(options: {
   readonly codexAdapter?: ResumableAgentRuntimeAdapter;
   readonly claudeAdapter?: ResumableAgentRuntimeAdapter;
+  readonly glmAdapter?: ResumableAgentRuntimeAdapter;
+  readonly kimiAdapter?: ResumableAgentRuntimeAdapter;
+  readonly deepseekAdapter?: ResumableAgentRuntimeAdapter;
+  readonly kimiPlatformAdapter?: ResumableAgentRuntimeAdapter;
+  readonly claudeApiAdapter?: ResumableAgentRuntimeAdapter;
+  readonly codexApiAdapter?: ResumableAgentRuntimeAdapter;
   readonly blockedProjectDirectory?: string;
+  readonly observeClaudeSubscriptionUsage?: import("../agent-runtime/index.ts").RuntimeSubscriptionUsageObserver;
   readonly decorateDirectoryAdapter?: (
     adapter: ResumableAgentRuntimeAdapter,
   ) => ResumableAgentRuntimeAdapter;
@@ -175,6 +473,44 @@ export async function createProductionRuntimeEndpointAdapter(options: {
   readonly providerRequestBudget?: ProviderRequestBudget;
   readonly claudePermissionHandling?: ClaudePermissionHandlingOptions;
   readonly claudeSessionCapabilityStore?: ClaudeSessionCapabilityStore;
+  /** Environment the default GLM adapter reads its token/base URL from. */
+  readonly glmEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CLAUDE_CONFIG_DIR for the default GLM adapter. */
+  readonly glmConfigDirectory?: string;
+  /** Live store-backed GLM token resolver (ADR 0022); env stays the fallback. */
+  readonly resolveGlmAuthToken?: () => string | undefined;
+  /** Environment the default Kimi adapter reads its token/base URL from. */
+  readonly kimiEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CLAUDE_CONFIG_DIR for the default Kimi adapter. */
+  readonly kimiConfigDirectory?: string;
+  /** Live store-backed Kimi token resolver (ADR 0022); env stays the fallback. */
+  readonly resolveKimiAuthToken?: () => string | undefined;
+  /** Environment the default DeepSeek adapter reads its token/base URL from. */
+  readonly deepseekEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CLAUDE_CONFIG_DIR for the default DeepSeek adapter. */
+  readonly deepseekConfigDirectory?: string;
+  /** Live store-backed DeepSeek token resolver (ADR 0022); env stays the fallback. */
+  readonly resolveDeepseekAuthToken?: () => string | undefined;
+  /** Environment the default kimi-platform adapter reads its key from. */
+  readonly kimiPlatformEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CODEX_HOME for the default kimi-platform adapter. */
+  readonly kimiPlatformCodexHomeDirectory?: string;
+  /** Live store-backed kimi-platform key resolver (ADR 0022); env stays the fallback. */
+  readonly resolveKimiPlatformApiKey?: () => string | undefined;
+  /** Environment the default claude-api adapter reads its key from. */
+  readonly claudeApiEnvironment?: NodeJS.ProcessEnv;
+  /** Live store-backed claude-api key resolver (ADR 0022); env stays the fallback. */
+  readonly resolveClaudeApiKey?: () => string | undefined;
+  /** Environment the default codex-api adapter reads its key from. */
+  readonly codexApiEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CODEX_HOME for the default codex-api adapter. */
+  readonly codexApiCodexHomeDirectory?: string;
+  /** Live store-backed codex-api key resolver (ADR 0022); env stays the fallback. */
+  readonly resolveCodexApiKey?: () => string | undefined;
+  /** Catalog freshness enrollment appended to the static catalogs (WO16 P3). */
+  readonly catalogAugmentation?: (
+    endpointId: WorkbenchRuntimeEndpointId,
+  ) => readonly RuntimeModel[];
 }): Promise<ResumableAgentRuntimeAdapter> {
   const codexAdapter =
     options.codexAdapter ??
@@ -188,7 +524,82 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       options.claudePermissionHandling,
       undefined,
       options.claudeSessionCapabilityStore,
+      undefined,
+      options.observeClaudeSubscriptionUsage,
     );
+  const glmAdapter =
+    options.glmAdapter ??
+    createProductionGlmRuntimeAdapter({
+      providerRequestBudget: options.providerRequestBudget,
+      claudePermissionHandling: options.claudePermissionHandling,
+      claudeSessionCapabilityStore: options.claudeSessionCapabilityStore,
+      environment: options.glmEnvironment,
+      configDirectory: options.glmConfigDirectory,
+      resolveGlmAuthToken: options.resolveGlmAuthToken,
+      ...(options.catalogAugmentation === undefined
+        ? {}
+        : {
+            resolveStaticCatalogAugmentation: () =>
+              options.catalogAugmentation!("glm-coding-plan"),
+          }),
+    });
+  const kimiAdapter =
+    options.kimiAdapter ??
+    createProductionKimiRuntimeAdapter({
+      providerRequestBudget: options.providerRequestBudget,
+      claudePermissionHandling: options.claudePermissionHandling,
+      claudeSessionCapabilityStore: options.claudeSessionCapabilityStore,
+      environment: options.kimiEnvironment,
+      configDirectory: options.kimiConfigDirectory,
+      resolveKimiAuthToken: options.resolveKimiAuthToken,
+      ...(options.catalogAugmentation === undefined
+        ? {}
+        : {
+            resolveStaticCatalogAugmentation: () =>
+              options.catalogAugmentation!("kimi-code"),
+          }),
+    });
+  const deepseekAdapter =
+    options.deepseekAdapter ??
+    createProductionDeepseekRuntimeAdapter({
+      providerRequestBudget: options.providerRequestBudget,
+      claudePermissionHandling: options.claudePermissionHandling,
+      claudeSessionCapabilityStore: options.claudeSessionCapabilityStore,
+      environment: options.deepseekEnvironment,
+      configDirectory: options.deepseekConfigDirectory,
+      resolveDeepseekAuthToken: options.resolveDeepseekAuthToken,
+      ...(options.catalogAugmentation === undefined
+        ? {}
+        : {
+            resolveStaticCatalogAugmentation: () =>
+              options.catalogAugmentation!("deepseek-api"),
+          }),
+    });
+  const kimiPlatformAdapter =
+    options.kimiPlatformAdapter ??
+    createProductionKimiPlatformRuntimeAdapter({
+      providerRequestBudget: options.providerRequestBudget,
+      environment: options.kimiPlatformEnvironment,
+      codexHomeDirectory: options.kimiPlatformCodexHomeDirectory,
+      resolveKimiPlatformApiKey: options.resolveKimiPlatformApiKey,
+    });
+  const claudeApiAdapter =
+    options.claudeApiAdapter ??
+    createProductionClaudeApiRuntimeAdapter({
+      providerRequestBudget: options.providerRequestBudget,
+      claudePermissionHandling: options.claudePermissionHandling,
+      claudeSessionCapabilityStore: options.claudeSessionCapabilityStore,
+      environment: options.claudeApiEnvironment,
+      resolveClaudeApiKey: options.resolveClaudeApiKey,
+    });
+  const codexApiAdapter =
+    options.codexApiAdapter ??
+    createProductionCodexApiRuntimeAdapter({
+      providerRequestBudget: options.providerRequestBudget,
+      environment: options.codexApiEnvironment,
+      codexHomeDirectory: options.codexApiCodexHomeDirectory,
+      resolveCodexApiKey: options.resolveCodexApiKey,
+    });
   const activeCompositions = new Map<
     string,
     Promise<RuntimeEndpointComposition>
@@ -215,8 +626,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
         adapter: noAvailableRuntimeAdapter,
         registrations: Object.freeze([]),
         endpoints: Object.freeze([]),
-        endpointDiscovery: publicRuntimeEndpointDiscovery(
-          "not-inspected",
+        endpointDiscovery: publicUniformRuntimeEndpointDiscovery(
           "not-inspected",
         ),
       });
@@ -225,6 +635,15 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       projectDirectory,
       codexAdapter,
       claudeAdapter,
+      glmAdapter,
+      kimiAdapter,
+      deepseekAdapter,
+      kimiPlatformAdapter,
+      claudeApiAdapter,
+      codexApiAdapter,
+      ...(options.catalogAugmentation === undefined
+        ? {}
+        : { catalogAugmentation: options.catalogAugmentation }),
     });
     return Object.freeze({
       adapter:
@@ -406,6 +825,55 @@ export async function discoverRuntimeEndpointComposition(options: {
   readonly projectDirectory: string;
   readonly codexAdapter?: ResumableAgentRuntimeAdapter;
   readonly claudeAdapter?: ResumableAgentRuntimeAdapter;
+  readonly glmAdapter?: ResumableAgentRuntimeAdapter;
+  readonly kimiAdapter?: ResumableAgentRuntimeAdapter;
+  readonly deepseekAdapter?: ResumableAgentRuntimeAdapter;
+  readonly kimiPlatformAdapter?: ResumableAgentRuntimeAdapter;
+  readonly claudeApiAdapter?: ResumableAgentRuntimeAdapter;
+  readonly codexApiAdapter?: ResumableAgentRuntimeAdapter;
+  /** Environment the default GLM adapter reads its token/base URL from. */
+  readonly glmEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CLAUDE_CONFIG_DIR for the default GLM adapter. */
+  readonly glmConfigDirectory?: string;
+  /** Live store-backed GLM token resolver (ADR 0022); env stays the fallback. */
+  readonly resolveGlmAuthToken?: () => string | undefined;
+  /** Environment the default Kimi adapter reads its token/base URL from. */
+  readonly kimiEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CLAUDE_CONFIG_DIR for the default Kimi adapter. */
+  readonly kimiConfigDirectory?: string;
+  /** Live store-backed Kimi token resolver (ADR 0022); env stays the fallback. */
+  readonly resolveKimiAuthToken?: () => string | undefined;
+  /** Environment the default DeepSeek adapter reads its token/base URL from. */
+  readonly deepseekEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CLAUDE_CONFIG_DIR for the default DeepSeek adapter. */
+  readonly deepseekConfigDirectory?: string;
+  /** Live store-backed DeepSeek token resolver (ADR 0022); env stays the fallback. */
+  readonly resolveDeepseekAuthToken?: () => string | undefined;
+  /** Environment the default kimi-platform adapter reads its key from. */
+  readonly kimiPlatformEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CODEX_HOME for the default kimi-platform adapter. */
+  readonly kimiPlatformCodexHomeDirectory?: string;
+  /** Live store-backed kimi-platform key resolver (ADR 0022); env stays the fallback. */
+  readonly resolveKimiPlatformApiKey?: () => string | undefined;
+  /** Environment the default claude-api adapter reads its key from. */
+  readonly claudeApiEnvironment?: NodeJS.ProcessEnv;
+  /** Live store-backed claude-api key resolver (ADR 0022); env stays the fallback. */
+  readonly resolveClaudeApiKey?: () => string | undefined;
+  /** Environment the default codex-api adapter reads its key from. */
+  readonly codexApiEnvironment?: NodeJS.ProcessEnv;
+  /** Isolated CODEX_HOME for the default codex-api adapter. */
+  readonly codexApiCodexHomeDirectory?: string;
+  /** Live store-backed codex-api key resolver (ADR 0022); env stays the fallback. */
+  readonly resolveCodexApiKey?: () => string | undefined;
+  /**
+   * Catalog freshness (WO16 Part 3): per-endpoint conservatively enrolled
+   * models appended to the static catalog before composition. Applies to the
+   * static-key endpoints; returning nothing for an endpoint is the plain
+   * static catalog.
+   */
+  readonly catalogAugmentation?: (
+    endpointId: WorkbenchRuntimeEndpointId,
+  ) => readonly RuntimeModel[];
   readonly providerRequestBudget?: ProviderRequestBudget;
   readonly claudeDiagnosticObserver?: ClaudeDiagnosticObserver;
 }): Promise<RuntimeEndpointCompositionDiscovery> {
@@ -414,7 +882,9 @@ export async function discoverRuntimeEndpointComposition(options: {
       endpointId: "codex-desktop",
       preferenceKey: LEGACY_CODEX_DIRECT_SESSION_PROFILE_ENDPOINT_KEY,
       runtimeFamilyLabel: "Codex",
-      endpointLabel: "Codex desktop",
+      // Ticket 25 facade: the family carries the brand ("Codex ·
+      // Subscription"); the composition label is the short segment name.
+      endpointLabel: "Subscription",
       adapter:
         options.codexAdapter ??
         createProductionCodexAdapter(options.providerRequestBudget),
@@ -430,28 +900,220 @@ export async function discoverRuntimeEndpointComposition(options: {
       endpointId: "claude-code-desktop",
       preferenceKey: claudeEndpointPreferenceKey,
       runtimeFamilyLabel: "Claude",
-      endpointLabel: "Claude Code desktop",
+      endpointLabel: "Subscription",
       adapter:
         options.claudeAdapter ??
         new ClaudeAdapter(undefined, undefined, options.providerRequestBudget),
       directStart: "supported" as const,
+      diagnosticFromError: claudeDiagnosticFromError,
+    }),
+    Object.freeze({
+      endpointId: "glm-coding-plan",
+      preferenceKey: "glm-coding-plan",
+      runtimeFamilyLabel: "GLM",
+      endpointLabel: "GLM Coding Plan",
+      adapter:
+        options.glmAdapter ??
+        createProductionGlmRuntimeAdapter({
+          providerRequestBudget: options.providerRequestBudget,
+          environment: options.glmEnvironment,
+          configDirectory: options.glmConfigDirectory,
+          resolveGlmAuthToken: options.resolveGlmAuthToken,
+          ...(options.catalogAugmentation === undefined
+            ? {}
+            : {
+                resolveStaticCatalogAugmentation: () =>
+                  options.catalogAugmentation!("glm-coding-plan"),
+              }),
+        }),
+      directStart: "supported" as const,
+      // The GLM endpoint's model runtime is served by a remote-backed
+      // Anthropic-compatible API through the local claude CLI transport.
+      executionLocation: "remote-backed" as const,
+      desiredNativeDefault: Object.freeze({
+        model: GLM_DEFAULT_MODEL_ID,
+        effortLevel: "default",
+        executionMode: "single-agent",
+        accessMode: "full-access",
+      }),
+      diagnosticFromError: claudeDiagnosticFromError,
+    }),
+    Object.freeze({
+      endpointId: "kimi-code",
+      preferenceKey: "kimi-code",
+      runtimeFamilyLabel: "Kimi",
+      // Ticket 20: the facade presents "Kimi · Code"; the label is the short
+      // segment name, the family carries the brand.
+      endpointLabel: "Code",
+      adapter:
+        options.kimiAdapter ??
+        createProductionKimiRuntimeAdapter({
+          providerRequestBudget: options.providerRequestBudget,
+          environment: options.kimiEnvironment,
+          configDirectory: options.kimiConfigDirectory,
+          resolveKimiAuthToken: options.resolveKimiAuthToken,
+          ...(options.catalogAugmentation === undefined
+            ? {}
+            : {
+                resolveStaticCatalogAugmentation: () =>
+                  options.catalogAugmentation!("kimi-code"),
+              }),
+        }),
+      directStart: "supported" as const,
+      // Remote-backed Anthropic-compatible API through the local claude CLI
+      // transport, same transport shape as GLM (ticket 11 design of record).
+      executionLocation: "remote-backed" as const,
+      // The only universally available subscription-face model: k3 needs
+      // Moderato+, highspeed needs Allegretto+, kimi-for-coding is every
+      // member's default (research §3, §9.6).
+      desiredNativeDefault: Object.freeze({
+        model: KIMI_DEFAULT_MODEL_ID,
+        // k2.7-code has no effort knob (thinking forced on): the single
+        // `default` tier, effort deliberately not pinned.
+        effortLevel: "default",
+        executionMode: "single-agent",
+        accessMode: "full-access",
+      }),
+      diagnosticFromError: claudeDiagnosticFromError,
+    }),
+    Object.freeze({
+      endpointId: "deepseek-api",
+      preferenceKey: "deepseek-api",
+      runtimeFamilyLabel: "DeepSeek",
+      endpointLabel: "DeepSeek API",
+      adapter:
+        options.deepseekAdapter ??
+        createProductionDeepseekRuntimeAdapter({
+          providerRequestBudget: options.providerRequestBudget,
+          environment: options.deepseekEnvironment,
+          configDirectory: options.deepseekConfigDirectory,
+          resolveDeepseekAuthToken: options.resolveDeepseekAuthToken,
+          ...(options.catalogAugmentation === undefined
+            ? {}
+            : {
+                resolveStaticCatalogAugmentation: () =>
+                  options.catalogAugmentation!("deepseek-api"),
+              }),
+        }),
+      directStart: "supported" as const,
+      // Remote-backed Anthropic-compatible API through the local claude CLI
+      // transport (ticket 12 design of record).
+      executionLocation: "remote-backed" as const,
+      desiredNativeDefault: Object.freeze({
+        model: DEEPSEEK_DEFAULT_MODEL_ID,
+        // This endpoint pins effort explicitly on every session (no
+        // `default` tier exists); the vendor-documented default is `high`.
+        effortLevel: "high",
+        executionMode: "single-agent",
+        accessMode: "full-access",
+      }),
+      diagnosticFromError: claudeDiagnosticFromError,
+    }),
+    Object.freeze({
+      endpointId: "kimi-platform",
+      preferenceKey: "kimi-platform",
+      runtimeFamilyLabel: "Kimi",
+      // Ticket 20: the facade presents "Kimi · 平台"/"Kimi · Platform"; the
+      // composition label is the EN segment name (recorded snapshots store
+      // it verbatim, like every other endpoint label).
+      endpointLabel: "Platform",
+      adapter:
+        options.kimiPlatformAdapter ??
+        createProductionKimiPlatformRuntimeAdapter({
+          providerRequestBudget: options.providerRequestBudget,
+          environment: options.kimiPlatformEnvironment,
+          codexHomeDirectory: options.kimiPlatformCodexHomeDirectory,
+          resolveKimiPlatformApiKey: options.resolveKimiPlatformApiKey,
+        }),
+      directStart: "supported" as const,
+      // Remote-backed OpenAI-face API (CN platform, ticket 11 Comments: no
+      // anthropic face exists) through the local codex CLI custom-provider
+      // transport in its own isolated CODEX_HOME (ticket 17 design of
+      // record).
+      executionLocation: "remote-backed" as const,
+      desiredNativeDefault: Object.freeze({
+        model: KIMI_PLATFORM_DEFAULT_MODEL_ID,
+        // Single unpinned `default` tier only; the effort mapping through
+        // wire_api=chat awaits the supervisor's live spike (ticket 17).
+        effortLevel: "default",
+        executionMode: "single-agent",
+        accessMode: "full-access",
+      }),
+    }),
+    Object.freeze({
+      endpointId: "claude-api",
+      preferenceKey: "claude-api",
+      runtimeFamilyLabel: "Claude",
+      // Ticket 25 facade: short segment name ("Claude · API").
+      endpointLabel: "API",
+      adapter:
+        options.claudeApiAdapter ??
+        createProductionClaudeApiRuntimeAdapter({
+          providerRequestBudget: options.providerRequestBudget,
+          environment: options.claudeApiEnvironment,
+          resolveClaudeApiKey: options.resolveClaudeApiKey,
+        }),
+      directStart: "supported" as const,
+      // Remote-backed: the real Anthropic API reached with an injected
+      // ANTHROPIC_API_KEY through the local claude CLI transport (ticket 21
+      // design of record — the CLI catalog IS the real catalog here, no
+      // static override).
+      executionLocation: "remote-backed" as const,
+      diagnosticFromError: claudeDiagnosticFromError,
+    }),
+    Object.freeze({
+      endpointId: "codex-api",
+      preferenceKey: "codex-api",
+      runtimeFamilyLabel: "Codex",
+      // Ticket 25 facade: short segment name ("Codex · API").
+      endpointLabel: "API",
+      adapter:
+        options.codexApiAdapter ??
+        createProductionCodexApiRuntimeAdapter({
+          providerRequestBudget: options.providerRequestBudget,
+          environment: options.codexApiEnvironment,
+          codexHomeDirectory: options.codexApiCodexHomeDirectory,
+          resolveCodexApiKey: options.resolveCodexApiKey,
+        }),
+      directStart: "supported" as const,
+      // Remote-backed: the real OpenAI API through the local codex CLI in
+      // its own isolated CODEX_HOME (ticket 21 design of record — static
+      // gpt-5.x catalog, chatgpt-account gate skipped).
+      executionLocation: "remote-backed" as const,
+      desiredNativeDefault: Object.freeze({
+        model: CODEX_API_DEFAULT_MODEL_ID,
+        // Real provider effort values only; `ultra` matches the
+        // codex-desktop pick for the same model.
+        effortLevel: "ultra",
+        executionMode: "single-agent",
+        accessMode: "full-access",
+      }),
     }),
   ]);
 
   const inspected = await Promise.all(
     definitions.map(async (definition) => {
       try {
-        const catalog = sanitizeInspectedCatalog(
+        const nativeCatalog = sanitizeInspectedCatalog(
           await definition.adapter.inspect(options.projectDirectory),
         );
+        const catalog =
+          options.catalogAugmentation === undefined ||
+          (definition.adapter instanceof ClaudeAdapter &&
+            definition.adapter.usesStaticCatalogAugmentation())
+            ? nativeCatalog
+            : mergeStaticCatalogAugmentation(
+                nativeCatalog,
+                options.catalogAugmentation(definition.endpointId),
+              );
         return Object.freeze({
           definition,
           composed: composeEndpointCatalog(definition, catalog),
           category: "catalog-ready" as const,
         });
       } catch (error) {
-        if (definition.endpointId === "claude-code-desktop") {
-          const diagnostic = claudeDiagnosticFromError(error);
+        if (definition.diagnosticFromError !== undefined) {
+          const diagnostic = definition.diagnosticFromError(error);
           if (diagnostic !== undefined) {
             try {
               (options.claudeDiagnosticObserver ?? productionClaudeDiagnosticObserver)(
@@ -490,7 +1152,7 @@ export async function discoverRuntimeEndpointComposition(options: {
         registrationId: `production-${definition.endpointId}`,
         endpointId: definition.endpointId,
         runtimeFamily: definition.runtimeFamilyLabel,
-        executionLocation: "local" as const,
+        executionLocation: definition.executionLocation ?? "local",
         adapter: definition.adapter,
         capabilitySnapshot: Object.freeze({
           snapshotId: `catalog-${definition.endpointId}`,
@@ -529,8 +1191,10 @@ export async function discoverRuntimeEndpointComposition(options: {
     registrations: Object.freeze(registrations),
     endpoints: Object.freeze(endpoints),
     endpointDiscovery: publicRuntimeEndpointDiscovery(
-      inspected[0]!.category,
-      inspected[1]!.category,
+      inspected.map((entry) => ({
+        endpointId: entry.definition.endpointId,
+        category: entry.category,
+      })),
     ),
   });
 }
@@ -822,8 +1486,7 @@ function resolveRuntimeResumeIdentity(
   if (matches.length === 0) return undefined;
   if (
     matches.length !== 1 ||
-    (matches[0]!.endpointId !== "codex-desktop" &&
-      matches[0]!.endpointId !== "claude-code-desktop")
+    !isRegisteredRuntimeEndpointId(matches[0]!.endpointId)
   ) {
     throw new RuntimeAdapterError("unsupported-selection");
   }
@@ -932,6 +1595,7 @@ function sameAuthContext(
     left.endpointId === right.endpointId &&
     left.management === right.management &&
     (left.management === "pristine-legacy" ||
+      left.management === "api-key-static" ||
       (right.management === "managed" &&
         left.generation === right.generation))
   );

@@ -12,6 +12,7 @@ import {
   beginDirectSessionProfileRefreshFromProviders,
   canRefreshDirectSessionProfileFromProviders,
   completeDirectSessionProfileLoad,
+  hasHostedProjectView,
   initialRendererState,
   replaceProjectResult,
   selectProjectCommand,
@@ -198,8 +199,8 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
     const unavailableCards = providerCards(unavailableProviders);
     assert.equal(unavailableCards.length, 2);
     assert.deepEqual(unavailableCards.map(plainText), [
-      "Codex Codex desktop Catalog unavailable Status Runtime not located Catalog Unavailable Not found under any name that was checked. Looked for codex.exe, codex.cmd, codex.bat, codex on your PATH codex.exe, codex.cmd, codex.bat, codex in %APPDATA%\\npm codex.exe in %LOCALAPPDATA%\\OpenAI\\Codex\\bin Get it https://developers.openai.com/codex/cli Executable path Somewhere else on this machine? Type the full path to the runtime here. The shim an npm install writes works, and so does the program itself. Use this path Clear Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check",
-      "Claude Claude Code desktop Catalog unavailable Status Runtime not located Catalog Unavailable Not found under any name that was checked. Looked for claude.exe, claude.cmd, claude.bat, claude on your PATH claude.exe, claude.cmd, claude.bat, claude in %APPDATA%\\npm claude.exe in %USERPROFILE%\\.local\\bin claude.exe in %APPDATA%\\Claude\\claude-code Get it https://docs.claude.com/en/docs/claude-code/setup Executable path Somewhere else on this machine? Type the full path to the runtime here. The shim an npm install writes works, and so does the program itself. Use this path Clear Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check",
+      "Codex Subscription Catalog unavailable Subscription API Status Runtime not located Catalog Unavailable Not found under any name that was checked. Looked for codex.exe, codex.cmd, codex.bat, codex on your PATH codex.exe, codex.cmd, codex.bat, codex in %APPDATA%\\npm codex.exe in %LOCALAPPDATA%\\OpenAI\\Codex\\bin Get it https://developers.openai.com/codex/cli Executable path Somewhere else on this machine? Type the full path to the runtime here. The shim an npm install writes works, and so does the program itself. Use this path Clear Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
+      "Claude Subscription Catalog unavailable Subscription API Status Runtime not located Catalog Unavailable Not found under any name that was checked. Looked for claude.exe, claude.cmd, claude.bat, claude on your PATH claude.exe, claude.cmd, claude.bat, claude in %APPDATA%\\npm claude.exe in %USERPROFILE%\\.local\\bin claude.exe in %APPDATA%\\Claude\\claude-code Get it https://docs.claude.com/en/docs/claude-code/setup Executable path Somewhere else on this machine? Type the full path to the runtime here. The shim an npm install writes works, and so does the program itself. Use this path Clear Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
     ]);
     assert.equal(unavailableText.match(/Re-check all/gu)?.length, 1);
 
@@ -210,9 +211,30 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
     const categorizedCards = providerCards(categorizedProviders);
     assert.equal(categorizedCards.length, 2);
     assert.deepEqual(categorizedCards.map(plainText), [
-      "Codex Codex desktop Catalog unavailable Status Authentication required Catalog Unavailable Sign-in remains in the official provider flow. Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check",
-      "Claude Claude Code desktop Catalog unavailable Status Inspection failed Catalog Unavailable No private error detail is exposed. Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check",
+      "Codex Subscription Catalog unavailable Subscription API Status Authentication required Catalog Unavailable Sign-in remains in the official provider flow. Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
+      "Claude Subscription Catalog unavailable Subscription API Status Inspection failed Catalog Unavailable No private error detail is exposed. Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
     ]);
+    const configuredFailureCards = providerCards(
+      renderProviders(renderedModule.WorkbenchScreen, categorizedFailure, {
+        codex: "",
+        claude: "C:\\Windows\\System32\\where.exe",
+      }),
+    );
+    assert.match(
+      configuredFailureCards[1] ?? "",
+      /<input[^>]*id="runtime-executable-claude"[^>]*value="C:\\Windows\\System32\\where\.exe"/u,
+      "a failed configured CLI must keep its executable path input visible",
+    );
+    assert.match(
+      plainText(configuredFailureCards[1] ?? ""),
+      /Use this path Clear/u,
+      "a failed configured CLI must keep its save and clear actions visible",
+    );
+    assert.doesNotMatch(
+      plainText(configuredFailureCards[1] ?? ""),
+      /Looked for|Get it/u,
+      "inspection failure must not invent missing-runtime lookup guidance",
+    );
     assert.equal(
       categorizedCards.filter((card) => /Authentication required/u.test(card)).length,
       1,
@@ -331,7 +353,11 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
       providersRoute,
       /canRead=\{\s*canRefreshDirectSessionProfileFromProviders\(\s*rendererState\(\),?\s*\)\s*\}[\s\S]*?onRead=\{props\.onRefreshProfile\}/u,
     );
-    assert.doesNotMatch(source, /props\.bridge\.(?:refresh|recheck)/iu);
+    // The profile "Re-check all" stays on the pure refresh gate: no bridge
+    // refresh/recheck read. The one carve-out is the catalog-freshness
+    // manual refresh (ticket 14 / WO16 Part 3), a different surface that
+    // legitimately owns a bridge refresh method.
+    assertNoBridgeProfileRefresh(source);
 
     const runtimeState = stageSource.slice(
       stageSource.indexOf("const RuntimeNotLocatedState"),
@@ -356,11 +382,20 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
   }
 });
 
+function assertNoBridgeProfileRefresh(source: string): void {
+  assert.doesNotMatch(
+    source,
+    /props\.bridge\.(?:refresh|recheck)(?!EndpointCatalogFreshness)/iu,
+  );
+}
+
 function renderProviders(
   Screen: (props: Readonly<Record<string, unknown>>) => unknown,
   state: WorkbenchRendererState,
+  runtimeExecutables?: Readonly<{ codex: string; claude: string }>,
 ): string {
-  assert.equal(state.result?.ok, true);
+  assert.equal(hasHostedProjectView(state.result), true);
+  if (!hasHostedProjectView(state.result)) assert.fail("Expected a Project view.");
   const view = state.result.view;
   return renderToString(() =>
     Screen({
@@ -378,6 +413,7 @@ function renderProviders(
       appearancePersistencePhase: "saved",
       claudePermissionHandling: "without-asking",
       claudePermissionHandlingPersistencePhase: "saved",
+      runtimeExecutables,
       newSession: state.newSession,
       projectSwitch: state.projectSwitch,
       projectOpen: state.projectOpen,
@@ -426,7 +462,11 @@ function providersButton(html: string): {
 }
 
 function providerCards(html: string): readonly string[] {
-  return html.match(/<section[^>]*class="provider"[^>]*>[\s\S]*?<\/section>/gu) ?? [];
+  return (
+    html.match(
+      /<section[^>]*class="provider(?: provider-(?:kimi|claude|codex))?"[^>]*>[\s\S]*?<\/section>/gu,
+    ) ?? []
+  );
 }
 
 function plainText(html: string): string {

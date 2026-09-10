@@ -224,7 +224,7 @@ test("the observed exit-1 tuple reaches the Claude catalog as authentication-req
   );
 });
 
-test("repeated exit-1 subscription reads move Settings from Unknown / Re-check to Sign-in required / Login", async () => {
+test("repeated exit-1 subscription reads move Settings from Unknown / Re-check sign-in to Sign-in required / Login", async () => {
   const dependencies: ClaudeSubscriptionAuthenticationDependencies =
     Object.freeze({
       async discoverExecutable() {
@@ -274,16 +274,16 @@ test("repeated exit-1 subscription reads move Settings from Unknown / Re-check t
   try {
     const initial = initialSettingsSubscriptionAuthenticationState();
     const initialPresentation = settingsSubscriptionAuthenticationPresentation(
-      initial["claude-code-desktop"],
+      initial["claude-code-desktop"]!,
     );
     assert.deepEqual(
       [initialPresentation.label, initialPresentation.actionLabel],
-      ["Unknown", "Re-check"],
+      ["Unknown", "Re-check sign-in"],
     );
     const initialCard = coordinator.renderSettings().cards[1];
     assert.deepEqual(
       [initialCard?.authentication, initialCard?.actions[0]?.label],
-      ["Unknown", "Re-check"],
+      ["Unknown", "Re-check sign-in"],
     );
 
     const first = await coordinator.request({
@@ -318,7 +318,7 @@ test("repeated exit-1 subscription reads move Settings from Unknown / Re-check t
     );
     const refreshedPresentation =
       settingsSubscriptionAuthenticationPresentation(
-        refreshed["claude-code-desktop"],
+        refreshed["claude-code-desktop"]!,
       );
     assert.deepEqual(
       [refreshedPresentation.label, refreshedPresentation.actionLabel],

@@ -30,7 +30,7 @@ const cleanupLeafPattern = /^codex-adapter-[0-9a-f]{32}$/u;
 const diagnosticLogMaximumBytes = 524_288;
 const diagnosticLogPath = join(
   tmpdir(),
-  `unified-agent-workbench-codex-transport-${process.pid}.jsonl`,
+  `synchronized-intellect-network-codex-transport-${process.pid}.jsonl`,
 );
 let diagnosticLogInitialized = false;
 const maximumStagedRuntimeBytes = 1_073_741_824;
@@ -47,6 +47,8 @@ const requiredStagedRuntimeFileNames = Object.freeze([
   "codex-code-mode-host.exe",
 ] as const);
 const neverAbortedSignal = new AbortController().signal;
+const maximumRuntimeStderrBytes = 65_536;
+const runtimeStderr = new WeakMap<ChildProcessWithoutNullStreams, Buffer[]>();
 const protectedSubscriptionAuthenticationEnvironmentKeys = Object.freeze([
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
@@ -103,12 +105,19 @@ export type CodexTransportDiagnostic =
       readonly kind: "cleanup-failed";
       readonly reason: string;
     }
-  | { readonly kind: "cleanup-succeeded" };
+  | { readonly kind: "cleanup-succeeded" }
+  // What the CLI itself said. When a release stops accepting a flag or a
+  // config key the workbench writes -- 0.153-alpha did exactly that to
+  // `wire_api = "chat"` -- the runtime explains the refusal on stderr and then
+  // exits, and this side used to see only a closed stream. Draining that into
+  // nowhere turned every such refusal into an unexplained failure.
+  | { readonly kind: "runtime-stderr"; readonly text: string };
 
 export interface CodexProcessTransportDependencies {
   discoverExecutable(): Promise<CodexExecutableDiscoveryResult>;
   launchExecutable(
     executable: CodexExecutableHandle,
+    environment?: NodeJS.ProcessEnv,
   ): Promise<ChildProcessWithoutNullStreams>;
   stageExecutable(executable: CodexExecutableHandle): Promise<{
     readonly executable: CodexExecutableHandle;
@@ -121,6 +130,16 @@ export interface CodexProcessTransportDependencies {
     child: ChildProcessWithoutNullStreams,
     timeoutMilliseconds: number,
   ): Promise<boolean>;
+}
+
+/**
+ * Options for an endpoint-context transport (ticket 17). `environment`, when
+ * present, is passed to every launch (direct and staged): the child then runs
+ * on exactly this environment instead of inheriting the parent's. Absent
+ * options keep the historical spawn byte-identical (`codex-desktop`).
+ */
+export interface CodexProcessTransportOptions {
+  readonly environment?: NodeJS.ProcessEnv;
 }
 
 export interface CodexSubscriptionLoginProcessDependencies {
@@ -160,8 +179,20 @@ const discoverProductionExecutable = createProductionCodexExecutableDiscovery(
 );
 const productionDependencies: CodexProcessTransportDependencies = Object.freeze({
   discoverExecutable: discoverProductionExecutable,
-  launchExecutable: (executable: CodexExecutableHandle) =>
-    launchCodexRuntime(executableLaunch(executable)),
+  // main-resync: main's plan-based launch (the handle carries a
+  // WindowsRuntimeLaunch, so a .cmd shim's entry script is structurally
+  // resolved, never re-parsed by a shell) keeps the lane's endpoint-context
+  // `environment` passthrough: absent, the spawn options are exactly main's;
+  // present, the child runs on exactly that environment (ticket 17).
+  launchExecutable: (
+    executable: CodexExecutableHandle,
+    environment?: NodeJS.ProcessEnv,
+  ) =>
+    launchCodexRuntime(
+      executableLaunch(executable),
+      productionRuntimeSpawn,
+      environment,
+    ),
   stageExecutable: stageProductionCodexRuntime,
   removeCleanupDirectory: removeCodexCleanupDirectory,
   recordDiagnostic: writeCodexTransportDiagnostic,
@@ -237,8 +268,33 @@ export function codexTransportDiagnosticFilePath(): string {
   return diagnosticLogPath;
 }
 
+/**
+ * The production executable discovery, exported for endpoint-context adapters
+ * (ticket 17): a static-catalog endpoint's `inspect` must be able to report
+ * `runtime-not-located` without spawning a process, exactly like the claude
+ * family's static-catalog endpoints.
+ */
+export function discoverOfficialCodexExecutable(): Promise<CodexExecutableDiscoveryResult> {
+  return discoverProductionExecutable();
+}
+
+/**
+ * Fresh launch plan used by local operations that must address the same Codex
+ * installation as the next Session. The branded handle remains private to the
+ * transport boundary; callers receive only the complete executable + prefix
+ * argument plan needed to start native and JavaScript-entry installs alike.
+ */
+export async function discoverOfficialCodexLaunch(): Promise<WindowsRuntimeLaunch> {
+  const discovery = await discoverProductionExecutable();
+  if (discovery.kind !== "located") {
+    throw new RuntimeAdapterError("runtime-not-located");
+  }
+  return executableLaunch(discovery.executable);
+}
+
 export async function createOfficialCodexTransport(
   dependencies: CodexProcessTransportDependencies = productionDependencies,
+  options: CodexProcessTransportOptions = {},
 ): Promise<OfficialRuntimeTransport> {
   const discovery = await dependencies.discoverExecutable().catch(
     (): CodexExecutableDiscoveryResult => ({ kind: "not-located" }),
@@ -247,11 +303,12 @@ export async function createOfficialCodexTransport(
     throw new RuntimeAdapterError("runtime-not-located");
   }
   const executable = discovery.executable;
+  const environment = options.environment;
   let cleanupDirectory: string | undefined;
   let child: ChildProcessWithoutNullStreams;
 
   try {
-    child = await dependencies.launchExecutable(executable);
+    child = await dependencies.launchExecutable(executable, environment);
     recordDiagnostic(dependencies, { kind: "direct-launch-succeeded" });
   } catch (error) {
     const fallbackEligible = isAccessDenied(error);
@@ -279,7 +336,7 @@ export async function createOfficialCodexTransport(
       throw new RuntimeAdapterError("runtime-unavailable");
     }
     try {
-      child = await dependencies.launchExecutable(staged.executable);
+      child = await dependencies.launchExecutable(staged.executable, environment);
       recordDiagnostic(dependencies, { kind: "staged-launch-succeeded" });
     } catch (stagedLaunchError) {
       recordDiagnostic(dependencies, {
@@ -607,7 +664,14 @@ export function codexSpawnArguments(
 export type CodexRuntimeSpawn = (
   executable: string,
   arguments_: readonly string[],
-  options: { readonly stdio: "pipe"; readonly windowsHide: true },
+  options: {
+    readonly stdio: "pipe";
+    readonly windowsHide: true;
+    // main-resync: the lane's endpoint-context launch passes an explicit
+    // environment; main's own call sites keep the two-field options object
+    // and inherit the parent environment exactly as before.
+    readonly env?: NodeJS.ProcessEnv;
+  },
 ) => ChildProcessWithoutNullStreams;
 
 const productionRuntimeSpawn: CodexRuntimeSpawn = (
@@ -616,9 +680,41 @@ const productionRuntimeSpawn: CodexRuntimeSpawn = (
   options,
 ) => spawn(executable, [...arguments_], options);
 
+/**
+ * Keep a bounded head of the runtime's stderr so a failure can say what the CLI
+ * complained about. Bounded and head-only: the first refusal is the one that
+ * explains the exit, and the stream still drains either way.
+ */
+function captureCodexRuntimeStderr(child: ChildProcessWithoutNullStreams): void {
+  const chunks: Buffer[] = [];
+  let captured = 0;
+  runtimeStderr.set(child, chunks);
+  child.stderr.on("data", (chunk: Buffer | string) => {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+    const remaining = maximumRuntimeStderrBytes - captured;
+    if (remaining <= 0) return;
+    const retained = bytes.subarray(0, remaining);
+    chunks.push(retained);
+    captured += retained.length;
+  });
+  child.stderr.resume();
+}
+
+/** The captured stderr, once. Absent when the runtime said nothing. */
+export function takeCodexRuntimeStderr(
+  child: ChildProcessWithoutNullStreams,
+): string | undefined {
+  const chunks = runtimeStderr.get(child);
+  if (chunks === undefined) return undefined;
+  runtimeStderr.delete(child);
+  const text = Buffer.concat(chunks).toString("utf8").trim();
+  return text.length === 0 ? undefined : text;
+}
+
 export function launchCodexRuntime(
   plan: WindowsRuntimeLaunch,
   spawnProcess: CodexRuntimeSpawn = productionRuntimeSpawn,
+  environment?: NodeJS.ProcessEnv,
 ): Promise<ChildProcessWithoutNullStreams> {
   return new Promise((resolve, reject) => {
     const child = spawnProcess(
@@ -627,9 +723,10 @@ export function launchCodexRuntime(
       {
         stdio: "pipe",
         windowsHide: true,
+        ...(environment === undefined ? {} : { env: environment }),
       },
     );
-    child.stderr.resume();
+    captureCodexRuntimeStderr(child);
 
     const onError = (error: Error) => reject(error);
     child.once("error", onError);
@@ -800,6 +897,10 @@ class ProcessTransport implements OfficialRuntimeTransport {
 
   private async stopOnce(): Promise<void> {
     let shutdownFailed = false;
+    const complaint = takeCodexRuntimeStderr(this.child);
+    if (complaint !== undefined) {
+      this.recordDiagnostic({ kind: "runtime-stderr", text: complaint });
+    }
     try {
       this.child.stdin.end();
     } catch {

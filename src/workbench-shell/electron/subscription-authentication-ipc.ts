@@ -140,8 +140,14 @@ export function installWorkbenchSubscriptionAuthenticationActionIpc(options: {
     WORKBENCH_CANCEL_PREPARED_SUBSCRIPTION_AUTHENTICATION_CHANNEL,
     cancelHandler,
   );
-  options.window.webContents.on("render-process-gone", terminalLifecycleListener);
-  options.window.webContents.on("destroyed", terminalLifecycleListener);
+  // Captured while the window is still alive. Reading the `webContents`
+  // getter on a destroyed BrowserWindow throws `Object has been destroyed`,
+  // and dispose() runs from the window's own "closed" handler, where the
+  // window is destroyed by definition (issue 172). A reference taken here
+  // keeps answering removeListener afterwards, so nothing has to be caught.
+  const rendererSender = options.window.webContents;
+  rendererSender.on("render-process-gone", terminalLifecycleListener);
+  rendererSender.on("destroyed", terminalLifecycleListener);
   options.window.on("closed", terminalLifecycleListener);
 
   return Object.freeze({
@@ -157,11 +163,11 @@ export function installWorkbenchSubscriptionAuthenticationActionIpc(options: {
         ] as const) {
           options.ipcMain.removeHandler(channel);
         }
-        options.window.webContents.removeListener(
+        rendererSender.removeListener(
           "render-process-gone",
           terminalLifecycleListener,
         );
-        options.window.webContents.removeListener(
+        rendererSender.removeListener(
           "destroyed",
           terminalLifecycleListener,
         );
@@ -320,11 +326,17 @@ export function installWorkbenchSubscriptionAuthenticationIpc(options: {
     WORKBENCH_CANCEL_SUBSCRIPTION_AUTHENTICATION_CHANNEL,
     cancelHandler,
   );
-  options.window.webContents.on(
+  // Captured while the window is still alive. Reading the `webContents`
+  // getter on a destroyed BrowserWindow throws `Object has been destroyed`,
+  // and dispose() runs from the window's own "closed" handler, where the
+  // window is destroyed by definition (issue 172). A reference taken here
+  // keeps answering removeListener afterwards, so nothing has to be caught.
+  const rendererSender = options.window.webContents;
+  rendererSender.on(
     "render-process-gone",
     terminalLifecycleListener,
   );
-  options.window.webContents.on("destroyed", terminalLifecycleListener);
+  rendererSender.on("destroyed", terminalLifecycleListener);
   options.window.on("closed", terminalLifecycleListener);
 
   return Object.freeze({
@@ -341,11 +353,11 @@ export function installWorkbenchSubscriptionAuthenticationIpc(options: {
         options.ipcMain.removeHandler(
           WORKBENCH_CANCEL_SUBSCRIPTION_AUTHENTICATION_CHANNEL,
         );
-        options.window.webContents.removeListener(
+        rendererSender.removeListener(
           "render-process-gone",
           terminalLifecycleListener,
         );
-        options.window.webContents.removeListener(
+        rendererSender.removeListener(
           "destroyed",
           terminalLifecycleListener,
         );

@@ -20,6 +20,12 @@ const englishCopy = {
     hideLabel: "Hide this empty history",
     hidingLabel: "Hiding…",
     emptyNotice: "This Project has only the history it is showing now.",
+    noHistoriesNotice:
+      "No recorded conversation histories were found for this Project.",
+    invalidSelectionNotice:
+      "This Project is no longer available. Close this panel and reopen it from the Project rail.",
+    unavailableNotice:
+      "This Project's conversation histories could not be read right now.",
     loadingNotice: "Reading this Project's histories…",
   },
   historyOrdinalCopy: (index: number): string => `History ${index}`,
@@ -79,6 +85,9 @@ const simplifiedChineseCopy = {
     hideLabel: "隐藏此空历史",
     hidingLabel: "正在隐藏…",
     emptyNotice: "此项目只有当前显示的历史。",
+    noHistoriesNotice: "未找到此项目的已记录对话历史。",
+    invalidSelectionNotice: "此项目已不可用。请关闭此面板，然后从项目栏重新打开。",
+    unavailableNotice: "暂时无法读取此项目的对话历史。",
     loadingNotice: "正在读取此项目的历史…",
   },
   historyOrdinalCopy: (index: number): string => `历史 ${index}`,

@@ -164,6 +164,12 @@ export async function runTestDoubleUserJourneys(
       adapter: await createProductionRuntimeEndpointAdapter({
         codexAdapter: codex,
         claudeAdapter: claude,
+        glmEnvironment: {},
+        kimiEnvironment: {},
+        deepseekEnvironment: {},
+        kimiPlatformEnvironment: {},
+        claudeApiEnvironment: {},
+        codexApiEnvironment: {},
       }),
     });
     const views = observeProjectViews(backend.observeProject);

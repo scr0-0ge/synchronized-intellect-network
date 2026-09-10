@@ -1,4 +1,5 @@
 import type {
+  SubscriptionAuthenticationEndpointId,
   WorkbenchRuntimeEndpointDiscovery,
   WorkbenchRuntimeEndpointDiscoveryCategory,
   WorkbenchRuntimeEndpointId,
@@ -12,6 +13,7 @@ import {
   WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS,
   type WorkbenchSubscriptionAuthenticationActionOutcome,
 } from "../subscription-authentication-coordinator.ts";
+import { WORKBENCH_RUNTIME_ENDPOINT_IDS } from "../runtime-endpoint-identity.ts";
 import type { WorkbenchAppearancePersistencePhase } from "./appearance-preference-state.ts";
 import {
   railCopy,
@@ -85,8 +87,17 @@ export interface SettingsSubscriptionAuthenticationEntry {
   }> | null;
 }
 
+/**
+ * Subscription-authentication rows keyed by endpoint id. The map is partial by
+ * construction: only endpoints that participate in subscription authentication
+ * carry a row, so a static-key endpoint (GLM Coding Plan) is structurally
+ * absent here rather than present-and-ignored, and every reader has to face
+ * that absence instead of dereferencing a row that was never created.
+ */
 export type SettingsSubscriptionAuthenticationState = Readonly<
-  Record<WorkbenchRuntimeEndpointId, SettingsSubscriptionAuthenticationEntry>
+  Partial<
+    Record<WorkbenchRuntimeEndpointId, SettingsSubscriptionAuthenticationEntry>
+  >
 >;
 
 export interface SettingsSubscriptionAuthenticationPresentation {
@@ -103,21 +114,64 @@ export interface SettingsSubscriptionAuthenticationPresentation {
   readonly blockers: readonly Readonly<{ label: string; count: number }>[];
 }
 
+/**
+ * Endpoint-id → opaque subscription-authentication selection key. Data-driven
+ * lookup: every endpoint that participates in subscription authentication has
+ * exactly one row here. Static-key endpoints (GLM Coding Plan) do not
+ * participate — their authentication state is presented through endpoint
+ * discovery, never through the subscription login/logout panel — so they have
+ * no row and `subscriptionAuthenticationSelectionKey` refuses them.
+ */
+const subscriptionAuthenticationSelectionKeys: Readonly<
+  Record<SubscriptionAuthenticationEndpointId, string>
+> = Object.freeze({
+  "codex-desktop":
+    WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+  "claude-code-desktop":
+    WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.claude,
+});
+
+/** Subscription-authentication participants, in panel order. */
+export const SUBSCRIPTION_AUTHENTICATION_ENDPOINT_IDS: readonly SubscriptionAuthenticationEndpointId[] =
+  Object.freeze(
+    Object.keys(
+      subscriptionAuthenticationSelectionKeys,
+    ) as SubscriptionAuthenticationEndpointId[],
+  );
+
+/** Whether this endpoint binds through the subscription login/logout panel. */
+export function isSubscriptionAuthenticationEndpointId(
+  endpointId: WorkbenchRuntimeEndpointId,
+): endpointId is SubscriptionAuthenticationEndpointId {
+  return Object.prototype.hasOwnProperty.call(
+    subscriptionAuthenticationSelectionKeys,
+    endpointId,
+  );
+}
+
 export function subscriptionAuthenticationSelectionKey(
   endpointId: WorkbenchRuntimeEndpointId,
 ): string {
-  return endpointId === "codex-desktop"
-    ? WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex
-    : WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.claude;
+  if (!isSubscriptionAuthenticationEndpointId(endpointId)) {
+    throw new TypeError("unknown-subscription-authentication-endpoint");
+  }
+  return subscriptionAuthenticationSelectionKeys[endpointId];
 }
 
 export function initialSettingsSubscriptionAuthenticationState(
-  _discovery?: WorkbenchRuntimeEndpointDiscovery,
+  discovery?: WorkbenchRuntimeEndpointDiscovery,
 ): SettingsSubscriptionAuthenticationState {
-  return Object.freeze({
-    "codex-desktop": entry(),
-    "claude-code-desktop": entry(),
-  });
+  const endpointIds = (
+    discovery?.statuses.map((status) => status.endpointId) ??
+    WORKBENCH_RUNTIME_ENDPOINT_IDS
+  ).filter(isSubscriptionAuthenticationEndpointId);
+  const entries: Partial<
+    Record<WorkbenchRuntimeEndpointId, SettingsSubscriptionAuthenticationEntry>
+  > = {};
+  for (const endpointId of endpointIds) {
+    entries[endpointId] = entry();
+  }
+  return Object.freeze(entries);
 }
 
 export function completeSettingsSubscriptionAuthenticationResponse(
@@ -126,6 +180,7 @@ export function completeSettingsSubscriptionAuthenticationResponse(
   response: WorkbenchSubscriptionAuthenticationPublicResponse,
 ): SettingsSubscriptionAuthenticationState {
   const current = state[endpointId];
+  if (current === undefined) return state;
   switch (response.kind) {
     case "authentication-state":
       return replaceAuthenticationEntry(state, endpointId, {
@@ -242,6 +297,7 @@ export function beginSettingsSubscriptionAuthenticationInspection(
 ): SettingsSubscriptionAuthenticationState {
   const current = state[endpointId];
   if (
+    current === undefined ||
     current.pendingAction !== null ||
     current.preparationPending !== null ||
     current.inspectionPending
@@ -268,6 +324,7 @@ export function beginSettingsSubscriptionAuthenticationPreparation(
 ): SettingsSubscriptionAuthenticationState {
   const current = state[endpointId];
   if (
+    current === undefined ||
     current.pendingAction !== null ||
     current.preparationPending !== null ||
     current.inspectionPending
@@ -297,7 +354,7 @@ export function beginSettingsSubscriptionAuthenticationAction(
   action: WorkbenchSubscriptionAuthenticationAction,
 ): SettingsSubscriptionAuthenticationState {
   const current = state[endpointId];
-  if (current.pendingAction !== null) return state;
+  if (current === undefined || current.pendingAction !== null) return state;
   return replaceAuthenticationEntry(state, endpointId, {
     ...current,
     inspectionPending: false,
@@ -322,6 +379,7 @@ export function clearSettingsSubscriptionAuthenticationConfirmation(
   endpointId: WorkbenchRuntimeEndpointId,
 ): SettingsSubscriptionAuthenticationState {
   const current = state[endpointId];
+  if (current === undefined) return state;
   return replaceAuthenticationEntry(state, endpointId, {
     ...current,
     confirmation: null,

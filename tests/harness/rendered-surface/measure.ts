@@ -193,6 +193,29 @@ export type MeasuredExtent = Readonly<{
   declaredMaxWidth: string | null;
 }>;
 
+/**
+ * An interactive control that the first clipping ancestor above it has cut off.
+ *
+ * Reported only when that ancestor clips (`overflow: hidden` / `clip`); a
+ * scrollable ancestor is treated as reachable and produces no entry, because
+ * the person can scroll to it. `hiddenTotal` is measured against the clipper's
+ * padding box, which is the edge the clip actually happens at.
+ */
+export type ClippedControl = Readonly<{
+  signature: string;
+  label: string;
+  clipper: string;
+  clipperOverflowX: string;
+  clipperOverflowY: string;
+  clipperHasOverflowContent: boolean;
+  rect: Readonly<{ top: number; left: number; width: number; height: number }>;
+  clipperRect: Readonly<{ top: number; left: number; width: number; height: number }>;
+  hiddenLeft: number;
+  hiddenRight: number;
+  hiddenTotal: number;
+  fullyHidden: boolean;
+}>;
+
 /** One element inside the conversation that draws a visible vertical edge. */
 export type PaintedEdge = Readonly<{
   scope: string;
@@ -210,6 +233,15 @@ export type MeasuredSurface = Readonly<{
   capture: Readonly<{ width: number; height: number }>;
   root: Readonly<Record<string, string | null>>;
   /**
+   * What the environment resolved for the media features a surface can request.
+   *
+   * Kept out of `root`, which carries the product's own `data-*` attributes and
+   * is compared whole by tests that own an appearance. An emulated preference
+   * is not a product attribute, and it is reported rather than assumed so a
+   * measurement can prove the configuration it claims to be in.
+   */
+  mediaEnvironment: Readonly<{ reducedTransparency: "reduce" | "no-preference" }>;
+  /**
    * Whether the acrylic skin's own fallback backdrop is painting (`F51`).
    *
    * `beforeContent === "none"` means the fallback pseudo-element does not
@@ -226,6 +258,7 @@ export type MeasuredSurface = Readonly<{
   texts: readonly MeasuredText[];
   grounds: readonly MeasuredGround[];
   extents: readonly MeasuredExtent[];
+  clippedControls: readonly ClippedControl[];
   paintedEdges: readonly PaintedEdge[];
   seams: readonly MeasuredSeam[];
   verticalSeams: readonly MeasuredVerticalSeam[];
@@ -282,6 +315,18 @@ export type SurfaceRequest = Readonly<{
    * between runs.
    */
   viewport?: Readonly<{ width: number; height: number }>;
+  /**
+   * Media features emulated for the whole render, applied to the real renderer
+   * before navigation.
+   *
+   * `prefers-reduced-transparency` is not reachable through `steps`: it is an
+   * OS setting the product only ever reads, so a configuration the owner can
+   * enter with one Windows toggle has no other way into a measurement. The
+   * emulation is never taken on trust — the collected root reports what
+   * `matchMedia` resolved in the page, so a request that failed to engage is
+   * visible in the reading instead of assumed.
+   */
+  emulatedMediaFeatures?: readonly Readonly<{ name: string; value: string }>[];
 }>;
 
 export const MEASUREMENT_VIEWPORT = Object.freeze({ width: 1440, height: 1000 });
@@ -370,6 +415,7 @@ export async function measureSurface(
           preserveTextShadow: request.preserveTextShadow ?? false,
           screenshotPath: stagedScreenshotPath,
           windowBackground: request.windowBackground ?? "#ffffff",
+          emulatedMediaFeatures: request.emulatedMediaFeatures ?? [],
         }),
         "utf8",
       );

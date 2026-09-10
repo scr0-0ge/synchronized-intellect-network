@@ -21,7 +21,13 @@ import {
 
 export type DurableRuntimeEndpointId =
   | "codex-desktop"
-  | "claude-code-desktop";
+  | "claude-code-desktop"
+  | "glm-coding-plan"
+  | "kimi-code"
+  | "deepseek-api"
+  | "kimi-platform"
+  | "claude-api"
+  | "codex-api";
 
 export type WorkbenchAuthenticationAction = "login" | "logout";
 
@@ -37,7 +43,72 @@ export type DurableAuthenticationContext =
       readonly management: "managed";
       /** Workbench-private equality value. It carries no account meaning. */
       readonly generation: string;
+    }
+  | {
+      readonly schemaVersion: 1;
+      readonly endpointId: DurableRuntimeEndpointId;
+      readonly management: "api-key-static";
     };
+
+/**
+ * The one endpoint class whose authentication never passes through this
+ * ledger: an api-key transport (GLM Coding Plan, Kimi Code, DeepSeek API;
+ * ADR 0022) has no login or logout to observe, so it has no generation to
+ * mint, compare, or invalidate. Its durable context is one of the frozen
+ * constants below — always endpoint-bound, so a Kimi command can never
+ * record a GLM context — and every eligibility question about these
+ * endpoints reduces to shape equality, never to subscription ledger state.
+ */
+const API_TRANSPORT_ENDPOINT_IDS: readonly DurableRuntimeEndpointId[] =
+  Object.freeze([
+    "glm-coding-plan",
+    "kimi-code",
+    "deepseek-api",
+    "kimi-platform",
+    "claude-api",
+    "codex-api",
+  ]);
+
+const apiTransportAuthenticationContexts: Readonly<
+  Record<string, DurableAuthenticationContext>
+> = Object.freeze({
+  "glm-coding-plan": Object.freeze({
+    schemaVersion: 1,
+    endpointId: "glm-coding-plan",
+    management: "api-key-static",
+  }),
+  "kimi-code": Object.freeze({
+    schemaVersion: 1,
+    endpointId: "kimi-code",
+    management: "api-key-static",
+  }),
+  "deepseek-api": Object.freeze({
+    schemaVersion: 1,
+    endpointId: "deepseek-api",
+    management: "api-key-static",
+  }),
+  "kimi-platform": Object.freeze({
+    schemaVersion: 1,
+    endpointId: "kimi-platform",
+    management: "api-key-static",
+  }),
+  "claude-api": Object.freeze({
+    schemaVersion: 1,
+    endpointId: "claude-api",
+    management: "api-key-static",
+  }),
+  "codex-api": Object.freeze({
+    schemaVersion: 1,
+    endpointId: "codex-api",
+    management: "api-key-static",
+  }),
+});
+
+function isApiTransportEndpointId(
+  value: DurableRuntimeEndpointId,
+): boolean {
+  return API_TRANSPORT_ENDPOINT_IDS.includes(value);
+}
 
 export interface RuntimeEndpointAuthGenerationSnapshot {
   readonly codex: DurableAuthenticationContext;
@@ -382,6 +453,9 @@ export function createWorkLedgerAuthGenerationModule(
   const captureForAcceptedCommand = (
     endpointId: DurableRuntimeEndpointId,
   ): DurableAuthenticationContext | undefined => {
+    if (isApiTransportEndpointId(endpointId)) {
+      return apiTransportAuthenticationContexts[endpointId];
+    }
     if (!isEndpointId(endpointId)) return undefined;
     const state = readState(
       statePath,
@@ -443,9 +517,26 @@ export function createWorkLedgerAuthGenerationModule(
           "endpointId",
           "sessionContext",
         ]) ||
-        !isEndpointId(request.endpointId)
+        (!isEndpointId(request.endpointId) &&
+          !isApiTransportEndpointId(request.endpointId))
       ) {
         return false;
+      }
+      if (isApiTransportEndpointId(request.endpointId)) {
+        // No generation exists to compare, so well-formedness of both stamped
+        // contexts is the entire eligibility rule for an api-key endpoint.
+        const sessionContext = parseAuthenticationContext(
+          request.sessionContext,
+        );
+        const commandContext = parseAuthenticationContext(
+          request.commandContext,
+        );
+        return (
+          sessionContext !== undefined &&
+          commandContext !== undefined &&
+          sameAuthenticationContext(commandContext, sessionContext) &&
+          sessionContext.endpointId === request.endpointId
+        );
       }
       const state = readState(
         statePath,
@@ -474,17 +565,28 @@ export function createWorkLedgerAuthGenerationModule(
       );
     },
     isSessionNativeResumable(context: unknown): boolean {
+      const parsed = parseAuthenticationContext(context);
+      if (parsed === undefined) {
+        if (context !== null && context !== undefined) return false;
+        // Exact absence keeps its legacy meaning: resumable only while the
+        // subscription ledger has never minted a generation.
+        const absenceState = readState(
+          statePath,
+          replacementPath,
+          initializedMarkerPath,
+        );
+        return absenceState !== undefined &&
+          isUnmodifiedPristineLegacyState(absenceState);
+      }
+      // An api-key endpoint's resumability never consults subscription
+      // ledger state: the constant context is its own eligibility.
+      if (parsed.management === "api-key-static") return true;
       const state = readState(
         statePath,
         replacementPath,
         initializedMarkerPath,
       );
       if (state === undefined) return false;
-      if (context === null || context === undefined) {
-        return isUnmodifiedPristineLegacyState(state);
-      }
-      const parsed = parseAuthenticationContext(context);
-      if (parsed === undefined) return false;
       const endpoint = state.endpoints.find(
         (candidate) => candidate.endpointId === parsed.endpointId,
       );
@@ -1842,6 +1944,7 @@ function sameAuthenticationContext(
     left.endpointId === right.endpointId &&
     left.management === right.management &&
     (left.management === "pristine-legacy" ||
+      left.management === "api-key-static" ||
       (right.management === "managed" &&
         left.generation === right.generation))
   );
@@ -2121,7 +2224,7 @@ function parseAuthenticationContext(
   if (
     !isPlainRecord(candidate) ||
     candidate.schemaVersion !== 1 ||
-    !isEndpointId(candidate.endpointId)
+    !isDurableContextEndpointId(candidate.endpointId)
   ) {
     return undefined;
   }
@@ -2135,6 +2238,27 @@ function parseAuthenticationContext(
           schemaVersion: 1 as const,
           endpointId: candidate.endpointId,
           management: "pristine-legacy" as const,
+        })
+      : undefined;
+    return parsed !== undefined &&
+      (serialized === undefined || JSON.stringify(parsed) === serialized)
+      ? parsed
+      : undefined;
+  }
+  if (candidate.management === "api-key-static") {
+    // The arm is endpoint-bound: an api-key transport context exists only
+    // for the endpoint that owns that transport class.
+    const parsed = isExactRecord(candidate, [
+      "endpointId",
+      "management",
+      "schemaVersion",
+    ]) &&
+    typeof candidate.endpointId === "string" &&
+    isApiTransportEndpointId(candidate.endpointId as DurableRuntimeEndpointId)
+      ? Object.freeze({
+          schemaVersion: 1 as const,
+          endpointId: candidate.endpointId as DurableRuntimeEndpointId,
+          management: "api-key-static" as const,
         })
       : undefined;
     return parsed !== undefined &&
@@ -2245,6 +2369,21 @@ function coordinatorDirectoryDigest(value: string): string {
 
 function isEndpointId(value: unknown): value is DurableRuntimeEndpointId {
   return value === "codex-desktop" || value === "claude-code-desktop";
+}
+
+/**
+ * Context-scoped endpoint membership: every endpoint id a durable
+ * authentication context can name. Wider than `isEndpointId`, which stays
+ * scoped to the subscription ledger's own two endpoints.
+ */
+function isDurableContextEndpointId(
+  value: unknown,
+): value is DurableRuntimeEndpointId {
+  return (
+    value === "codex-desktop" ||
+    value === "claude-code-desktop" ||
+    isApiTransportEndpointId(value as DurableRuntimeEndpointId)
+  );
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {

@@ -8,6 +8,7 @@ import "../../../src/workbench-shell/renderer/themes/theme-acrylic.css";
 import "../../../src/workbench-shell/renderer/themes/theme-crt.css";
 import "../../../src/workbench-shell/renderer/themes/theme-schemes.css";
 import "../../../src/workbench-shell/renderer/themes/theme-legibility.css";
+import { continuationStopFixture } from "./continuation-stop-fixture.ts";
 
 import type {
   WorkbenchCreateProjectResult,
@@ -16,7 +17,7 @@ import type {
   WorkbenchDirectSessionProfileDefaultRequest,
   WorkbenchDirectSessionProfileDefaultResult,
   WorkbenchAnyPublicDirectSessionProfileResult,
-  WorkbenchHostedProjectListener,
+  WorkbenchHostedProjectResult,
   WorkbenchInterruptRequest,
   WorkbenchInterruptResult,
   WorkbenchSteerRequest,
@@ -28,7 +29,6 @@ import type {
   WorkbenchProjectHistoryHideResult,
   WorkbenchProjectSelectionRequest,
   WorkbenchProjectSelectionResult,
-  WorkbenchRendererBridge,
   WorkbenchSessionMetadataMutationRequest,
   WorkbenchSessionMetadataMutationResult,
   WorkbenchSessionRemovalRequest,
@@ -36,12 +36,21 @@ import type {
   WorkbenchSessionRemovalResult,
   WorkbenchSubmissionResult,
 } from "../../../src/workbench-shell/contract.ts";
+import type {
+  WorkbenchProjectTransferListener,
+  WorkbenchRendererTransferBridge as WorkbenchRendererBridge,
+} from "../../../src/workbench-shell/preload-bridge.ts";
+import { createWorkbenchProjectTransferEncoder } from "../../../src/workbench-shell/result-sanitizer.ts";
 import {
   defaultWorkbenchAppearancePreference,
   publicAppearancePreferenceLoaded,
   publicAppearancePreferenceSaved,
   publicClaudePermissionHandlingLoaded,
   publicClaudePermissionHandlingSaved,
+  publicEndpointProbed,
+  publicEndpointKeySaved,
+  publicEndpointKeyStatusLoaded,
+  publicEndpointCatalogFreshnessLoaded,
   publicRuntimeExecutablesLoaded,
   publicRuntimeExecutableSaved,
   defaultWorkbenchRuntimeExecutablePaths,
@@ -57,9 +66,12 @@ import {
   emptyVisualFixture,
   interruptedVisualFixture,
   interruptVisualFixture,
+  inFlightSessionRemovalVisualFixture,
   openedProjectVisualFixture,
+  promptSuggestionsVisualFixture,
   sessionMetadataVisualFixture,
   secondSessionVisualFixture,
+  stalePromptSuggestionsVisualFixture,
   unavailableVisualFixture,
   visualDirectProfile,
   visualFixture,
@@ -70,6 +82,7 @@ import {
   transcriptPerformanceUpdatedFixture,
 } from "./transcript-performance-fixture.ts";
 import { createTranscriptFollowScrollFixture } from "./transcript-follow-scroll-fixture.ts";
+import { createTranscriptDensityFixture } from "./transcript-density-fixture.ts";
 
 let submissionCalls = 0;
 let interruptCalls = 0;
@@ -87,13 +100,17 @@ let projectHistoryAdoptionCalls = 0;
 let projectHistoryHideCalls = 0;
 let emptySecondaryHistoryHidden = false;
 let transcriptFollowScrollRevision = 0;
-let projectListener: WorkbenchHostedProjectListener | undefined;
+let projectListener: WorkbenchProjectTransferListener | undefined;
+let encodeProjectResult = createWorkbenchProjectTransferEncoder();
+const emitProjectResult = (result: WorkbenchHostedProjectResult): void => {
+  projectListener?.(encodeProjectResult(result));
+};
 let resolveStaleProjectHistory:
   | ((result: WorkbenchProjectHistoryDiscoveryResult) => void)
   | undefined;
 
 window.addEventListener("qa-transcript-performance-update", () => {
-  projectListener?.(
+  emitProjectResult(
     Object.freeze({ ok: true, view: transcriptPerformanceUpdatedFixture }),
   );
 });
@@ -105,7 +122,7 @@ window.addEventListener("qa-transcript-performance-burst", (event) => {
       : 510;
   const finalTurnCount = Math.max(501, Math.min(550, requestedTurnCount));
   for (let turnCount = 501; turnCount <= finalTurnCount; turnCount += 1) {
-    projectListener?.(
+    emitProjectResult(
       Object.freeze({
         ok: true,
         view: createTranscriptPerformanceFixture(turnCount),
@@ -119,7 +136,7 @@ window.addEventListener("qa-transcript-follow-scroll-update", () => {
   const requestedTurnCount = Number(
     new URLSearchParams(window.location.search).get("turns") ?? "80",
   );
-  projectListener?.(
+  emitProjectResult(
     Object.freeze({
       ok: true,
       view: createTranscriptFollowScrollFixture(
@@ -127,6 +144,12 @@ window.addEventListener("qa-transcript-follow-scroll-update", () => {
         transcriptFollowScrollRevision,
       ),
     }),
+  );
+});
+
+window.addEventListener("qa-prompt-suggestions-next-turn", () => {
+  emitProjectResult(
+    Object.freeze({ ok: true, view: stalePromptSuggestionsVisualFixture }),
   );
 });
 
@@ -198,6 +221,10 @@ window.addEventListener("qa-resolve-stale-project-history", () => {
   resolveStaleProjectHistory = undefined;
 });
 
+function glmHarnessKeyConfigured(): boolean {
+  return new URLSearchParams(window.location.search).get("glm") !== "empty";
+}
+
 const bridge: WorkbenchRendererBridge = Object.freeze({
   writeClipboardText(text: string) {
     document.documentElement.dataset.qaCopiedCode = text;
@@ -230,6 +257,116 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
   saveClaudePermissionHandling() {
     return Promise.resolve(publicClaudePermissionHandlingSaved());
   },
+  // Visual QA fakes for the endpoint-key blocks (ADR 0022; one per static-key
+  // endpoint). The default shows a configured durable key so every state of
+  // the block is visible; `?glm=empty` shows the unconfigured GLM state. No
+  // real key ever appears here.
+  loadEndpointKeyStatus() {
+    return Promise.resolve(
+      publicEndpointKeyStatusLoaded({
+        configured: glmHarnessKeyConfigured(),
+        maskedHint: glmHarnessKeyConfigured() ? "••••demo" : null,
+        isPersistent: true,
+        environmentFallback: false,
+      }),
+    );
+  },
+  saveEndpointKey() {
+    return Promise.resolve(publicEndpointKeySaved("••••demo", true));
+  },
+  removeEndpointKey() {
+    return Promise.resolve({
+      ok: true as const,
+      status: "removed" as const,
+      snapshot: {
+        configured: false,
+        maskedHint: null,
+        isPersistent: true,
+        environmentFallback: false,
+      },
+    });
+  },
+  revealEndpointKey() {
+    return Promise.resolve({
+      ok: true as const,
+      status: "revealed" as const,
+      value: "test-secret-harness",
+      snapshot: {
+        configured: true,
+        maskedHint: "••••demo",
+        isPersistent: true,
+        environmentFallback: false,
+      },
+    });
+  },
+  probeEndpointKey() {
+    return Promise.resolve(publicEndpointProbed({ outcome: "success" }));
+  },
+  // Visual QA fake for catalog freshness (ticket 14): one enrolled model on
+  // the GLM row so the "new (untiered)" surfacing is visible; the other
+  // static-key endpoints report a calm silent failure.
+  loadEndpointCatalogFreshness() {
+    return Promise.resolve(
+      publicEndpointCatalogFreshnessLoaded([
+        Object.freeze({
+          endpointId: "glm-coding-plan" as const,
+          status: "fresh" as const,
+          newModels: Object.freeze([
+            Object.freeze({
+              id: "glm-harness-new",
+              displayName: "GLM Harness New",
+            }),
+          ]),
+          enrolledModels: Object.freeze([
+            Object.freeze({ id: "glm-harness-new" }),
+          ]),
+        }),
+        Object.freeze({
+          endpointId: "kimi-code" as const,
+          status: "silent-failure" as const,
+          newModels: Object.freeze([]),
+          enrolledModels: Object.freeze([]),
+        }),
+        Object.freeze({
+          endpointId: "deepseek-api" as const,
+          status: "silent-failure" as const,
+          newModels: Object.freeze([]),
+          enrolledModels: Object.freeze([]),
+        }),
+      ]),
+    );
+  },
+  refreshEndpointCatalogFreshness() {
+    return Promise.resolve(
+      publicEndpointCatalogFreshnessLoaded([
+        Object.freeze({
+          endpointId: "glm-coding-plan" as const,
+          status: "fresh" as const,
+          newModels: Object.freeze([
+            Object.freeze({
+              id: "glm-harness-new",
+              displayName: "GLM Harness New",
+            }),
+          ]),
+          enrolledModels: Object.freeze([
+            Object.freeze({ id: "glm-harness-new" }),
+          ]),
+        }),
+        Object.freeze({
+          endpointId: "kimi-code" as const,
+          status: "silent-failure" as const,
+          newModels: Object.freeze([]),
+          enrolledModels: Object.freeze([]),
+        }),
+        Object.freeze({
+          endpointId: "deepseek-api" as const,
+          status: "silent-failure" as const,
+          newModels: Object.freeze([]),
+          enrolledModels: Object.freeze([]),
+        }),
+      ]),
+    );
+  },
   loadRuntimeExecutables() {
     return Promise.resolve(
       publicRuntimeExecutablesLoaded(defaultWorkbenchRuntimeExecutablePaths),
@@ -240,11 +377,12 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
       publicRuntimeExecutableSaved(defaultWorkbenchRuntimeExecutablePaths),
     );
   },
-  observeProject(listener: WorkbenchHostedProjectListener) {
+  observeProject(listener: WorkbenchProjectTransferListener) {
+    encodeProjectResult = createWorkbenchProjectTransferEncoder();
     projectListener = listener;
     const projectMode = new URLSearchParams(window.location.search).get("project");
     const scenario = new URLSearchParams(window.location.search).get("scenario");
-    listener(
+    emitProjectResult(
       Object.freeze({
         ok: true,
         view:
@@ -257,15 +395,32 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
                       "80",
                   ),
                 )
+            : scenario === "transcript-density"
+              ? createTranscriptDensityFixture(
+                  Number(
+                    new URLSearchParams(window.location.search).get("turns") ??
+                      "1",
+                  ),
+                  new URLSearchParams(window.location.search).get("phase") ===
+                    "active"
+                    ? "active"
+                    : "completed",
+                )
             : scenario === "interrupt"
             ? interruptVisualFixture
             : scenario === "claude-running"
             ? claudeRunningVisualFixture
             : scenario === "code-copy"
             ? codeBlockCopyVisualFixture
+            : scenario === "continuation-stop"
+              ? continuationStopFixture
+            : scenario === "prompt-suggestions"
+            ? promptSuggestionsVisualFixture
             : scenario === "session-metadata" ||
                 scenario === "session-metadata-stuck"
             ? sessionMetadataVisualFixture
+            : scenario === "session-removal-active"
+              ? inFlightSessionRemovalVisualFixture
             : projectMode === "empty" ||
                 scenario === "picker" ||
                 scenario === "runtime-not-located"
@@ -328,12 +483,9 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     const scenario = new URLSearchParams(window.location.search).get("scenario");
     if (scenario === "project-removal-success") {
       queueMicrotask(() => {
-        projectListener?.({
-          ok: false,
-          error: {
-            category: "project-view-unavailable",
-            message: "Live Project data is unavailable.",
-          },
+        emitProjectResult({
+          ok: true,
+          empty: true,
         });
       });
       return Promise.resolve({ status: "removed" });
@@ -462,7 +614,7 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     const scenario = new URLSearchParams(window.location.search).get("scenario");
     if (scenario === "open-history-choice") {
       queueMicrotask(() => {
-        projectListener?.({ ok: true, view: openedProjectVisualFixture });
+        emitProjectResult({ ok: true, view: openedProjectVisualFixture });
       });
       return Promise.resolve({ status: "adopted" });
     }
@@ -495,7 +647,7 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     if (scenario === "create-pending") return new Promise(() => undefined);
     if (scenario === "create-created") {
       queueMicrotask(() => {
-        projectListener?.({ ok: true, view: openedProjectVisualFixture });
+        emitProjectResult({ ok: true, view: openedProjectVisualFixture });
       });
       return Promise.resolve({ outcome: "created" });
     }
@@ -551,7 +703,7 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     }
     if (scenario === "open-adopted") {
       queueMicrotask(() => {
-        projectListener?.({ ok: true, view: openedProjectVisualFixture });
+        emitProjectResult({ ok: true, view: openedProjectVisualFixture });
       });
       return Promise.resolve({
         ok: true,
@@ -561,7 +713,7 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     }
     if (scenario === "open-selected") {
       queueMicrotask(() => {
-        projectListener?.({ ok: true, view: openedProjectVisualFixture });
+        emitProjectResult({ ok: true, view: openedProjectVisualFixture });
       });
       return Promise.resolve({
         ok: true,
@@ -586,7 +738,7 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     if (scenario === "switching") return new Promise(() => undefined);
     if (scenario === "history-stale") {
       queueMicrotask(() => {
-        projectListener?.({ ok: true, view: secondSessionVisualFixture });
+        emitProjectResult({ ok: true, view: secondSessionVisualFixture });
       });
       return Promise.resolve({
         ok: true,
@@ -621,10 +773,10 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     if (scenario === "runtime-not-located") {
       return Promise.resolve({
         ok: false,
-        endpointDiscovery: publicRuntimeEndpointDiscovery(
-          "runtime-not-located",
-          "runtime-not-located",
-        ),
+        endpointDiscovery: publicRuntimeEndpointDiscovery([
+          { endpointId: "codex-desktop", category: "runtime-not-located" },
+          { endpointId: "claude-code-desktop", category: "runtime-not-located" },
+        ]),
         error: {
           category: "runtime-not-located",
           message:
@@ -635,10 +787,10 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     if (mode === "unavailable" || scenario === "unavailable") {
       return Promise.resolve({
         ok: false,
-        endpointDiscovery: publicRuntimeEndpointDiscovery(
-          "inspection-failed",
-          "inspection-failed",
-        ),
+        endpointDiscovery: publicRuntimeEndpointDiscovery([
+          { endpointId: "codex-desktop", category: "inspection-failed" },
+          { endpointId: "claude-code-desktop", category: "inspection-failed" },
+        ]),
         error: {
           category: "profile-unavailable",
           message:
@@ -712,7 +864,7 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     return Promise.resolve({
       ok: true,
       status: "saved",
-      message: "Codex Session Profile default was durably saved.",
+      message: "Session Profile default was durably saved.",
     });
   },
   submitDirectInput(
@@ -751,7 +903,7 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     const scenario = new URLSearchParams(window.location.search).get("scenario");
     if (scenario === "interrupt" || scenario === "claude-running") {
       queueMicrotask(() => {
-        projectListener?.(
+        emitProjectResult(
           Object.freeze({
             ok: true,
             view:

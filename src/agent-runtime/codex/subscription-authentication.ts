@@ -88,7 +88,7 @@ async function inspectCodexSubscriptionAuthentication(
     }
     await peer.request("initialize", {
       clientInfo: {
-        name: "unified-agent-workbench",
+        name: "synchronized-intellect-network",
         title: "Synchronized Intellect Network",
         version: "0.1.0",
       },

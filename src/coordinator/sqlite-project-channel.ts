@@ -6,9 +6,13 @@ import { types as nodeUtilTypes } from "node:util";
 import {
   RuntimeAdapterError,
   type NormalizedRuntimeEvent,
+  type RuntimeToolActivity,
+  type RuntimeUserInputId,
+  type RuntimeUserInputRequest,
   type ResumableAgentRuntimeAdapter,
   type ResumableRuntimeBinding,
   type RuntimeCatalog,
+  type RuntimeFailureCategory,
   type SessionProfile,
 } from "../agent-runtime/index.ts";
 import {
@@ -32,7 +36,11 @@ import {
   type DirectProjectCommand,
   type DurableProjectUpdate,
   type ProjectChannel,
+  type ProjectUserInputView,
+  type ProjectUserInputResponse,
+  type ProjectUserInputResponseResult,
   type ProjectCommandFailureCategory,
+  type ProjectCommandRecovery,
   type ProjectCommandRuntimeContext,
   type ProjectRecoveryFailureCategory,
   type ProjectCommandStatus,
@@ -52,6 +60,7 @@ import {
   type ProjectSessionMetadataMutationResult,
   type ProjectSessionRemovalRequest,
   type ProjectSessionRemovalResult,
+  type ProjectSnapshotChanges,
   type ProjectSnapshot,
   type ProjectTurnActivity,
   type ProjectUpdate,
@@ -62,16 +71,71 @@ import {
   parseDurableAuthenticationContext,
   type DurableAccountObservation,
   type DurableAuthenticationContext,
+  type DurableRuntimeEndpointId,
   type WorkLedgerAuthGenerationModule,
 } from "./work-ledger-auth-generation.ts";
 
+/**
+ * Endpoint roster the channel admits when no explicit roster is injected.
+ * Kept to the two subscription endpoints so direct coordinator consumers and
+ * their tests observe no behavior change; the Workbench shell injects its
+ * full registered roster (which adds the api-key GLM endpoint).
+ */
+const defaultRuntimeContextEndpointIds: readonly DurableRuntimeEndpointId[] =
+  Object.freeze(["codex-desktop", "claude-code-desktop"]);
+
+/** Every endpoint id a stored command envelope can legally carry. */
+const allDurableRuntimeEndpointIds: readonly DurableRuntimeEndpointId[] =
+  Object.freeze([
+    "codex-desktop",
+    "claude-code-desktop",
+    "glm-coding-plan",
+    "kimi-code",
+    "deepseek-api",
+    "kimi-platform",
+    "claude-api",
+    "codex-api",
+  ]);
+
+function validateRuntimeContextEndpointIds(
+  value: readonly DurableRuntimeEndpointId[] | undefined,
+): readonly DurableRuntimeEndpointId[] {
+  const ids = value ?? defaultRuntimeContextEndpointIds;
+  if (
+    !Array.isArray(ids) ||
+    ids.length === 0 ||
+    ids.some((id) => !isDurableRuntimeEndpointId(id)) ||
+    new Set(ids).size !== ids.length
+  ) {
+    throw new CoordinatorError("invalid-command");
+  }
+  return Object.freeze([...ids]);
+}
+
+function isDurableRuntimeEndpointId(
+  value: unknown,
+): value is DurableRuntimeEndpointId {
+  return (
+    value === "codex-desktop" ||
+    value === "claude-code-desktop" ||
+    value === "glm-coding-plan" ||
+    value === "kimi-code" ||
+    value === "deepseek-api" ||
+    value === "kimi-platform" ||
+    value === "claude-api" ||
+    value === "codex-api"
+  );
+}
+
 type CommandRow = {
   command_id: string;
+  target_session_id: string | null;
   runtime: "codex";
   status: ProjectCommandStatus;
   failure_category:
     | ProjectCommandFailureCategory
     | ProjectRecoveryFailureCategory
+    | "quota-paused"
     | null;
   accepted_cursor: number;
   private_envelope_json: string | null;
@@ -79,6 +143,7 @@ type CommandRow = {
 
 type SessionRow = {
   session_id: string;
+  root_command_id: string;
   profile_json: string;
   opaque_session_reference: string | null;
   lifecycle_status: ProjectCommandStatus;
@@ -137,6 +202,7 @@ type RuntimeIteratorState = {
   readonly iterator: AsyncIterator<NormalizedRuntimeEvent>;
   readonly commandId: string;
   done: boolean;
+  terminalObserved?: boolean;
   cancellation?: Promise<void>;
 };
 
@@ -188,16 +254,19 @@ export class SqliteWorkbenchCoordinator implements WorkbenchCoordinator {
   readonly databasePath: string;
   readonly adapter: ResumableAgentRuntimeAdapter;
   readonly authGeneration: WorkLedgerAuthGenerationModule | undefined;
+  readonly endpointIds: readonly DurableRuntimeEndpointId[];
   private opened = false;
 
   constructor(
     databasePath: string,
     adapter: ResumableAgentRuntimeAdapter,
     authGeneration?: WorkLedgerAuthGenerationModule,
+    endpointIds?: readonly DurableRuntimeEndpointId[],
   ) {
     this.databasePath = databasePath;
     this.adapter = adapter;
     this.authGeneration = authGeneration;
+    this.endpointIds = validateRuntimeContextEndpointIds(endpointIds);
   }
 
   async openProject(directory: string): Promise<ProjectChannel> {
@@ -209,6 +278,12 @@ export class SqliteWorkbenchCoordinator implements WorkbenchCoordinator {
     try {
       database = new DatabaseSync(this.databasePath);
       initializeSchema(database);
+      database.exec(`
+        CREATE INDEX IF NOT EXISTS updates_command_kind_cursor
+          ON updates(command_id, kind, cursor);
+        CREATE INDEX IF NOT EXISTS updates_project_session_kind
+          ON updates(project_id, session_id, kind);
+      `);
       const projectDirectory = resolve(directory);
       const projectId = bindProject(database, projectDirectory);
       const sessionMetadata = createSessionMetadataModule(database, projectId);
@@ -221,6 +296,7 @@ export class SqliteWorkbenchCoordinator implements WorkbenchCoordinator {
         this.adapter,
         sessionMetadata,
         this.authGeneration,
+        this.endpointIds,
       );
       channel.startRecoveredExecutions();
       return channel;
@@ -244,6 +320,7 @@ class SqliteProjectChannel implements ProjectChannel {
   private readonly adapter: ResumableAgentRuntimeAdapter;
   private readonly sessionMetadata: SessionMetadataModule;
   private readonly authGeneration: WorkLedgerAuthGenerationModule | undefined;
+  private readonly endpointIds: readonly DurableRuntimeEndpointId[];
   private closed = false;
   private closePromise?: Promise<void>;
   private acceptanceTail: Promise<void> = Promise.resolve();
@@ -252,6 +329,21 @@ class SqliteProjectChannel implements ProjectChannel {
   private readonly observers = new Set<ObserverState>();
   private activeRuntimeIterator?: RuntimeIteratorState;
   private activeRuntimeControl?: ActiveRuntimeControl;
+  private executionBinding?: ResumableRuntimeBinding;
+  private quotaExpiryTimer?: ReturnType<typeof setTimeout>;
+  private userInputSessionId?: string;
+  private readonly userInputEntries = new Map<string, { requestId: RuntimeUserInputId; view: ProjectUserInputView }>();
+  private readonly userInputListeners = new Set<() => void>();
+  private runtimeEventCacheCursor = 0;
+  private readonly runtimeEventsByCommandId = new Map<
+    string,
+    readonly ProjectRecordedTurnEvent[]
+  >();
+  private readonly sessionModelReplyCursors = new Map<string, number>();
+  private readonly storedCommandCache = new Map<
+    string,
+    { readonly source: string; readonly command: DirectProjectCommand }
+  >();
 
   constructor(
     database: DatabaseSync,
@@ -260,6 +352,7 @@ class SqliteProjectChannel implements ProjectChannel {
     adapter: ResumableAgentRuntimeAdapter,
     sessionMetadata: SessionMetadataModule,
     authGeneration?: WorkLedgerAuthGenerationModule,
+    endpointIds: readonly DurableRuntimeEndpointId[] = defaultRuntimeContextEndpointIds,
   ) {
     this.database = database;
     this.projectId = projectId;
@@ -267,9 +360,31 @@ class SqliteProjectChannel implements ProjectChannel {
     this.adapter = adapter;
     this.sessionMetadata = sessionMetadata;
     this.authGeneration = authGeneration;
+    this.endpointIds = validateRuntimeContextEndpointIds(endpointIds);
   }
 
   startRecoveredExecutions(): void {
+    this.refreshQuotaPauses();
+    // Reopening must not perpetuate an app-side lockout. Recheck only the
+    // latest unknown command of each blocked Session with a saved native route.
+    const recoveries = this.database.prepare(`
+      SELECT commands.command_id, commands.failure_category
+        FROM commands JOIN sessions ON sessions.session_id = commands.target_session_id
+       WHERE commands.project_id = ? AND commands.digest_version = 2
+         AND commands.status = 'recovery-required'
+         AND sessions.lifecycle_status = 'recovery-required'
+         AND sessions.opaque_session_reference IS NOT NULL
+         AND commands.accepted_cursor = (
+           SELECT MAX(prior.accepted_cursor) FROM commands prior
+            WHERE prior.target_session_id = sessions.session_id AND prior.status = 'recovery-required'
+         )
+       ORDER BY commands.accepted_cursor
+    `).all(this.projectId) as Array<{ command_id: string; failure_category: ProjectRecoveryFailureCategory | null }>;
+    for (const row of recoveries) {
+      this.executionTail = this.executionTail.then(async () => {
+        if (!this.closed) await this.recordRecoveryRequired(row.command_id, row.failure_category ?? undefined);
+      }).catch(() => { /* The durable unknown outcome remains visible if storage is unavailable. */ });
+    }
     const rows = this.database
       .prepare(
         `SELECT command_id
@@ -294,11 +409,12 @@ class SqliteProjectChannel implements ProjectChannel {
     let runtimeContextSnapshot: ProjectCommandRuntimeContext | undefined;
     try {
       this.assertOpen();
-      validateCommand(command);
+      validateCommand(command, this.endpointIds);
       commandSnapshot = cloneDirectCommand(command);
       runtimeContextSnapshot = validateRuntimeContext(
         runtimeContext,
         this.authGeneration !== undefined,
+        this.endpointIds,
       );
     } catch (error) {
       return Promise.reject(
@@ -373,7 +489,7 @@ class SqliteProjectChannel implements ProjectChannel {
         if (
           row === undefined ||
           row.archived !== 0 ||
-          row.lifecycle_status !== "completed" ||
+          (row.lifecycle_status !== "completed" && !this.sessionHasQuotaPause(requestSnapshot.sessionId)) ||
           row.opaque_session_reference === null ||
           row.opaque_session_reference.trim().length === 0 ||
           !this.isAccountObservationCurrent(row.account_observation_json)
@@ -381,6 +497,9 @@ class SqliteProjectChannel implements ProjectChannel {
           return Object.freeze({ status: "incompatible" as const });
         }
         const currentProfile = parseStoredProfile(row.profile_json);
+        if (this.sessionHasQuotaPause(requestSnapshot.sessionId) && !sameProfile(currentProfile, requestSnapshot.profile)) {
+          return Object.freeze({ status: "incompatible" as const });
+        }
         const compatible = await this.isCompatibleContinuationProfile(
           currentProfile,
           requestSnapshot.profile,
@@ -425,7 +544,10 @@ class SqliteProjectChannel implements ProjectChannel {
         | ProjectRuntimeResumeIdentityMapping["endpointId"]
         | undefined;
       for (const row of rows) {
-        const command = hydrateStoredCommand(row.private_envelope_json);
+        const command = hydrateStoredCommand(
+          row.private_envelope_json,
+          this.endpointIds,
+        );
         const identity = command.runtimeResumeIdentity;
         if (identity === undefined) continue;
         if (endpointId !== undefined && endpointId !== identity.endpointId) {
@@ -573,10 +695,8 @@ class SqliteProjectChannel implements ProjectChannel {
         activity: liveActivity,
       });
     }
-    // `recovery-required` is terminal, not active: it is written precisely
-    // because the runtime binding was lost, and nothing in the product can ever
-    // move a row out of it again. Waiting therefore never helps, so the barrier
-    // is released by an explicit owner acknowledgement rather than by time.
+    // Historical uncertainty still needs acknowledgement before deletion,
+    // independently of whether a fresh CLI resume made the Session usable.
     const outcomeUnknown =
       active?.status === "recovery-required" ||
       session.lifecycle_status === "recovery-required";
@@ -892,7 +1012,8 @@ class SqliteProjectChannel implements ProjectChannel {
       row.archived !== 0 ||
       row.opaque_session_reference === null ||
       row.opaque_session_reference.trim().length === 0 ||
-      (row.lifecycle_status !== "completed" && !queuedEligibility)
+      (row.lifecycle_status !== "completed" && !queuedEligibility && !this.sessionHasQuotaPause(row.session_id)) ||
+      (this.sessionHasQuotaPause(row.session_id) && !sameProfile(storedProfile, command.profile))
     ) {
       throw new CoordinatorError("continuation-unavailable");
     }
@@ -938,7 +1059,9 @@ class SqliteProjectChannel implements ProjectChannel {
       try {
         await this.performExecution(commandId);
       } catch {
-        this.containExecutionFailure(commandId);
+        await this.containExecutionFailure(commandId);
+      } finally {
+        this.executionBinding = undefined;
       }
     });
     this.executionTail = execution.then(
@@ -947,7 +1070,7 @@ class SqliteProjectChannel implements ProjectChannel {
     );
   }
 
-  private containExecutionFailure(commandId: string): void {
+  private async containExecutionFailure(commandId: string): Promise<void> {
     try {
       const row = this.database
         .prepare(
@@ -969,7 +1092,7 @@ class SqliteProjectChannel implements ProjectChannel {
           row.effect_phase,
         )
       ) {
-        this.recordRecoveryRequired(commandId);
+        await this.recordRecoveryRequired(commandId, undefined, this.executionBinding);
         return;
       }
       if (row.status === "in-flight") {
@@ -981,7 +1104,56 @@ class SqliteProjectChannel implements ProjectChannel {
   }
 
   private async performExecution(commandId: string): Promise<void> {
-    if (this.closed || this.hasEarlierRecoveryBarrier(commandId)) return;
+    if (this.closed) return;
+    // Timers may run late; a queued resume still has the original absolute deadline.
+    this.refreshQuotaPauses();
+    // A queued input was authorized before the preceding outcome was known.
+    // A later, deliberate user continuation is different: keep w148's fresh
+    // CLI-resume decision and the original unknown-outcome record intact.
+    // Expiry of a historical quota pause is not a new execution failure after
+    // a successful resume that the user had already observed before queuing.
+    const stopped = transaction(this.database, () => {
+      const preceding = this.database.prepare(`
+        SELECT previous.status, current.target_session_id AS session_id
+          FROM commands current
+          JOIN commands previous ON previous.target_session_id = current.target_session_id
+            AND previous.accepted_cursor < current.accepted_cursor
+          JOIN updates terminal ON terminal.command_id = previous.command_id
+         WHERE current.command_id = ? AND current.status = 'accepted'
+           AND previous.status IN ('failed', 'recovery-required')
+           AND terminal.kind IN ('failed', 'recovery-required')
+           AND terminal.cursor > current.accepted_cursor
+           AND NOT (previous.failure_category IS 'quota-expired' AND EXISTS (
+             SELECT 1 FROM commands resumed
+               JOIN updates completed ON completed.command_id = resumed.command_id AND completed.kind = 'completed'
+              WHERE resumed.target_session_id = current.target_session_id
+                AND resumed.accepted_cursor > previous.accepted_cursor
+                AND completed.cursor < current.accepted_cursor
+           ))
+           AND EXISTS (SELECT 1 FROM updates started
+                        WHERE started.command_id = previous.command_id AND started.kind = 'in-flight')
+         LIMIT 1
+      `).get(commandId) as { status: string; session_id: string } | undefined;
+      if (preceding === undefined) return undefined;
+      this.database.prepare(`UPDATE commands SET status = 'failed', failure_category = 'runtime-failed',
+        effect_phase = 'committed', outcome_uncertain = 0 WHERE command_id = ?`).run(commandId);
+      // An interrupted Session with no remaining queued work is still resumable.
+      this.database.prepare(`UPDATE sessions SET lifecycle_status = 'completed'
+        WHERE session_id = ? AND lifecycle_status = 'accepted'
+          AND NOT EXISTS (SELECT 1 FROM commands WHERE target_session_id = ? AND status IN ('accepted', 'in-flight'))
+      `).run(preceding.session_id, preceding.session_id);
+      appendUpdate(this.database, this.projectId, commandId, "failed", "failed",
+        preceding.session_id, { failureCategory: "runtime-failed" });
+      return preceding;
+    });
+    if (stopped !== undefined) {
+      console.warn("[coordinator] Queued continuation was not sent: preceding turn did not complete", {
+        precedingStatus: stopped.status,
+      });
+      this.notifyCommittedUpdate();
+      return;
+    }
+    if (this.hasEarlierRecoveryBarrier(commandId)) return;
     const began = transaction(this.database, () => {
       const row = this.database
         .prepare(
@@ -1049,8 +1221,12 @@ class SqliteProjectChannel implements ProjectChannel {
       let catalog: RuntimeCatalog;
       try {
         catalog = await this.adapter.inspect(this.projectDirectory);
-      } catch {
-        this.recordFailure(commandId, "runtime-failed");
+      } catch (error) {
+        this.recordFailure(
+          commandId,
+          "runtime-failed",
+          executionInspectionFailureCategory(error),
+        );
         return;
       }
       if (this.closed || !this.isInFlight(commandId)) return;
@@ -1100,6 +1276,7 @@ class SqliteProjectChannel implements ProjectChannel {
               profile: cloneProfile(command.profile),
               opaqueSessionReference: existingReference ?? "",
             });
+      this.executionBinding = binding;
       if (
         !sameProfile(binding.profile, command.profile) ||
         binding.opaqueSessionReference.trim().length === 0 ||
@@ -1109,12 +1286,16 @@ class SqliteProjectChannel implements ProjectChannel {
         throw new Error("binding-drift");
       }
     } catch (error) {
-      this.recordRecoveryRequired(commandId, recoveryFailureCategory(error));
+      if (this.executionBinding !== undefined) await closeUnusedBinding(this.executionBinding);
+      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), undefined,
+        existingReference !== null && error instanceof RuntimeAdapterError &&
+          ["protocol-rejected", "runtime-not-located", "authentication-required", "unsupported-selection"].includes(error.category) ? {
+          resume: "unconfirmed", reason: recoveryFailureCategory(error) ?? "resume-unconfirmed",
+        } : undefined);
       return;
     }
     if (!this.commitBinding(commandId, session.session_id, binding)) {
-      this.recordRecoveryRequired(commandId);
-      await closeUnusedBinding(binding);
+      await this.recordRecoveryRequired(commandId, undefined, binding);
       return;
     }
     if (this.closed) {
@@ -1128,12 +1309,11 @@ class SqliteProjectChannel implements ProjectChannel {
     try {
       await binding.send({ text: command.input });
     } catch (error) {
-      this.recordRecoveryRequired(commandId, recoveryFailureCategory(error));
+      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding);
       return;
     }
     if (this.closed) {
-      this.recordRecoveryRequired(commandId);
-      await closeUnusedBinding(binding);
+      await this.recordRecoveryRequired(commandId, undefined, binding);
       return;
     }
     this.database
@@ -1143,7 +1323,7 @@ class SqliteProjectChannel implements ProjectChannel {
       .run(commandId);
 
     const events: NormalizedRuntimeEvent[] = [];
-    let terminal: "completed" | "interrupted" | "failed" | "invalid" | undefined;
+    let terminal: "completed" | "interrupted" | "quota-paused" | "failed" | "invalid" | undefined;
     let iteratorState: RuntimeIteratorState;
     try {
       iteratorState = {
@@ -1152,7 +1332,7 @@ class SqliteProjectChannel implements ProjectChannel {
         done: false,
       };
     } catch (error) {
-      this.recordRecoveryRequired(commandId, recoveryFailureCategory(error));
+      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding);
       return;
     }
     this.activeRuntimeIterator = iteratorState;
@@ -1166,17 +1346,27 @@ class SqliteProjectChannel implements ProjectChannel {
       interruptRequested: false,
     };
     this.activeRuntimeControl = runtimeControl;
+    const disposeUserInput = this.attachUserInput(runtimeControl);
     this.publishActiveInterruptCapability(runtimeControl);
     try {
       while (true) {
         const pending = iteratorState.iterator.next();
-        if (this.closed) void this.cancelRuntimeIterator(iteratorState);
+        if (this.closed && !iteratorState.terminalObserved) {
+          void this.cancelRuntimeIterator(iteratorState);
+        }
         const result = await pending;
         if (result.done) {
           iteratorState.done = true;
           break;
         }
-        const event = cloneRuntimeEvent(result.value);
+        const ignoredFields: string[] = [];
+        const event = cloneRuntimeEvent(result.value, ignoredFields);
+        if (ignoredFields.length > 0) {
+          console.warn("[coordinator] Ignored unknown runtime event fields", {
+            kind: event.kind,
+            fields: ignoredFields,
+          });
+        }
         if (terminal !== undefined) {
           terminal = "invalid";
           break;
@@ -1184,16 +1374,22 @@ class SqliteProjectChannel implements ProjectChannel {
         events.push(event);
         if (event.kind === "turn-completed") terminal = "completed";
         if (event.kind === "turn-interrupted") terminal = "interrupted";
+        if (event.kind === "turn-paused") terminal = "quota-paused";
         if (event.kind === "failed") terminal = "failed";
+        iteratorState.terminalObserved = terminal !== undefined;
         if (terminal === undefined) {
+          if (event.kind === "reasoning" || event.kind === "progress" || event.kind === "agent-message") {
+            this.persistActiveRuntimeEvents(runtimeControl);
+          }
           this.publishActiveInterruptCapability(runtimeControl);
         }
       }
     } catch (error) {
-      this.recordRecoveryRequired(commandId, recoveryFailureCategory(error));
+      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding);
       return;
     } finally {
       if (!iteratorState.done) await this.cancelRuntimeIterator(iteratorState);
+      disposeUserInput();
       if (this.activeRuntimeIterator === iteratorState) {
         this.activeRuntimeIterator = undefined;
       }
@@ -1201,14 +1397,17 @@ class SqliteProjectChannel implements ProjectChannel {
         this.activeRuntimeControl = undefined;
       }
     }
-    if (this.closed) {
-      this.recordRecoveryRequired(commandId);
-      return;
-    }
+    // Closing stops new work and observers, but finishClose keeps SQLite open
+    // until this execution settles. A validated terminal stream is still a
+    // known outcome: commit it before close rather than inventing uncertainty.
+    // Cancellation before terminal observation can truncate a conflicting
+    // suffix, so its done:true cannot certify even a subsequently received end.
     if (
-      terminal === "completed" ||
-      terminal === "interrupted" ||
-      terminal === "failed"
+      iteratorState.cancellation === undefined &&
+      (terminal === "completed" ||
+        terminal === "interrupted" ||
+        terminal === "quota-paused" ||
+        terminal === "failed")
     ) {
       const effectiveProfileObservation = this.observeEffectiveProfileProjection(
         session.session_id,
@@ -1225,7 +1424,77 @@ class SqliteProjectChannel implements ProjectChannel {
       );
       return;
     }
-    this.recordRecoveryRequired(commandId);
+    // The iterator above was already drained or cancelled exactly once.
+    await this.recordRecoveryRequired(commandId);
+  }
+
+  readUserInput(sessionId: string): readonly ProjectUserInputView[] {
+    return this.closed || sessionId !== this.userInputSessionId ? [] :
+      Object.freeze([...this.userInputEntries.values()].map(entry => entry.view));
+  }
+
+  observeUserInput(listener: () => void): () => void {
+    this.userInputListeners.add(listener);
+    return () => { this.userInputListeners.delete(listener); };
+  }
+
+  private publishUserInput(): void {
+    for (const listener of this.userInputListeners) {
+      try { listener(); } catch { this.userInputListeners.delete(listener); }
+    }
+  }
+
+  private attachUserInput(control: ActiveRuntimeControl): () => void {
+    this.userInputEntries.clear();
+    this.userInputSessionId = control.sessionId;
+    const input = control.binding.userInput;
+    const requested = (request: RuntimeUserInputRequest) => {
+      if ([...this.userInputEntries.values()].some(entry => entry.requestId === request.id)) return;
+      const requestKey = `user-input:${randomUUID()}`;
+      this.userInputEntries.set(requestKey, { requestId: request.id, view: Object.freeze({
+        requestKey, state: "pending", questions: request.questions, isBlocking: request.isBlocking, expiresAt: request.expiresAt,
+      }) });
+    };
+    const unsubscribe = input?.subscribe(event => {
+      if (this.activeRuntimeControl !== control) return;
+      if (event.kind === "user-input-requested") requested(event.request);
+      else for (const [requestKey, entry] of this.userInputEntries) {
+        if (entry.requestId === event.requestId) entry.view = Object.freeze({ requestKey, state: event.resolution });
+      }
+      this.publishUserInput();
+    });
+    input?.pending().forEach(requested);
+    this.publishUserInput();
+    return () => {
+      unsubscribe?.();
+      for (const [requestKey, entry] of this.userInputEntries) {
+        if (entry.view.state === "pending") entry.view = Object.freeze({ requestKey, state: "session-ended" });
+      }
+      this.publishUserInput();
+    };
+  }
+
+  async respondToUserInput(request: ProjectUserInputResponse): Promise<ProjectUserInputResponseResult> {
+    const control = this.activeRuntimeControl;
+    const entry = this.userInputEntries.get(request.requestKey);
+    const input = control?.binding.userInput;
+    if (this.closed || !input || control?.sessionId !== this.userInputSessionId || entry?.view.state !== "pending") {
+      return { status: "unavailable" };
+    }
+    // This does not enter acceptanceTail/executionTail: the running turn is waiting for this answer.
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        request.kind === "cancel" ? input.cancel(entry.requestId) : input.answer({ requestId: entry.requestId, answers: request.answers }),
+        new Promise<never>((_, reject) => { deadline = setTimeout(() => reject(new Error("user-input-response-timeout")), 8000); }),
+      ]);
+      // Server cleanup can win the write race; only the Runtime's resolution confirms an answer.
+      const state: ProjectUserInputView["state"] = this.userInputEntries.get(request.requestKey)?.view.state ?? "session-ended";
+      return { status: state === "answered" || state === "cancelled" ? state : "unavailable" };
+    } catch (error) {
+      return { status: error instanceof RuntimeAdapterError && error.category === "invalid-input" &&
+        entry.view.state === "pending" && request.kind === "answer" ? "invalid-answer" : "unavailable" };
+    } finally { clearTimeout(deadline); }
   }
 
   private loadExecution(commandId: string): {
@@ -1245,7 +1514,10 @@ class SqliteProjectChannel implements ProjectChannel {
     ) {
       throw new Error("invalid-command-row");
     }
-    const command = hydrateStoredCommand(commandRow.private_envelope_json);
+    const command = hydrateStoredCommand(
+      commandRow.private_envelope_json,
+      this.endpointIds,
+    );
     if (
       command.commandKind !== commandRow.command_kind ||
       (command.commandKind === "continue" &&
@@ -1367,14 +1639,91 @@ class SqliteProjectChannel implements ProjectChannel {
     return Number(result.changes) === 1;
   }
 
+  /** A quota refusal ended the native process, but not the retained conversation.
+   * Keep schema-v6's stopped/failed storage row; the exact terminal update is
+   * the durable distinction between a resumable refusal and ordinary failure.
+   */
+  private commitQuotaPause(commandId: string, sessionId: string, events: readonly NormalizedRuntimeEvent[], persistedEventCount: number): void {
+    const queued = this.database.prepare(
+      "SELECT command_id FROM commands WHERE target_session_id = ? AND command_id <> ? AND status = 'accepted'",
+    ).all(sessionId, commandId) as unknown as { command_id: string }[];
+    if (queued.length > 0 || events.some(event => ["agent-message", "reasoning", "progress", "item-completed"].includes(event.kind))) {
+      // No implicit retry of input accepted while the rejected attempt ran.
+      // A queued/partly executed sequence is outside the initial-refusal rule.
+      this.commitTerminal(commandId, sessionId, events.map(event => event.kind === "turn-paused"
+        ? { kind: "failed", category: "turn-failed" } : event), "failed", undefined, persistedEventCount, queued.map(row => row.command_id));
+      return;
+    }
+    const prior = this.database.prepare(
+      `SELECT data_json FROM updates WHERE session_id = ? AND kind = 'quota-paused'
+         AND cursor > COALESCE((SELECT MAX(cursor) FROM updates WHERE session_id = ? AND kind = 'completed'), 0)
+       ORDER BY cursor LIMIT 1`,
+    ).get(sessionId, sessionId) as { data_json: string } | undefined;
+    const expiresAt = prior === undefined ? Date.now() + quotaPauseMaximumMs : readQuotaDeadline(prior.data_json);
+    const committed = transaction(this.database, () => {
+      const result = this.database.prepare(
+        "UPDATE commands SET status = 'failed', failure_category = 'quota-paused', effect_phase = 'committed', outcome_uncertain = 0 WHERE command_id = ? AND status = 'in-flight' AND effect_phase = 'awaiting-terminal'",
+      ).run(commandId);
+      if (Number(result.changes) !== 1) return false;
+      for (const event of events.slice(persistedEventCount)) appendUpdate(
+        this.database, this.projectId, commandId, "runtime-event", "in-flight", sessionId, { event },
+      );
+      this.database.prepare("UPDATE sessions SET lifecycle_status = 'failed' WHERE session_id = ?").run(sessionId);
+      appendUpdate(this.database, this.projectId, commandId, "quota-paused", "quota-paused", sessionId, { expiresAt });
+      return true;
+    });
+    if (committed) {
+      this.refreshQuotaPauses();
+      this.notifyCommittedUpdate();
+    }
+  }
+
+  private quotaDeadline(commandId: string): number {
+    const row = this.database.prepare("SELECT data_json FROM updates WHERE command_id = ? AND kind = 'quota-paused' ORDER BY cursor DESC LIMIT 1")
+      .get(commandId) as { data_json: string } | undefined;
+    return row === undefined ? 0 : readQuotaDeadline(row.data_json);
+  }
+
+  private sessionHasQuotaPause(sessionId: string): boolean {
+    const row = this.database.prepare("SELECT command_id, failure_category FROM commands WHERE target_session_id = ? ORDER BY accepted_cursor DESC LIMIT 1")
+      .get(sessionId) as { command_id: string; failure_category: string | null } | undefined;
+    return row?.failure_category === "quota-paused" && this.quotaDeadline(row.command_id) > Date.now();
+  }
+
+  private refreshQuotaPauses(): void {
+    clearTimeout(this.quotaExpiryTimer);
+    if (this.closed) return;
+    const rows = this.database.prepare("SELECT command_id, target_session_id FROM commands WHERE project_id = ? AND status = 'failed' AND failure_category = 'quota-paused'")
+      .all(this.projectId) as unknown as { command_id: string; target_session_id: string }[];
+    const deadlines = rows.map(row => ({ ...row, deadline: this.quotaDeadline(row.command_id) }));
+    const expired = deadlines.filter(row => row.deadline <= Date.now());
+    const next = Math.min(...deadlines.filter(row => row.deadline > Date.now()).map(row => row.deadline));
+    if (expired.length > 0) transaction(this.database, () => {
+      for (const row of expired) {
+        this.database.prepare("UPDATE commands SET failure_category = 'quota-expired' WHERE command_id = ?").run(row.command_id);
+        appendUpdate(this.database, this.projectId, row.command_id, "failed", "failed", row.target_session_id, { failureCategory: "quota-expired" });
+      }
+    });
+    if (expired.length > 0) this.notifyCommittedUpdate();
+    if (Number.isFinite(next)) {
+      this.quotaExpiryTimer = setTimeout(() => this.refreshQuotaPauses(), Math.max(1, next - Date.now()));
+      this.quotaExpiryTimer.unref();
+    }
+  }
+
   private commitTerminal(
     commandId: string,
     sessionId: string,
     events: readonly NormalizedRuntimeEvent[],
-    outcome: "completed" | "interrupted" | "failed",
+    outcome: "completed" | "interrupted" | "quota-paused" | "failed",
     effectiveProfileProjection?: EffectiveSessionProfileProjection,
     persistedEventCount = 0,
+    rejectedQueuedInputs: readonly string[] = [],
   ): void {
+    if (outcome === "quota-paused") {
+      this.commitQuotaPause(commandId, sessionId, events, persistedEventCount);
+      return;
+    }
     const completed = outcome === "completed";
     const interrupted = outcome === "interrupted";
     const failureCategory: ProjectCommandFailureCategory | null = interrupted
@@ -1393,6 +1742,12 @@ class SqliteProjectChannel implements ProjectChannel {
           commandId,
         );
       if (Number(result.changes) !== 1) return false;
+      // Reject pre-pause queued input atomically with the refusal. A crash
+      // between separate commits must not turn reopening into an implicit retry.
+      for (const queuedCommandId of rejectedQueuedInputs) {
+        this.database.prepare("UPDATE commands SET status = 'failed', failure_category = 'runtime-failed', effect_phase = 'committed', outcome_uncertain = 0 WHERE command_id = ?").run(queuedCommandId);
+        appendUpdate(this.database, this.projectId, queuedCommandId, "failed", "failed", sessionId, { failureCategory: "runtime-failed" });
+      }
       for (const event of events.slice(persistedEventCount)) {
         appendUpdate(
           this.database,
@@ -1509,41 +1864,101 @@ class SqliteProjectChannel implements ProjectChannel {
     if (!sameProfile(parseStoredProfile(row.profile_json), command.profile)) {
       return undefined;
     }
-    const rootCommand = hydrateStoredCommand(row.private_envelope_json);
+    const rootCommand = hydrateStoredCommand(
+      row.private_envelope_json,
+      this.endpointIds,
+    );
     return rootCommand.commandKind === "start"
       ? rootCommand.requestedProfileProjection
       : undefined;
   }
 
-  private recordRecoveryRequired(
+  private async probeRecoveryResume(
+    commandId: string,
+    binding?: ResumableRuntimeBinding,
+  ): Promise<ProjectCommandRecovery> {
+    if (binding !== undefined) {
+      // Stop the old transport before establishing a fresh one-input binding.
+      if (this.activeRuntimeIterator?.commandId === commandId) {
+        try { binding.close?.(); } catch { /* Resume is checked independently of app cleanup. */ }
+        await this.cancelRuntimeIterator(this.activeRuntimeIterator);
+      } else {
+        await closeUnusedBinding(binding);
+      }
+    }
+    if (this.closed) return { resume: "unconfirmed", reason: "channel-closed" };
+    const { command, commandRow, session } = this.loadExecution(commandId);
+    const reference = session.opaque_session_reference ?? binding?.opaqueSessionReference;
+    if (!reference) return { resume: "unconfirmed", reason: "session-reference-unavailable" };
+    if (!this.isNativeResumeAllowed(commandRow, session)) {
+      return { resume: "unconfirmed", reason: "authentication-changed" };
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let expired = false;
+    let resumed: ResumableRuntimeBinding | undefined;
+    try {
+      resumed = await Promise.race([
+        this.adapter.resume({
+          projectDirectory: this.projectDirectory,
+          profile: cloneProfile(command.profile),
+          opaqueSessionReference: reference,
+        }).then(async value => {
+          if (expired) await closeUnusedBinding(value);
+          return value;
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => { expired = true; reject(new Error("resume-timeout")); }, 8000);
+        }),
+      ]);
+      if (!sameProfile(resumed.profile, command.profile) || resumed.opaqueSessionReference !== reference) {
+        return { resume: "unconfirmed", reason: "binding-drift" };
+      }
+      if (this.closed) return { resume: "unconfirmed", reason: "channel-closed" };
+      // A successful resume handshake is evidence about the Session, never the
+      // previous input. No send() is performed and no outcome bit is cleared.
+      this.database.prepare("UPDATE sessions SET opaque_session_reference = ?, profile_json = ? WHERE session_id = ?")
+        .run(reference, JSON.stringify(command.profile), session.session_id);
+      return { resume: "confirmed" };
+    } catch (error) {
+      return { resume: "unconfirmed", reason: expired ? "resume-timeout" : recoveryFailureCategory(error) ?? "resume-unconfirmed" };
+    } finally {
+      clearTimeout(timer);
+      if (resumed !== undefined) await closeUnusedBinding(resumed);
+    }
+  }
+
+  private async recordRecoveryRequired(
     commandId: string,
     failureCategory?: ProjectRecoveryFailureCategory,
-  ): void {
+    binding?: ResumableRuntimeBinding,
+    observed?: ProjectCommandRecovery,
+  ): Promise<void> {
+    const recovery = observed ?? await this.probeRecoveryResume(commandId, binding);
     const committed = transaction(this.database, () => {
       const row = this.database
         .prepare("SELECT target_session_id FROM commands WHERE command_id = ?")
         .get(commandId) as { target_session_id: string | null } | undefined;
       const result = this.database
         .prepare(
-          "UPDATE commands SET status = 'recovery-required', failure_category = ?, outcome_uncertain = 1 WHERE command_id = ? AND status IN ('accepted', 'in-flight')",
+          `UPDATE commands SET status = 'recovery-required', failure_category = ?, outcome_uncertain = 1,
+                  effect_phase = CASE WHEN ? THEN 'committed' ELSE effect_phase END
+            WHERE command_id = ? AND status IN ('accepted', 'in-flight', 'recovery-required')`,
         )
-        .run(failureCategory ?? null, commandId);
+        .run(failureCategory ?? null, recovery.resume === "confirmed" ? 1 : 0, commandId);
       if (Number(result.changes) !== 1) return false;
       if (row?.target_session_id !== null && row?.target_session_id !== undefined) {
+        // completed is the existing idle/resumable Session state. The command
+        // remains recovery-required; committed here seals only the recovery decision.
         this.database
-          .prepare(
-            "UPDATE sessions SET lifecycle_status = 'recovery-required' WHERE session_id = ?",
-          )
-          .run(row.target_session_id);
+          .prepare("UPDATE sessions SET lifecycle_status = ? WHERE session_id = ?")
+          .run(recovery.resume === "confirmed" ? "completed" : "recovery-required", row.target_session_id);
+        if (recovery.resume === "confirmed") {
+          this.database.prepare(`UPDATE commands SET effect_phase = 'committed'
+            WHERE target_session_id = ? AND status = 'recovery-required'`).run(row.target_session_id);
+        }
       }
-      appendUpdate(
-        this.database,
-        this.projectId,
-        commandId,
-        "recovery-required",
-        "recovery-required",
-        row?.target_session_id ?? undefined,
-      );
+      appendUpdate(this.database, this.projectId, commandId, "recovery-required", "recovery-required",
+        row?.target_session_id ?? undefined, { recovery });
       return true;
     });
     if (committed) this.notifyCommittedUpdate();
@@ -1559,7 +1974,7 @@ class SqliteProjectChannel implements ProjectChannel {
               AND (
                 (digest_version = 1 AND status IN ('accepted', 'in-flight', 'recovery-required'))
                 OR
-                (digest_version = 2 AND target_session_id = ? AND status = 'recovery-required')
+                (digest_version = 2 AND target_session_id = ? AND status = 'recovery-required' AND effect_phase != 'committed')
               )
             LIMIT 1`,
         )
@@ -1589,6 +2004,7 @@ class SqliteProjectChannel implements ProjectChannel {
                 (
                   digest_version = 2
                   AND target_session_id = ?
+                  AND effect_phase != 'committed'
                   AND (status = 'recovery-required' OR outcome_uncertain = 1)
                 )
               )
@@ -1824,6 +2240,21 @@ class SqliteProjectChannel implements ProjectChannel {
     }
   }
 
+  /** Commit visible runtime output while the turn is still running. The same
+   * persisted count lets steering and terminal commits append only the tail. */
+  private persistActiveRuntimeEvents(control: ActiveRuntimeControl): void {
+    const count = control.events.length;
+    transaction(this.database, () => {
+      for (let index = control.persistedEventCount; index < count; index += 1) {
+        appendUpdate(this.database, this.projectId, control.commandId,
+          "runtime-event", "in-flight", control.sessionId,
+          { event: control.events[index] });
+      }
+    });
+    control.persistedEventCount = count;
+    this.notifyCommittedUpdate();
+  }
+
   private recordAcceptedSteer(
     control: ActiveRuntimeControl,
     input: string,
@@ -1909,8 +2340,8 @@ class SqliteProjectChannel implements ProjectChannel {
             WHERE project_id = ?
               AND status IN ('accepted', 'in-flight', 'recovery-required')
             ORDER BY CASE status
-                       WHEN 'recovery-required' THEN 0
-                       WHEN 'in-flight' THEN 1
+                       WHEN 'in-flight' THEN 0
+                       WHEN 'accepted' THEN 1
                        ELSE 2
                      END,
                      accepted_cursor
@@ -1925,19 +2356,78 @@ class SqliteProjectChannel implements ProjectChannel {
     }
   }
 
+  async snapshotChanges(after: number): Promise<ProjectSnapshotChanges> {
+    this.assertOpen();
+    this.refreshQuotaPauses();
+    const cursor = currentCursor(this.database, this.projectId);
+    if (!Number.isSafeInteger(after) || after < 0 || after > cursor) {
+      throw new CoordinatorError("invalid-cursor");
+    }
+    const rows = this.database.prepare(`
+      SELECT command_id, target_session_id, runtime, status, failure_category,
+        accepted_cursor, private_envelope_json
+      FROM commands WHERE project_id = ? AND command_id IN (
+        SELECT command_id FROM updates WHERE project_id = ? AND cursor > ?
+      ) ORDER BY accepted_cursor
+    `).all(this.projectId, this.projectId, after) as unknown as CommandRow[];
+    this.synchronizeRuntimeEventCache(cursor);
+    const sessions = this.readSnapshotSessions();
+    return {
+      projectId: this.projectId, after, cursor,
+      commands: rows.map((row) =>
+        this.commandSummary(
+          row,
+          row.target_session_id === null
+            ? undefined
+            : sessions.get(row.target_session_id),
+          this.sessionModelReplyCursors,
+          after,
+        ),
+      ),
+      sessions: [...sessions.values()].map((session) =>
+        this.projectSessionState(session, this.sessionModelReplyCursors),
+      ),
+    };
+  }
+
+  private projectSessionState(session: SessionRow, replies?: ReadonlyMap<string, number>) {
+    const metadata = this.sessionMetadata.project(session);
+    return {
+      sessionId: session.session_id,
+      displayName: metadata.displayName,
+      archived: metadata.archived,
+      ...(replies?.get(session.session_id) === undefined ? {} : { lastModelReplyCursor: replies.get(session.session_id)! }),
+      resumable: !metadata.archived && (session.lifecycle_status === "completed" || this.sessionHasQuotaPause(session.session_id)) &&
+        session.opaque_session_reference !== null && session.opaque_session_reference.trim().length > 0 &&
+        this.isAccountObservationCurrent(session.account_observation_json) &&
+        (this.authGeneration === undefined || this.authGeneration.isSessionNativeResumable(session.auth_context_json)),
+    };
+  }
+
   async snapshot(): Promise<ProjectSnapshot> {
     this.assertOpen();
+    this.refreshQuotaPauses();
     const cursor = currentCursor(this.database, this.projectId);
     const rows = this.database
       .prepare(
-        `SELECT command_id, runtime, status, failure_category, accepted_cursor,
-                private_envelope_json
+        `SELECT command_id, target_session_id, runtime, status,
+                failure_category, accepted_cursor, private_envelope_json
            FROM commands
           WHERE project_id = ?
           ORDER BY accepted_cursor`,
       )
       .all(this.projectId) as unknown as CommandRow[];
-    const commands = rows.map((row) => this.commandSummary(row));
+    this.synchronizeRuntimeEventCache(cursor);
+    const sessions = this.readSnapshotSessions();
+    const commands = rows.map((row) =>
+      this.commandSummary(
+        row,
+        row.target_session_id === null
+          ? undefined
+          : sessions.get(row.target_session_id),
+        this.sessionModelReplyCursors,
+      ),
+    );
     return { projectId: this.projectId, cursor, commands };
   }
 
@@ -1986,9 +2476,18 @@ class SqliteProjectChannel implements ProjectChannel {
   close(): Promise<void> {
     if (this.closePromise !== undefined) return this.closePromise;
     this.closed = true;
+    clearTimeout(this.quotaExpiryTimer);
     for (const observer of [...this.observers]) this.finishObservation(observer);
+    // iterator.return() cannot interrupt a generator blocked in receive().
+    // Start transport shutdown first, through the production directory binding.
+    try {
+      this.activeRuntimeControl?.binding.close?.();
+    } catch {
+      // Shutdown initiation is not an outcome receipt; still drain the iterator.
+    }
     const runtimeCancellation =
-      this.activeRuntimeIterator === undefined
+      this.activeRuntimeIterator === undefined ||
+      this.activeRuntimeIterator.terminalObserved
         ? Promise.resolve()
         : this.cancelRuntimeIterator(this.activeRuntimeIterator);
     this.closePromise = this.finishClose(runtimeCancellation);
@@ -2118,42 +2617,34 @@ class SqliteProjectChannel implements ProjectChannel {
     this.observers.delete(state);
   }
 
-  private commandSummary(row: CommandRow): ProjectCommandSummary {
-    const currentCommand =
-      row.private_envelope_json === null
-        ? undefined
-        : hydrateStoredCommand(row.private_envelope_json);
-    const session = this.database
-      .prepare(
-        `SELECT sessions.session_id, sessions.profile_json,
-                sessions.opaque_session_reference, sessions.lifecycle_status,
-                sessions.auth_context_json,
-                sessions.account_observation_json, sessions.display_name,
-                sessions.display_name_source, sessions.display_ordinal,
-                sessions.archived,
-                root.private_envelope_json AS root_private_envelope_json,
-                root.accepted_cursor AS root_accepted_cursor
-           FROM sessions
-           JOIN commands AS root ON root.command_id = sessions.root_command_id
-          WHERE sessions.session_id = (
-            SELECT target_session_id FROM commands WHERE command_id = ?
-          )`,
-      )
-      .get(row.command_id) as SessionRow | undefined;
+  private commandSummary(
+    row: CommandRow,
+    session: SessionRow | undefined,
+    sessionModelReplies?: ReadonlyMap<string, number>,
+    eventsAfter?: number,
+  ): ProjectCommandSummary {
+    const currentCommand = this.readStoredCommand(
+      row.command_id,
+      row.private_envelope_json,
+    );
     const failureCategory = failedCommandFailureCategory(row);
     const summary: ProjectCommandSummary = {
       commandId: row.command_id,
       runtime: row.runtime,
-      status: row.status,
+      status: row.status === "failed" && row.failure_category === "quota-paused" && this.quotaDeadline(row.command_id) > Date.now()
+        ? "quota-paused" : row.status,
+      ...(row.status === "recovery-required" ? { recovery: this.recoveryForCommand(row.command_id) } : {}),
       ...(failureCategory === undefined ? {} : { failureCategory }),
       ...(currentCommand === undefined ? {} : { input: currentCommand.input }),
     };
     if (session === undefined) return summary;
     let requestedProfileProjection: RequestedSessionProfileProjection | undefined;
     if (session.root_private_envelope_json !== null) {
-      const rootCommand = hydrateStoredCommand(
+      const rootCommand = this.readStoredCommand(
+        session.root_command_id,
         session.root_private_envelope_json,
       );
+      if (rootCommand === undefined) throw new Error("invalid-command-envelope");
       if (currentCommand?.commandKind === "start") {
         requestedProfileProjection = currentCommand.requestedProfileProjection;
       } else if (
@@ -2174,14 +2665,26 @@ class SqliteProjectChannel implements ProjectChannel {
         ? undefined
         : this.effectiveProjectionForCommand(row.command_id);
     const metadata = this.sessionMetadata.project(session);
-    const eventRows = this.database
-      .prepare(
-        `SELECT data_json
-           FROM updates
-          WHERE command_id = ? AND kind = 'runtime-event'
-          ORDER BY cursor`,
-      )
-      .all(row.command_id) as unknown as Array<{ data_json: string }>;
+    const events =
+      eventsAfter === undefined
+        ? (this.runtimeEventsByCommandId.get(row.command_id) ?? [])
+        : (this.database
+            .prepare(
+              `SELECT data_json
+                 FROM updates
+                WHERE command_id = ? AND kind = 'runtime-event' AND cursor > ?
+                ORDER BY cursor`,
+            )
+            .all(row.command_id, eventsAfter) as unknown as Array<{
+            data_json: string;
+          }>).map(({ data_json }) => {
+            const data = JSON.parse(data_json) as {
+              event: ProjectRecordedTurnEvent;
+            };
+            return freezeRecordedTurnEvent(
+              hydrateStoredRuntimeEvent(data.event),
+            );
+          });
     return {
       ...summary,
       session: {
@@ -2197,9 +2700,17 @@ class SqliteProjectChannel implements ProjectChannel {
         ...(effectiveProfileProjection === undefined
           ? {}
           : { effectiveProfileProjection }),
+        ...(sessionModelReplies?.get(session.session_id) === undefined
+          ? {}
+          : {
+              lastModelReplyCursor: sessionModelReplies.get(
+                session.session_id,
+              ),
+            }),
+        acceptedCommandCursor: row.accepted_cursor,
         resumable:
           !metadata.archived &&
-          session.lifecycle_status === "completed" &&
+          (session.lifecycle_status === "completed" || this.sessionHasQuotaPause(session.session_id)) &&
           session.opaque_session_reference !== null &&
           session.opaque_session_reference.trim().length > 0 &&
           this.isAccountObservationCurrent(session.account_observation_json) &&
@@ -2207,14 +2718,115 @@ class SqliteProjectChannel implements ProjectChannel {
             this.authGeneration.isSessionNativeResumable(
               session.auth_context_json,
             )),
-        events: eventRows.map((eventRow) => {
-          const data = JSON.parse(eventRow.data_json) as {
-            event: ProjectRecordedTurnEvent;
-          };
-          return hydrateStoredRuntimeEvent(data.event);
-        }),
+        events,
       },
     };
+  }
+
+  private readSnapshotSessions(): ReadonlyMap<string, SessionRow> {
+    const rows = this.database
+      .prepare(
+        `SELECT sessions.session_id, sessions.root_command_id,
+                sessions.profile_json, sessions.opaque_session_reference,
+                sessions.lifecycle_status, sessions.auth_context_json,
+                sessions.account_observation_json, sessions.display_name,
+                sessions.display_name_source, sessions.display_ordinal,
+                sessions.archived,
+                root.private_envelope_json AS root_private_envelope_json,
+                root.accepted_cursor AS root_accepted_cursor
+           FROM sessions
+           JOIN commands AS root ON root.command_id = sessions.root_command_id
+          WHERE sessions.project_id = ?`,
+      )
+      .all(this.projectId) as unknown as SessionRow[];
+    return new Map(rows.map((row) => [row.session_id, row]));
+  }
+
+  private readStoredCommand(
+    commandId: string,
+    source: string | null,
+  ): DirectProjectCommand | undefined {
+    if (source === null) return undefined;
+    const cached = this.storedCommandCache.get(commandId);
+    if (cached?.source === source) return cached.command;
+    const command = hydrateStoredCommand(source, this.endpointIds);
+    this.storedCommandCache.set(commandId, { source, command });
+    return command;
+  }
+
+  /** Keep complete timelines while reading and hydrating each durable event once. */
+  private synchronizeRuntimeEventCache(cursor: number): void {
+    if (cursor <= this.runtimeEventCacheCursor) return;
+    const rows = this.database
+      .prepare(
+        `SELECT cursor, command_id, session_id, data_json
+           FROM updates
+          WHERE cursor > ? AND cursor <= ?
+            AND project_id = ?
+            AND kind = 'runtime-event'
+          ORDER BY cursor`,
+      )
+      .all(
+        this.runtimeEventCacheCursor,
+        cursor,
+        this.projectId,
+      ) as unknown as Array<{
+      readonly cursor: number;
+      readonly command_id: string;
+      readonly session_id: string | null;
+      readonly data_json: string;
+    }>;
+    const additions = new Map<string, ProjectRecordedTurnEvent[]>();
+    const replyCursors = new Map<string, number>();
+    for (const row of rows) {
+      const data = JSON.parse(row.data_json) as {
+        event: ProjectRecordedTurnEvent;
+      };
+      const event = freezeRecordedTurnEvent(
+        hydrateStoredRuntimeEvent(data.event),
+      );
+      if (event.kind === "agent-message") {
+        if (row.session_id === null) throw new Error("invalid-runtime-update");
+        replyCursors.set(row.session_id, Number(row.cursor));
+      }
+      const commandEvents = additions.get(row.command_id);
+      if (commandEvents === undefined) {
+        additions.set(row.command_id, [event]);
+      } else {
+        commandEvents.push(event);
+      }
+    }
+    for (const [commandId, events] of additions) {
+      this.runtimeEventsByCommandId.set(
+        commandId,
+        Object.freeze([
+          ...(this.runtimeEventsByCommandId.get(commandId) ?? []),
+          ...events,
+        ]),
+      );
+    }
+    for (const [sessionId, replyCursor] of replyCursors) {
+      this.sessionModelReplyCursors.set(sessionId, replyCursor);
+    }
+    this.runtimeEventCacheCursor = cursor;
+  }
+
+  private recoveryForCommand(commandId: string): ProjectCommandRecovery {
+    const row = this.database.prepare(
+      "SELECT data_json FROM updates WHERE command_id = ? AND kind = 'recovery-required' ORDER BY cursor DESC LIMIT 1",
+    ).get(commandId) as { data_json: string | null } | undefined;
+    // Old records did not measure resume. Do not invent a Runtime refusal.
+    if (row?.data_json == null) return { resume: "unconfirmed", reason: "resume-unconfirmed" };
+    const data = JSON.parse(row.data_json) as { recovery: ProjectCommandRecovery };
+    if (!isExactDataRecord(data, ["recovery"])) throw new Error("invalid-recovery-update");
+    const recovery = data.recovery;
+    if (isExactDataRecord(recovery, ["resume"]) && recovery.resume === "confirmed") return { resume: "confirmed" };
+    if (isExactDataRecord(recovery, ["resume", "reason"]) && recovery.resume === "unconfirmed" &&
+      (runtimeFailureCategories.has(recovery.reason) || ["runtime-not-located", "binding-drift",
+        "session-reference-unavailable", "authentication-changed", "channel-closed", "resume-timeout", "resume-unconfirmed"].includes(recovery.reason))) {
+      return { resume: "unconfirmed", reason: recovery.reason };
+    }
+    throw new Error("invalid-recovery-update");
   }
 
   private effectiveProjectionForCommand(
@@ -2243,6 +2855,7 @@ class SqliteProjectChannel implements ProjectChannel {
   private recordFailure(
     commandId: string,
     failureCategory: ProjectCommandFailureCategory,
+    runtimeFailureCategory?: RuntimeFailureCategory,
   ): void {
     const failed = transaction(this.database, () => {
       const row = this.database
@@ -2266,6 +2879,20 @@ class SqliteProjectChannel implements ProjectChannel {
             )`,
         )
         .run(commandId);
+      if (
+        runtimeFailureCategory !== undefined &&
+        typeof row?.target_session_id === "string"
+      ) {
+        appendUpdate(
+          this.database,
+          this.projectId,
+          commandId,
+          "runtime-event",
+          "in-flight",
+          row.target_session_id,
+          { event: { kind: "failed", category: runtimeFailureCategory } },
+        );
+      }
       appendUpdate(
         this.database,
         this.projectId,
@@ -2303,6 +2930,14 @@ function createPromiseController<T>(): PromiseController<T> {
 }
 
 const currentSchemaVersion = 6;
+const quotaPauseMaximumMs = 24 * 60 * 60 * 1000;
+
+function readQuotaDeadline(dataJson: string): number {
+  const value: unknown = JSON.parse(dataJson);
+  if (!isExactDataRecord(value, ["expiresAt"]) || !Number.isSafeInteger(value.expiresAt) ||
+      (value.expiresAt as number) <= 0) throw new Error("invalid-quota-pause");
+  return value.expiresAt as number;
+}
 const conceptualTables = ["commands", "projects", "sessions", "updates"] as const;
 const versionOneColumns = Object.freeze({
   projects: ["project_id", "directory_digest"],
@@ -3009,7 +3644,13 @@ function assertVersionTwoRows(database: DatabaseSync): void {
     }>;
   try {
     for (const row of versionTwoCommands) {
-      const command = hydrateStoredCommand(row.private_envelope_json);
+      // Historical envelopes are validated against every endpoint id the
+      // ledger format has ever admitted, not the caller's injected roster:
+      // a reopen must trust rows this or any earlier roster accepted.
+      const command = hydrateStoredCommand(
+        row.private_envelope_json,
+        allDurableRuntimeEndpointIds,
+      );
       if (
         command.commandKind !== row.command_kind ||
         (command.commandKind === "continue" &&
@@ -3187,6 +3828,17 @@ function recoveryFailureCategory(
   return undefined;
 }
 
+/** Exact failures from the post-acceptance catalog re-check; absence stays unknown. */
+function executionInspectionFailureCategory(
+  error: unknown,
+): RuntimeFailureCategory | undefined {
+  return error instanceof RuntimeAdapterError &&
+    (error.category === "runtime-not-located" ||
+      error.category === "authentication-required")
+    ? error.category
+    : undefined;
+}
+
 /**
  * The snapshot summary carries a failureCategory only for `failed` commands
  * and only from the closed `failed` vocabulary — the contract every summary
@@ -3199,6 +3851,7 @@ function failedCommandFailureCategory(
   if (row.status !== "failed" || row.failure_category === null) return undefined;
   return row.failure_category === "profile-resolution-failed" ||
     row.failure_category === "runtime-failed" ||
+    row.failure_category === "quota-expired" ||
     row.failure_category === "interrupted"
     ? row.failure_category
     : undefined;
@@ -3284,7 +3937,10 @@ function transaction<T>(database: DatabaseSync, action: () => T): T {
   }
 }
 
-function validateCommand(command: DirectProjectCommand): void {
+function validateCommand(
+  command: DirectProjectCommand,
+  endpointIds: readonly DurableRuntimeEndpointId[],
+): void {
   if (
     !isRecord(command) ||
     command.kind !== "direct" ||
@@ -3300,7 +3956,11 @@ function validateCommand(command: DirectProjectCommand): void {
   const hasRuntimeResumeIdentity = hasOwn(command, "runtimeResumeIdentity");
   if (
     hasRuntimeResumeIdentity &&
-    !isRuntimeResumeIdentity(command.runtimeResumeIdentity, command.profile)
+    !isRuntimeResumeIdentity(
+      command.runtimeResumeIdentity,
+      command.profile,
+      endpointIds,
+    )
   ) {
     throw new CoordinatorError("invalid-command");
   }
@@ -3374,6 +4034,7 @@ function validateContinuationProfileRequest(
 function validateRuntimeContext(
   value: ProjectCommandRuntimeContext | undefined,
   required: boolean,
+  endpointIds: readonly DurableRuntimeEndpointId[],
 ): ProjectCommandRuntimeContext | undefined {
   if (value === undefined) {
     if (required) throw new CoordinatorError("invalid-command");
@@ -3381,8 +4042,8 @@ function validateRuntimeContext(
   }
   if (
     !isExactDataRecord(value, ["endpointId"]) ||
-    (value.endpointId !== "codex-desktop" &&
-      value.endpointId !== "claude-code-desktop")
+    !isDurableRuntimeEndpointId(value.endpointId) ||
+    !endpointIds.includes(value.endpointId)
   ) {
     throw new CoordinatorError("invalid-command");
   }
@@ -3416,11 +4077,24 @@ function validateSessionRemovalRequest(request: ProjectSessionRemovalRequest): {
 function validateSessionMetadataMutationRequest(
   request: ProjectSessionMetadataMutationRequest,
 ): ProjectSessionMetadataMutationRequest {
+  const acknowledged = isExactDataRecord(request, [
+    "acknowledgedUnknownOutcome",
+    "operation",
+    "sessionId",
+  ]);
   if (
-    !isExactDataRecord(request, ["operation", "sessionId"]) ||
+    (!acknowledged &&
+      !isExactDataRecord(request, ["operation", "sessionId"])) ||
     typeof request.sessionId !== "string" ||
     request.sessionId.trim().length === 0 ||
     !isRecord(request.operation)
+  ) {
+    throw new CoordinatorError("invalid-command");
+  }
+  if (
+    acknowledged &&
+    (request.operation.kind !== "archive" ||
+      request.acknowledgedUnknownOutcome !== true)
   ) {
     throw new CoordinatorError("invalid-command");
   }
@@ -3449,6 +4123,9 @@ function validateSessionMetadataMutationRequest(
   return Object.freeze({
     sessionId: request.sessionId,
     operation: Object.freeze({ kind: request.operation.kind }),
+    ...(acknowledged
+      ? { acknowledgedUnknownOutcome: true as const }
+      : {}),
   });
 }
 
@@ -3608,9 +4285,12 @@ function cloneDirectCommand(command: DirectProjectCommand): DirectProjectCommand
   };
 }
 
-function hydrateStoredCommand(value: string): DirectProjectCommand {
+function hydrateStoredCommand(
+  value: string,
+  endpointIds: readonly DurableRuntimeEndpointId[],
+): DirectProjectCommand {
   const parsed = JSON.parse(value) as DirectProjectCommand;
-  validateCommand(parsed);
+  validateCommand(parsed, endpointIds);
   return cloneDirectCommand(parsed);
 }
 
@@ -3655,12 +4335,13 @@ function isExactReportedProfile(value: unknown): value is SessionProfile {
 function isRuntimeResumeIdentity(
   value: unknown,
   selectionProfile: SessionProfile,
+  endpointIds: readonly DurableRuntimeEndpointId[],
 ): value is ProjectRuntimeResumeIdentity {
   return (
     isExactDataRecord(value, ["endpointId", "nativeProfile", "schemaVersion"]) &&
     value.schemaVersion === 1 &&
-    (value.endpointId === "codex-desktop" ||
-      value.endpointId === "claude-code-desktop") &&
+    isDurableRuntimeEndpointId(value.endpointId) &&
+    endpointIds.includes(value.endpointId) &&
     isExactReportedProfile(value.nativeProfile) &&
     runtimeProfileProjectionPreservesLockedModes(
       value.endpointId,
@@ -3777,6 +4458,7 @@ function hasExactKeys(
 
 async function closeUnusedBinding(binding: ResumableRuntimeBinding): Promise<void> {
   try {
+    binding.close?.();
     const iterator = binding.events()[Symbol.asyncIterator]();
     await iterator.return?.();
   } catch {
@@ -3799,8 +4481,11 @@ function cloneProfilePreferences<T extends Readonly<Partial<SessionProfile>>>(
   } as T;
 }
 
-function cloneRuntimeEvent(event: NormalizedRuntimeEvent): NormalizedRuntimeEvent {
-  if (!isNormalizedRuntimeEvent(event)) throw new Error("invalid-runtime-event");
+function cloneRuntimeEvent(
+  event: NormalizedRuntimeEvent,
+  ignoredFields?: string[],
+): NormalizedRuntimeEvent {
+  if (!isNormalizedRuntimeEvent(event, ignoredFields)) throw new Error("invalid-runtime-event");
   switch (event.kind) {
     case "session-started":
     case "turn-started":
@@ -3809,7 +4494,16 @@ function cloneRuntimeEvent(event: NormalizedRuntimeEvent): NormalizedRuntimeEven
     case "item-completed":
       return { kind: event.kind, itemType: "agent-message" };
     case "agent-message":
-      return { kind: "agent-message", text: event.text };
+    case "reasoning":
+      return { kind: event.kind, text: event.text };
+    case "progress":
+      return Object.freeze({
+        kind: "progress" as const,
+        activity: event.activity,
+        ...(event.tool === undefined
+          ? {}
+          : { tool: cloneRuntimeToolActivity(event.tool) }),
+      });
     case "turn-completed":
       return {
         kind: "turn-completed",
@@ -3830,9 +4524,14 @@ function cloneRuntimeEvent(event: NormalizedRuntimeEvent): NormalizedRuntimeEven
                       windowTokens: null,
                     },
             }),
+        ...(event.suggestions === undefined
+          ? {}
+          : { suggestions: Object.freeze([...event.suggestions]) }),
       };
     case "turn-interrupted":
       return { kind: "turn-interrupted", status: "interrupted" };
+    case "turn-paused":
+      return { kind: "turn-paused", reason: "quota-exhausted" };
     case "failed":
       return { kind: "failed", category: event.category };
   }
@@ -3856,6 +4555,16 @@ function hydrateStoredRuntimeEvent(event: unknown): ProjectRecordedTurnEvent {
     return { kind: "turn-completed", status: "completed" };
   }
   return cloneRuntimeEvent(event as NormalizedRuntimeEvent);
+}
+
+function freezeRecordedTurnEvent(
+  event: ProjectRecordedTurnEvent,
+): ProjectRecordedTurnEvent {
+  if (event.kind === "turn-completed") {
+    if (event.context !== undefined) Object.freeze(event.context);
+    if (event.suggestions !== undefined) Object.freeze(event.suggestions);
+  }
+  return Object.freeze(event);
 }
 
 function isLegacyTurnCompletedRuntimeEvent(value: unknown): boolean {
@@ -3894,6 +4603,7 @@ const runtimeFailureCategories = new Set([
   "protocol-invalid",
   "protocol-rejected",
   "runtime-shutdown",
+  "runtime-not-located",
   "runtime-unavailable",
   "temp-cleanup",
   "temp-cleanup-guard",
@@ -3903,39 +4613,104 @@ const runtimeFailureCategories = new Set([
   "unsupported-selection",
 ]);
 
+const runtimeProgressActivities = new Set([
+  "thinking",
+  "tool",
+  "retrying",
+  "rate-limited",
+  "status",
+]);
+
+const runtimeToolActivityTypes = new Set([
+  "tool_use",
+  "commandExecution",
+  "fileChange",
+  "webSearch",
+  "unknown",
+]);
+const maximumRuntimeToolActivitySourceTypeCharacters = 240;
+
+// Only live Runtime ingress supplies a collector. Stored rows keep exact shapes;
+// ingress still validates every consumed field and clones fresh known-only literals.
+function hasRuntimeEventKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+  ignoredFields: string[] | undefined,
+  path = "event",
+): boolean {
+  if (ignoredFields === undefined) return hasOnlyKeys(value, allowed);
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) ignoredFields.push(`${path}.${key}`);
+  }
+  return true;
+}
+
+function isRuntimeDataRecord(
+  value: unknown,
+  required: readonly string[],
+  ignoredFields: string[] | undefined,
+  path: string,
+): value is Record<string, unknown> {
+  // Include additional data properties in the record check, not in the clone.
+  // Required own/enumerable data fields and plain-record checks remain unchanged.
+  const keys = ignoredFields !== undefined && isRecord(value) && !nodeUtilTypes.isProxy(value)
+    ? [...new Set([...required, ...Object.keys(value)])]
+    : required;
+  return isExactDataRecord(value, keys) &&
+    hasRuntimeEventKeys(value, required, ignoredFields, path);
+}
+
 function isNormalizedRuntimeEvent(
   value: unknown,
+  ignoredFields?: string[],
 ): value is NormalizedRuntimeEvent {
   if (!isRecord(value) || typeof value.kind !== "string") return false;
   switch (value.kind) {
     case "session-started":
     case "turn-started":
-      return hasOnlyKeys(value, ["kind"]);
+      return hasRuntimeEventKeys(value, ["kind"], ignoredFields);
     case "item-started":
     case "item-completed":
       return (
-        hasOnlyKeys(value, ["itemType", "kind"]) &&
+        hasRuntimeEventKeys(value, ["itemType", "kind"], ignoredFields) &&
         value.itemType === "agent-message"
       );
     case "agent-message":
+    case "reasoning":
       return (
-        hasOnlyKeys(value, ["kind", "text"]) &&
+        hasRuntimeEventKeys(value, ["kind", "text"], ignoredFields) &&
         typeof value.text === "string"
+      );
+    case "progress":
+      return (
+        hasRuntimeEventKeys(value, ["activity", "kind", "tool"], ignoredFields) &&
+        typeof value.activity === "string" &&
+        runtimeProgressActivities.has(value.activity) &&
+        (!hasOwn(value, "tool") || isRuntimeToolActivity(value.tool, ignoredFields))
       );
     case "turn-completed":
       return (
-        hasOnlyKeys(value, ["context", "kind", "status"]) &&
+        hasRuntimeEventKeys(
+          value,
+          ["context", "kind", "status", "suggestions"],
+          ignoredFields,
+        ) &&
         value.status === "completed" &&
-        (!hasOwn(value, "context") || isRuntimeContextUsage(value.context))
+        (!hasOwn(value, "context") ||
+          isRuntimeContextUsage(value.context, ignoredFields)) &&
+        (!hasOwn(value, "suggestions") ||
+          isRuntimePromptSuggestions(value.suggestions))
       );
     case "turn-interrupted":
       return (
-        hasOnlyKeys(value, ["kind", "status"]) &&
+        hasRuntimeEventKeys(value, ["kind", "status"], ignoredFields) &&
         value.status === "interrupted"
       );
+    case "turn-paused":
+      return isExactDataRecord(value, ["kind", "reason"]) && value.reason === "quota-exhausted";
     case "failed":
       return (
-        hasOnlyKeys(value, ["category", "kind"]) &&
+        hasRuntimeEventKeys(value, ["category", "kind"], ignoredFields) &&
         typeof value.category === "string" &&
         runtimeFailureCategories.has(value.category)
       );
@@ -3944,9 +4719,172 @@ function isNormalizedRuntimeEvent(
   }
 }
 
-function isRuntimeContextUsage(value: unknown): boolean {
+function cloneRuntimeToolActivity(
+  tool: RuntimeToolActivity,
+): RuntimeToolActivity {
+  return Object.freeze({
+    type: tool.type,
+    name: tool.name,
+    ...(tool.sourceType === undefined ? {} : { sourceType: tool.sourceType }),
+    ...(tool.parameter === undefined
+      ? {}
+      : {
+          parameter: Object.freeze({
+            kind: tool.parameter.kind,
+            value: tool.parameter.value,
+            truncated: tool.parameter.truncated,
+          }),
+        }),
+    ...(tool.fileChanges === undefined
+      ? {}
+      : {
+          fileChanges: Object.freeze({
+            files: Object.freeze(tool.fileChanges.files.map((file) =>
+              Object.freeze({
+                path: file.path,
+                truncated: file.truncated,
+                ...(file.lines === undefined
+                  ? {}
+                  : {
+                      lines: Object.freeze({
+                        additions: file.lines.additions,
+                        deletions: file.lines.deletions,
+                      }),
+                    }),
+              })
+            )),
+            totalFiles: tool.fileChanges.totalFiles,
+            truncated: tool.fileChanges.truncated,
+          }),
+        }),
+  });
+}
+
+function isRuntimeToolActivity(
+  value: unknown,
+  ignoredFields?: string[],
+): value is RuntimeToolActivity {
   if (
-    !isExactDataRecord(value, ["basis", "usedTokens", "windowTokens"]) ||
+    !isRecord(value) ||
+    !hasRuntimeEventKeys(
+      value,
+      ["fileChanges", "name", "parameter", "sourceType", "type"],
+      ignoredFields,
+      "tool",
+    ) ||
+    typeof value.type !== "string" ||
+    !runtimeToolActivityTypes.has(value.type) ||
+    typeof value.name !== "string" ||
+    (value.type === "unknown"
+      ? !isRuntimeToolActivitySourceType(value.sourceType)
+      : hasOwn(value, "sourceType")) ||
+    (hasOwn(value, "parameter") &&
+      !isRuntimeToolActivityParameter(value.parameter, ignoredFields)) ||
+    (hasOwn(value, "fileChanges") &&
+      (value.type !== "fileChange" ||
+        !isRuntimeFileChangeSummary(value.fileChanges, ignoredFields)))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function isRuntimeFileChangeSummary(
+  value: unknown,
+  ignoredFields?: string[],
+): boolean {
+  if (
+    !isRuntimeDataRecord(
+      value,
+      ["files", "totalFiles", "truncated"],
+      ignoredFields,
+      "tool.fileChanges",
+    ) ||
+    !Array.isArray(value.files) ||
+    value.files.length === 0 ||
+    value.files.length > 3 ||
+    !Number.isSafeInteger(value.totalFiles) ||
+    (value.totalFiles as number) < value.files.length ||
+    value.truncated !== ((value.totalFiles as number) > value.files.length)
+  ) {
+    return false;
+  }
+  return value.files.every((file, index) => {
+    if (!isRecord(file)) return false;
+    return isRuntimeDataRecord(
+      file,
+      hasOwn(file, "lines")
+        ? ["lines", "path", "truncated"]
+        : ["path", "truncated"],
+      ignoredFields,
+      `tool.fileChanges.files[${index}]`,
+    ) &&
+    typeof file.path === "string" &&
+    typeof file.truncated === "boolean" &&
+    (!hasOwn(file, "lines") ||
+      isRuntimeFileChangeLineSummary(
+        file.lines,
+        ignoredFields,
+        `tool.fileChanges.files[${index}].lines`,
+      ));
+  });
+}
+
+function isRuntimeFileChangeLineSummary(
+  value: unknown,
+  ignoredFields: string[] | undefined,
+  path: string,
+): boolean {
+  return (
+    isRuntimeDataRecord(
+      value,
+      ["additions", "deletions"],
+      ignoredFields,
+      path,
+    ) &&
+    Number.isSafeInteger(value.additions) &&
+    (value.additions as number) >= 0 &&
+    Number.isSafeInteger(value.deletions) &&
+    (value.deletions as number) >= 0
+  );
+}
+
+function isRuntimeToolActivityParameter(
+  value: unknown,
+  ignoredFields?: string[],
+): boolean {
+  return (
+    isRecord(value) &&
+    (ignoredFields === undefined
+      ? hasExactKeys(value, ["kind", "truncated", "value"])
+      : ["kind", "truncated", "value"].every((key) => Object.prototype.propertyIsEnumerable.call(value, key)) &&
+        hasRuntimeEventKeys(value, ["kind", "truncated", "value"], ignoredFields, "tool.parameter")) &&
+    (value.kind === "command" || value.kind === "path") &&
+    typeof value.value === "string" &&
+    typeof value.truncated === "boolean"
+  );
+}
+
+function isRuntimeToolActivitySourceType(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumRuntimeToolActivitySourceTypeCharacters &&
+    !value.includes("\0")
+  );
+}
+
+function isRuntimePromptSuggestions(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) &&
+    value.length > 0 &&
+    value.every(isValidSteerInput)
+  );
+}
+
+function isRuntimeContextUsage(value: unknown, ignoredFields?: string[]): boolean {
+  if (
+    !isRuntimeDataRecord(value, ["basis", "usedTokens", "windowTokens"], ignoredFields, "context") ||
     typeof value.usedTokens !== "number" ||
     !Number.isSafeInteger(value.usedTokens) ||
     value.usedTokens < 0
@@ -3972,7 +4910,7 @@ function hydrateUpdate(row: UpdateRow): DurableProjectUpdate {
     Number(row.cursor) <= 0 ||
     typeof row.command_id !== "string" ||
     row.command_id.length === 0 ||
-    !["accepted", "in-flight", "completed", "failed", "recovery-required"].includes(
+    !["accepted", "in-flight", "completed", "quota-paused", "failed", "recovery-required"].includes(
       row.status,
     )
   ) {
@@ -3991,6 +4929,9 @@ function hydrateUpdate(row: UpdateRow): DurableProjectUpdate {
     case "completed":
       effectiveProjectionFromTerminalData("completed", row.data_json);
       return { ...base, kind: "completed" };
+    case "quota-paused":
+      readQuotaDeadline(row.data_json ?? "{}");
+      return { ...base, kind: "quota-paused" };
     case "profile-resolved": {
       const data = JSON.parse(row.data_json ?? "{}") as { profile: SessionProfile };
       if (row.session_id === null || !isStoredProfile(data.profile)) {
@@ -4043,6 +4984,7 @@ function hydrateUpdate(row: UpdateRow): DurableProjectUpdate {
       if (
         data.failureCategory !== "profile-resolution-failed" &&
         data.failureCategory !== "runtime-failed" &&
+        data.failureCategory !== "quota-expired" &&
         data.failureCategory !== "interrupted"
       ) {
         throw new Error("invalid-failure-update");

@@ -178,6 +178,96 @@ export const visualFixture: WorkbenchHostedProjectView = Object.freeze({
   projectSelection: firstSelectedProjects,
 });
 
+const promptSuggestionTurn = Object.freeze([
+  ...visualFixture.commands[0]!.session!.timeline.slice(0, -1),
+  Object.freeze({
+    kind: "turn-completed" as const,
+    status: "completed" as const,
+    suggestions: Object.freeze([
+      "Check the remaining tests",
+      "Explain the implementation trade-off",
+    ]),
+  }),
+]);
+
+export const promptSuggestionsVisualFixture: WorkbenchHostedProjectView =
+  Object.freeze({
+    ...visualFixture,
+    observation: Object.freeze({ cursor: 12, live: true }),
+    commands: Object.freeze([
+      Object.freeze({
+        ...visualFixture.commands[0]!,
+        session: Object.freeze({
+          ...visualFixture.commands[0]!.session!,
+          timeline: promptSuggestionTurn,
+          turns: Object.freeze([
+            Object.freeze({
+              profile: visualFixture.commands[0]!.session!.profile,
+              timeline: promptSuggestionTurn,
+            }),
+          ]),
+        }),
+      }),
+      ...visualFixture.commands.slice(1),
+    ]),
+  });
+
+const nextTurnWithoutSuggestions = Object.freeze([
+  Object.freeze({ kind: "turn-started" as const }),
+  Object.freeze({ kind: "item-started" as const, itemType: "agent-message" as const }),
+  Object.freeze({ kind: "agent-message" as const, text: "The next turn has no suggestions." }),
+  Object.freeze({ kind: "item-completed" as const, itemType: "agent-message" as const }),
+  Object.freeze({ kind: "turn-completed" as const, status: "completed" as const }),
+]);
+
+export const stalePromptSuggestionsVisualFixture: WorkbenchHostedProjectView =
+  Object.freeze({
+    ...promptSuggestionsVisualFixture,
+    observation: Object.freeze({ cursor: 17, live: true }),
+    commands: Object.freeze([
+      Object.freeze({
+        ...promptSuggestionsVisualFixture.commands[0]!,
+        session: Object.freeze({
+          ...promptSuggestionsVisualFixture.commands[0]!.session!,
+          timeline: Object.freeze([
+            ...promptSuggestionTurn,
+            ...nextTurnWithoutSuggestions,
+          ]),
+          turns: Object.freeze([
+            Object.freeze({
+              profile: visualFixture.commands[0]!.session!.profile,
+              timeline: promptSuggestionTurn,
+            }),
+            Object.freeze({
+              profile: visualFixture.commands[0]!.session!.profile,
+              timeline: nextTurnWithoutSuggestions,
+            }),
+          ]),
+        }),
+      }),
+      ...promptSuggestionsVisualFixture.commands.slice(1),
+    ]),
+  });
+
+export const inFlightSessionRemovalVisualFixture: WorkbenchHostedProjectView =
+  Object.freeze({
+    ...visualFixture,
+    observation: Object.freeze({ cursor: 12, live: true }),
+    commands: Object.freeze([
+      Object.freeze({
+        ...visualFixture.commands[0]!,
+        status: "in-flight" as const,
+        session: Object.freeze({
+          ...visualFixture.commands[0]!.session!,
+          timeline: Object.freeze(
+            visualFixture.commands[0]!.session!.timeline.slice(0, -1),
+          ),
+        }),
+      }),
+      ...visualFixture.commands.slice(1),
+    ]),
+  });
+
 export const codeBlockCopyVisualFixture: WorkbenchHostedProjectView =
   Object.freeze({
     ...visualFixture,
@@ -494,10 +584,10 @@ export const sessionMetadataVisualFixture: WorkbenchHostedProjectView =
 export const visualDirectProfile: WorkbenchPublicDirectSessionProfileResult =
   Object.freeze({
     ok: true,
-    endpointDiscovery: publicRuntimeEndpointDiscovery(
-      "catalog-ready",
-      "catalog-ready",
-    ),
+    endpointDiscovery: publicRuntimeEndpointDiscovery([
+      { endpointId: "codex-desktop", category: "catalog-ready" },
+      { endpointId: "claude-code-desktop", category: "catalog-ready" },
+    ]),
     profile: Object.freeze({
       snapshotKey: "qa-snapshot",
       endpoints: Object.freeze([

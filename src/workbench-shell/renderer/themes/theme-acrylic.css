@@ -155,21 +155,24 @@
 
 :root[data-skin~="acrylic"][data-tone="light"] .mark { color: #fff; }
 
-/* The histories panel floats inside a fixed black scrim. In light tone its
-   translucent `--bg-1` plate still resolves to dark grey, so document ink is
-   the wrong polarity even though the light palette itself is correct. Keep the
-   thin plate unchanged and move legibility into crisp, surface-local colour. */
-:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog {
+/* The removal-dialog family floats inside a fixed black scrim. In light tone
+   its translucent `--bg-1` plate still resolves to dark grey, so document ink
+   is the wrong polarity even though the light palette itself is correct. Keep
+   the thin plate unchanged and move legibility into crisp, surface-local
+   colour. `.removal-dialog` is the shared base class, so the delete-session
+   confirmation gets the same ink fix as the histories panel (issue #6 case 8:
+   the delete prompt was near-black-on-dark in light tone). */
+:root[data-skin~="acrylic"][data-tone="light"] .removal-dialog {
   color: var(--modal-ink-strong);
 }
-:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog h2,
-:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog .btn {
+:root[data-skin~="acrylic"][data-tone="light"] .removal-dialog h2,
+:root[data-skin~="acrylic"][data-tone="light"] .removal-dialog .btn:not(.removal-confirm-button) {
   color: var(--modal-ink-strong);
 }
-:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog > p:not(.system-kicker) {
+:root[data-skin~="acrylic"][data-tone="light"] .removal-dialog > p:not(.system-kicker) {
   color: var(--modal-ink-regular);
 }
-:root[data-skin~="acrylic"][data-tone="light"] .project-histories-dialog .system-kicker {
+:root[data-skin~="acrylic"][data-tone="light"] .removal-dialog .system-kicker {
   color: var(--modal-ink-muted);
 }
 
@@ -476,6 +479,18 @@
     --bg-2: #ffffff;
     --bg-3: #e9e9ef;
     --bg-4: #dedee6;
+
+    /* The modal ink above is white because the light `--bg-1` plate is
+       translucent and resolves to dark grey over the dialog's own black scrim.
+       Here `--bg-1` is opaque #f3f3f7, so that reasoning is inverted and white
+       ink lands on near-white: measured 1.11:1 for the heading, 1.01:1 for the
+       body copy — the delete prompt and the histories panel both unreadable
+       from one ordinary Windows setting. The ink has to follow the plate, so
+       it returns to the light palette's own document ladder. Measured on the
+       opaque plate: 16.30 / 9.56 / 5.61. */
+    --modal-ink-strong: var(--fg-0);
+    --modal-ink-regular: var(--fg-1);
+    --modal-ink-muted: var(--fg-3);
   }
 
   :root[data-skin~="acrylic"] .app,

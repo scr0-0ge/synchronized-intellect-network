@@ -15,8 +15,14 @@ import {
   publicRuntimeEndpointDiscovery,
   type WorkbenchDirectSessionProfileLoadRequest,
   type WorkbenchRuntimeEndpointDiscovery,
+  type WorkbenchRuntimeEndpointDiscoveryStatus,
   type WorkbenchRuntimeEndpointId,
 } from "./contract.ts";
+import {
+  isRegisteredRuntimeEndpointId,
+  runtimeEndpointOrdinal,
+  WORKBENCH_RUNTIME_ENDPOINT_IDS,
+} from "./runtime-endpoint-identity.ts";
 
 export interface WorkbenchDirectRuntimeEndpointCatalog {
   readonly endpointId: WorkbenchRuntimeEndpointId;
@@ -68,6 +74,7 @@ export function createWorkbenchRuntimeEndpointAdapter(
   delegate: ResumableAgentRuntimeAdapter,
   loadEndpoints: WorkbenchDirectRuntimeEndpointLoader,
   resolveRuntimeResumeIdentity?: WorkbenchRuntimeResumeIdentityResolver,
+  endpointIds: readonly WorkbenchRuntimeEndpointId[] = WORKBENCH_RUNTIME_ENDPOINT_IDS,
 ): ResumableAgentRuntimeAdapter {
   const compatibility = delegate.continuationProfileCompatibility;
   const adapter: ResumableAgentRuntimeAdapter = Object.freeze({
@@ -96,6 +103,7 @@ export function createWorkbenchRuntimeEndpointAdapter(
       const exactContinuationContext = reconstructContinuationContext(
         requestKind,
         continuationContext,
+        endpointIds,
       );
       return freezeEndpointSnapshot(
         await loadEndpoints(
@@ -103,6 +111,7 @@ export function createWorkbenchRuntimeEndpointAdapter(
           requestKind,
           exactContinuationContext,
         ),
+        endpointIds,
       );
     },
   );
@@ -130,7 +139,7 @@ export function createWorkbenchRuntimeEndpointAdapter(
             "schemaVersion",
           ]) ||
           resolved.schemaVersion !== 1 ||
-          !isRuntimeEndpointId(resolved.endpointId) ||
+          !isRegisteredRuntimeEndpointId(resolved.endpointId, endpointIds) ||
           !isSessionProfile(resolved.nativeProfile) ||
           !runtimeProfileProjectionPreservesLockedModes(
             resolved.endpointId,
@@ -176,6 +185,7 @@ export function readWorkbenchRuntimeResumeIdentityResolver(
 function reconstructContinuationContext(
   requestKind: WorkbenchDirectSessionProfileLoadRequest["kind"],
   value: WorkbenchContinuationRuntimeResumeContext | undefined,
+  endpointIds: readonly WorkbenchRuntimeEndpointId[],
 ): WorkbenchContinuationRuntimeResumeContext | undefined {
   if (value === undefined) return undefined;
   if (
@@ -196,7 +206,7 @@ function reconstructContinuationContext(
         "nativeProfile",
         "selectionProfile",
       ]) ||
-      !isRuntimeEndpointId(mapping.endpointId) ||
+      !isRegisteredRuntimeEndpointId(mapping.endpointId, endpointIds) ||
       !isSessionProfile(mapping.selectionProfile) ||
       !isSessionProfile(mapping.nativeProfile) ||
       !runtimeProfileProjectionPreservesLockedModes(
@@ -221,30 +231,32 @@ function reconstructContinuationContext(
 
 function freezeEndpointSnapshot(
   value: WorkbenchDirectRuntimeEndpointSnapshot,
+  endpointIds: readonly WorkbenchRuntimeEndpointId[],
 ): WorkbenchDirectRuntimeEndpointSnapshot {
   if (
     !isExactDataRecord(value, ["endpointDiscovery", "endpoints"]) ||
     !isDenseArray(value.endpoints) ||
-    value.endpoints.length > 2 ||
+    value.endpoints.length > endpointIds.length ||
     !isExactDataRecord(value.endpointDiscovery, ["statuses"]) ||
     !isDenseArray(value.endpointDiscovery.statuses) ||
-    value.endpointDiscovery.statuses.length !== 2
+    value.endpointDiscovery.statuses.length !== endpointIds.length
   ) {
     throw new TypeError("invalid-runtime-endpoint-snapshot");
   }
-  const codexStatus = value.endpointDiscovery.statuses[0];
-  const claudeStatus = value.endpointDiscovery.statuses[1];
-  if (
-    !isExactDataRecord(codexStatus, ["category", "endpointId"]) ||
-    codexStatus.endpointId !== "codex-desktop" ||
-    !isDiscoveryCategory(codexStatus.category) ||
-    !isExactDataRecord(claudeStatus, ["category", "endpointId"]) ||
-    claudeStatus.endpointId !== "claude-code-desktop" ||
-    !isDiscoveryCategory(claudeStatus.category)
-  ) {
-    throw new TypeError("invalid-runtime-endpoint-discovery");
+  const statuses = value.endpointDiscovery.statuses;
+  const validatedStatuses: WorkbenchRuntimeEndpointDiscoveryStatus[] = [];
+  for (const [index, endpointId] of endpointIds.entries()) {
+    const status = statuses[index];
+    if (
+      !isExactDataRecord(status, ["category", "endpointId"]) ||
+      status.endpointId !== endpointId ||
+      !isDiscoveryCategory(status.category)
+    ) {
+      throw new TypeError("invalid-runtime-endpoint-discovery");
+    }
+    validatedStatuses.push({ endpointId, category: status.category });
   }
-  const endpointIds = new Set<WorkbenchRuntimeEndpointId>();
+  const endpointIdSet = new Set<WorkbenchRuntimeEndpointId>();
   let previousOrdinal = -1;
   const endpoints = value.endpoints.map((endpoint) => {
     if (nodeUtilTypes.isProxy(endpoint)) {
@@ -276,8 +288,8 @@ function freezeEndpointSnapshot(
               "runtimeFamilyLabel",
             ],
       ) ||
-      !isRuntimeEndpointId(endpoint.endpointId) ||
-      endpointIds.has(endpoint.endpointId) ||
+      !isRegisteredRuntimeEndpointId(endpoint.endpointId, endpointIds) ||
+      endpointIdSet.has(endpoint.endpointId) ||
       typeof endpoint.preferenceKey !== "string" ||
       typeof endpoint.runtimeFamilyLabel !== "string" ||
       typeof endpoint.endpointLabel !== "string" ||
@@ -289,12 +301,12 @@ function freezeEndpointSnapshot(
     ) {
       throw new TypeError("invalid-runtime-endpoint-catalog");
     }
-    const ordinal = endpoint.endpointId === "codex-desktop" ? 0 : 1;
+    const ordinal = runtimeEndpointOrdinal(endpoint.endpointId, endpointIds);
     if (ordinal <= previousOrdinal) {
       throw new TypeError("invalid-runtime-endpoint-order");
     }
     previousOrdinal = ordinal;
-    endpointIds.add(endpoint.endpointId);
+    endpointIdSet.add(endpoint.endpointId);
     let desiredDefault: SessionProfile | undefined;
     if (hasDesiredDefault) {
       if (
@@ -339,15 +351,8 @@ function freezeEndpointSnapshot(
   }
   return Object.freeze({
     endpoints: Object.freeze(endpoints),
-    endpointDiscovery: publicRuntimeEndpointDiscovery(
-      codexStatus.category,
-      claudeStatus.category,
-    ),
+    endpointDiscovery: publicRuntimeEndpointDiscovery(validatedStatuses),
   });
-}
-
-function isRuntimeEndpointId(value: unknown): value is WorkbenchRuntimeEndpointId {
-  return value === "codex-desktop" || value === "claude-code-desktop";
 }
 
 function isSessionProfile(value: unknown): value is SessionProfile {

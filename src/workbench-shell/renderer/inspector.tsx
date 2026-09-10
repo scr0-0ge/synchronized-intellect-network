@@ -193,6 +193,7 @@ export const SessionInspector: Component<{
                   value={effectiveProfileLabel(
                     command().session?.profile,
                     "model",
+                    observationPending(command()),
                   )}
                   vendor={runtimeClass(commandRuntimeFamily(command()))}
                 />
@@ -201,6 +202,7 @@ export const SessionInspector: Component<{
                   value={effectiveProfileLabel(
                     command().session?.profile,
                     "workIntensity",
+                    observationPending(command()),
                   )}
                 />
                 <InspectorFact
@@ -208,6 +210,7 @@ export const SessionInspector: Component<{
                   value={effectiveProfileLabel(
                     command().session?.profile,
                     "accessMode",
+                    observationPending(command()),
                   )}
                 />
               </dl>
@@ -275,15 +278,32 @@ export const InspectorFact: Component<{
 
 type EffectiveProfileField = "model" | "workIntensity" | "accessMode";
 
+/** A command that can still reach its post-turn observation. */
+function observationPending(command: WorkbenchCommandView): boolean {
+  return command.status === "accepted" || command.status === "in-flight";
+}
+
+/**
+ * Issue #6 case 2, the Inspector half. Same rule as the transcript header: the
+ * effective projection's `unknown` arm is a statement about the observation,
+ * not about the selection, and the requested value sits two sections above it.
+ * A running turn has not reached its post-turn observation yet; an ended one
+ * never produced it.
+ */
 function effectiveProfileLabel(
   profile: WorkbenchSessionProfileProjection | undefined,
   field: EffectiveProfileField,
+  observationPending: boolean,
 ): string {
   const effective = profile?.effective;
   if (effective === undefined || effective.kind === "not-recorded") {
     return inspectorCopy.notRecorded;
   }
-  if (effective.kind === "unknown") return inspectorCopy.unknownValue;
+  if (effective.kind === "unknown") {
+    return observationPending
+      ? inspectorCopy.pendingObservationValue
+      : inspectorCopy.unobservedValue;
+  }
   const value = effective[field];
   return value.comparison === "matches-requested"
     ? matchesRequestedCopy(value.label)

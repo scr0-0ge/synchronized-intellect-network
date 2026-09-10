@@ -4,6 +4,7 @@ import {
   createEffect,
   createSignal,
   onCleanup,
+  onMount,
   untrack,
   type Component,
   type JSX,
@@ -20,7 +21,9 @@ import type {
 } from "../contract.ts";
 import {
   WORKBENCH_DIRECT_INPUT_MAX_LENGTH,
+  defaultWorkbenchFamilyEndpointPreferences,
   isValidWorkbenchDirectInput,
+  type WorkbenchFamilyEndpointPreferences,
 } from "../contract.ts";
 import {
   canEnterNewAgentSessionMode,
@@ -29,6 +32,8 @@ import {
   contextRingPresentation,
   contextUsedTokensLabel,
   directEndpointStatusRows,
+  directFacadeEndpointStatusRows,
+  directFacadeProfileEndpoints,
   directProfileEndpoints,
   directProfileModels,
   directWorkIntensityPresentationLabel,
@@ -38,6 +43,7 @@ import {
   failureCopy,
   type WorkbenchComposerState,
   type WorkbenchDirectProfileState,
+  type WorkbenchFacadeSubscriptionAuthenticationInput,
   type WorkbenchNewSessionState,
   type WorkbenchProjectOpenState,
   type WorkbenchProjectSwitchState,
@@ -58,6 +64,12 @@ import {
   composerHistoryDirection,
   type WorkbenchComposerHistoryNavigator,
 } from "./composer-history.ts";
+import {
+  appendDroppedFileTexts,
+  readWorkbenchFilesBridge,
+  resolveDroppedFileTexts,
+  type WorkbenchFilesRendererBridge,
+} from "../file-drop-bridge.ts";
 
 import {
   blockedComposerCopy,
@@ -69,6 +81,7 @@ import {
   pickerCopy,
   composerActionsCopy,
   composerFeedbackCopy,
+  automaticContinuationCopy,
   composerControlCopy,
   interruptCopy,
   steerCopy,
@@ -85,6 +98,7 @@ import {
   recordedProfileSummaryCopy,
 } from "./copy/runtime-profile-copy.ts";
 import { dynamicCopy } from "./copy/dynamic-copy.ts";
+import { quotaPauseCopy } from "./copy/session-status-copy.ts";
 import {
   presentationText,
   type WorkbenchPresentationText,
@@ -101,6 +115,81 @@ import {
   commandStatusLabel,
 } from "./view-types.ts";
 import { EmptyState } from "./states.tsx";
+
+/** When no preload files bridge exists, drops still insert display names. */
+const fallbackFilesBridge: WorkbenchFilesRendererBridge = Object.freeze({
+  getPathForFile: () => undefined,
+});
+
+type AutomaticContinuationIssue = Readonly<
+  | { readonly kind: "first-line" }
+  | { readonly kind: "invalid-step-count" }
+  | { readonly kind: "maximum-steps"; readonly steps: string }
+  | { readonly kind: "next-line" }
+  | { readonly kind: "instruction" }
+>;
+
+/* These two expressions deliberately mirror the coordinator parser. The
+   renderer only diagnoses an explicit auto-continue attempt; its grammar and
+   acceptance stay owned by session-continuation-plan.ts. */
+const automaticContinuationPrefix = /^\/auto-continue(?:\s|$)/u;
+const automaticContinuationPlan =
+  /^\/auto-continue ([1-9]\d*)\r?\n([\s\S]+)$/u;
+const automaticContinuationNumericFirstLine =
+  /^\/auto-continue (\d+)$/u;
+
+function automaticContinuationIssue(
+  input: string,
+): AutomaticContinuationIssue | null {
+  if (!automaticContinuationPrefix.test(input)) return null;
+  const match = automaticContinuationPlan.exec(input);
+  if (match !== null) {
+    if (Number(match[1]) > 10) {
+      return { kind: "maximum-steps", steps: match[1]! };
+    }
+    return match[2]!.trim() === "" ? { kind: "instruction" } : null;
+  }
+
+  const firstLine = input.split(/\r?\n/u, 1)[0] ?? "";
+  const number = automaticContinuationNumericFirstLine.exec(firstLine);
+  if (number === null) return { kind: "first-line" };
+  if (!/^[1-9]\d*$/u.test(number[1]!)) {
+    return { kind: "invalid-step-count" };
+  }
+  if (Number(number[1]) > 10) {
+    return { kind: "maximum-steps", steps: number[1]! };
+  }
+  return input.includes("\n") ? { kind: "instruction" } : { kind: "next-line" };
+}
+
+function automaticContinuationSyntax(): string {
+  return `${automaticContinuationCopy.syntaxCommand}\n${automaticContinuationCopy.syntaxInstruction}`;
+}
+
+function automaticContinuationIssueMessage(
+  issue: AutomaticContinuationIssue,
+): string {
+  const message = (() => {
+    switch (issue.kind) {
+      case "first-line":
+        return automaticContinuationCopy.firstLineError;
+      case "invalid-step-count":
+        return automaticContinuationCopy.invalidStepCountError;
+      case "maximum-steps":
+        return automaticContinuationCopy.maximumStepsError(issue.steps);
+      case "next-line":
+        return automaticContinuationCopy.nextLineError;
+      case "instruction":
+        return automaticContinuationCopy.instructionError;
+    }
+  })();
+  return `${message}\n${automaticContinuationSyntax()}`;
+}
+
+/** Prevent Electron from navigating the renderer to a dropped local file. */
+export function preventFileDropNavigation(event: DragEvent): void {
+  if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+}
 
 export const CommandWithoutSession: Component<{
   readonly command: WorkbenchCommandView;
@@ -161,6 +250,7 @@ export const BlockedComposer: Component<{
     return blockedComposerCopy.cantContinue;
   };
   const body = () => {
+    if (props.command?.failureCategory === "quota-expired") return failureCopy["quota-expired"];
     if (props.newSession.phase === "awaiting-visible") {
       return blockedComposerCopy.waitingBody;
     }
@@ -221,7 +311,11 @@ export const BlockedComposer: Component<{
           {(summary) => <span>{selectedSessionSummaryCopy(summary())}</span>}
         </Show>
         <span class="grow" />
-        <span>{composerFeedbackCopy.footRequiresSelection}</span>
+        <span>
+          {props.replacementSessionRefusal === "no-selection"
+            ? composerFeedbackCopy.footRequiresSelection
+            : composerFeedbackCopy.footStartsFreshProfile}
+        </span>
       </div>
     </div>
   );
@@ -312,6 +406,17 @@ export const DirectInputComposer: Component<{
   readonly steerFeedback?: WorkbenchPresentationText | null;
   readonly onSteer?: () => void;
   readonly onSubmit: () => void;
+  /**
+   * The family facades' persisted backend preferences (tickets 20/25). The
+   * endpoint picker presents each family's two endpoints as one entry
+   * resolved through them.
+   */
+  readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
+  /**
+   * The subscription-auth service's per-endpoint report — the claude/codex
+   * facades read "bound" from it when resolving their desktop backends.
+   */
+  readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
 }> = (props) => {
   const [openPopover, setOpenPopover] =
     createSignal<OpenProfilePopover | null>(null);
@@ -377,9 +482,48 @@ export const DirectInputComposer: Component<{
     !steerPending() &&
     props.onSteer !== undefined &&
     isValidWorkbenchDirectInput(props.composer.draft);
-  const endpoints = () => directProfileEndpoints(directState());
+  /**
+   * Issue #6 case 6. Same-turn steering is a Runtime contract, and the
+   * Coordinator cannot report whether this Runtime has one until its binding
+   * attaches to the accepted command. Until then the capability is `idle` or
+   * `pending`, which project to controls this composer used to treat as merely
+   * "not yet unsupported" and therefore rendered. On a Runtime with no
+   * steering contract the Guide button was mounted for the whole
+   * accept-and-attach latency and then vanished the instant the binding
+   * reported `unsupported` -- the disappearing Guide button the owner saw on
+   * GLM and deepseek, whose Runtime never had the contract at all.
+   *
+   * The control is offered only once the turn is running under an attached
+   * binding whose reported capability is not a Runtime-level "no". It never
+   * appears on a Runtime that cannot steer, and on one that can it stays
+   * mounted -- disabled, with its reason in the title -- through the moments
+   * guidance is merely unavailable, such as after Stop.
+   */
+  const offersSteerControl = () => {
+    const status = steerControl()?.status;
+    return (
+      props.selected?.status === "in-flight" &&
+      status !== undefined &&
+      status !== "pending" &&
+      status !== "unsupported"
+    );
+  };
+  /**
+   * The picker's endpoint list is the facade view (one entry per family);
+   * the selected endpoint resolves against the raw catalog so a selection
+   * of a currently hidden family backend still displays its honest real
+   * name.
+   */
+  const familyPreferences = () =>
+    props.endpointPreferences ?? defaultWorkbenchFamilyEndpointPreferences;
+  const endpoints = () =>
+    directFacadeProfileEndpoints(
+      directState(),
+      familyPreferences(),
+      props.subscriptionAuthentication,
+    );
   const selectedEndpoint = () =>
-    endpoints().find(
+    directProfileEndpoints(directState()).find(
       (endpoint) => endpoint.key === props.profile.selectedEndpointKey,
     );
   const models = () => directProfileModels(directState());
@@ -405,6 +549,12 @@ export const DirectInputComposer: Component<{
     props.newSession.phase === "submitting";
   const composerCopy = () =>
     mode() === "continue" ? continuationInputCopy : directInputCopy;
+  const continuationIssue = () =>
+    automaticContinuationIssue(props.composer.draft);
+  const submit = (): void => {
+    if (continuationIssue() !== null) return;
+    props.onSubmit();
+  };
   const targetContext = () =>
     mode() === "continue" || activeTurn()
       ? props.selected?.session?.context
@@ -449,6 +599,16 @@ export const DirectInputComposer: Component<{
     composerLostFocusToDisable = false;
     element.focus({ preventScroll: true });
   });
+  onMount(() => {
+    // The composer handles its own insertions, but a file released anywhere
+    // else in the window must not replace the renderer with that local file.
+    window.addEventListener("dragover", preventFileDropNavigation);
+    window.addEventListener("drop", preventFileDropNavigation);
+    onCleanup(() => {
+      window.removeEventListener("dragover", preventFileDropNavigation);
+      window.removeEventListener("drop", preventFileDropNavigation);
+    });
+  });
   const open = (
     kind: ProfilePopoverKind,
     trigger: HTMLButtonElement,
@@ -486,7 +646,7 @@ export const DirectInputComposer: Component<{
             {activeTurn()
               ? targetBarCopy.runningNote
               : mode() === "continue"
-              ? targetBarCopy.continueNote
+              ? props.selected?.status === "quota-paused" ? quotaPauseCopy.profileLocked : targetBarCopy.continueNote
               : targetBarCopy.startNote}
           </span>
           <Show when={!explicitStart() && !activeTurn()}>
@@ -515,6 +675,7 @@ export const DirectInputComposer: Component<{
                 selectedIntensityLabel={selectedWorkIntensity()?.label}
                 pending={
                   pending() ||
+                  props.selected?.status === "quota-paused" ||
                   defaultSavePending() ||
                   projectSwitching() ||
                   projectOpening()
@@ -627,6 +788,8 @@ export const DirectInputComposer: Component<{
                       selectedWorkIntensityKey={
                         props.profile.selectedWorkIntensityKey
                       }
+                      endpointPreferences={props.endpointPreferences}
+                      subscriptionAuthentication={props.subscriptionAuthentication}
                       onEndpoint={(key) => {
                         props.onEndpoint(key);
                         closePopover(true);
@@ -697,9 +860,32 @@ export const DirectInputComposer: Component<{
           }
           disabled={pending() || projectSwitching() || projectOpening()}
           aria-describedby="direct-input-feedback"
-          aria-invalid={props.composer.phase === "error"}
+          aria-invalid={
+            props.composer.phase === "error" || continuationIssue() !== null
+          }
           onBlur={noteComposerBlur}
           onInput={(event) => props.onDraft(event.currentTarget.value)}
+          onDragOver={preventFileDropNavigation}
+          onDrop={(event) => {
+            preventFileDropNavigation(event);
+            const dropped = event.dataTransfer?.files;
+            if (dropped === undefined || dropped.length === 0) return;
+            event.preventDefault();
+            const bridge =
+              readWorkbenchFilesBridge(window.workbenchFiles) ??
+              fallbackFilesBridge;
+            const paths = resolveDroppedFileTexts(
+              {
+                files: Array.from(dropped, (file) => ({
+                  file,
+                  name: file.name,
+                })),
+              },
+              bridge,
+            );
+            const next = appendDroppedFileTexts(props.composer.draft, paths);
+            if (next !== props.composer.draft) props.onDraft(next);
+          }}
           onKeyDown={(event) => {
             const historyDirection = composerHistoryDirection(event);
             if (historyDirection !== null) {
@@ -727,7 +913,7 @@ export const DirectInputComposer: Component<{
             ) {
               event.preventDefault();
               if (activeTurn()) props.onSteer?.();
-              else props.onSubmit();
+              else submit();
             }
           }}
         />
@@ -744,19 +930,19 @@ export const DirectInputComposer: Component<{
                 class="send submit-button"
                 disabled={!canSubmit()}
                 aria-busy={pending()}
-                onClick={props.onSubmit}
+                onClick={submit}
               >
                 {pending()
                   ? composerActionsCopy.accepting
                   : mode() === "continue"
-                    ? composerActionsCopy.send
+                    ? props.selected?.status === "quota-paused" ? quotaPauseCopy.resume : composerActionsCopy.send
                     : composerActionsCopy.start}{" "}
                 <kbd>{composerActionsCopy.ctrlEnter}</kbd>
               </button>
             }
           >
             <div class="running-actions">
-              <Show when={steerControl()?.status !== "unsupported"}>
+              <Show when={offersSteerControl()}>
                 <button
                   type="button"
                   class="send guide-button"
@@ -793,16 +979,30 @@ export const DirectInputComposer: Component<{
       </div>
 
       <div class="composer-foot">
-        <span id="direct-input-feedback">
-          {activeTurn()
-            ? presentationText(props.steerFeedback) ??
-              (steerControl()?.status === "available"
-                ? steerCopy.availableFoot
-                : steerCopy.localDraftFoot)
-            : presentationText(props.composer.feedback) ??
-              (mode() === "continue"
-              ? composerFeedbackCopy.continuationFoot
-              : composerFeedbackCopy.startFoot)}
+        <span
+          id="direct-input-feedback"
+          classList={{ "auto-continue-feedback": continuationIssue() !== null }}
+          role={continuationIssue() === null ? undefined : "alert"}
+        >
+          <Show
+            when={continuationIssue()}
+            fallback={
+              props.selected?.status === "quota-paused" && mode() === "continue" &&
+              props.composer.phase !== "error" && props.composer.phase !== "pending"
+                ? quotaPauseCopy.notice
+                : activeTurn()
+                ? presentationText(props.steerFeedback) ??
+                  (steerControl()?.status === "available"
+                    ? steerCopy.availableFoot
+                    : steerCopy.localDraftFoot)
+                : presentationText(props.composer.feedback) ??
+                  (mode() === "continue"
+                    ? composerFeedbackCopy.continuationFoot
+                    : composerFeedbackCopy.startFoot)
+            }
+          >
+            {(issue) => automaticContinuationIssueMessage(issue())}
+          </Show>
         </span>
         <span class="grow" />
         <span class="count">
@@ -810,6 +1010,11 @@ export const DirectInputComposer: Component<{
           {WORKBENCH_DIRECT_INPUT_MAX_LENGTH.toLocaleString("en-US")}
         </span>
       </div>
+      <Show when={!activeTurn() && continuationIssue() === null}>
+        <div id="auto-continue-help" class="auto-continue-help" role="note">
+          {`${automaticContinuationCopy.label}: ${automaticContinuationCopy.hint}\n${automaticContinuationSyntax()}`}
+        </div>
+      </Show>
     </div>
   );
 };
@@ -984,6 +1189,8 @@ const ProfilePopover: Component<{
   readonly selectedEndpointKey: string | null;
   readonly selectedModelKey: string | null;
   readonly selectedWorkIntensityKey: string | null;
+  readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
+  readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
   readonly onEndpoint: (key: string) => void;
   readonly onModel: (key: string) => void;
   readonly onWorkIntensity: (key: string) => void;
@@ -1024,7 +1231,11 @@ const ProfilePopover: Component<{
           : null;
     const content =
       props.kind === "endpoint"
-        ? directEndpointStatusRows(props.profile).map((row) => [
+        ? directFacadeEndpointStatusRows(
+            props.profile,
+            props.endpointPreferences ?? defaultWorkbenchFamilyEndpointPreferences,
+            props.subscriptionAuthentication,
+          ).map((row) => [
             row.endpointId,
             row.category,
             row.runtimeFamilyLabel,
@@ -1294,7 +1505,12 @@ const ProfilePopover: Component<{
                     role="listbox"
                     aria-label={pickerCopy.endpointOptionsLabel}
                   >
-                    <For each={directEndpointStatusRows(props.profile)}>
+                    <For each={directFacadeEndpointStatusRows(
+                      props.profile,
+                      props.endpointPreferences ??
+                        defaultWorkbenchFamilyEndpointPreferences,
+                      props.subscriptionAuthentication,
+                    )}>
                     {(row) => {
                       const selectableIndex = () =>
                         props.endpoints.findIndex(

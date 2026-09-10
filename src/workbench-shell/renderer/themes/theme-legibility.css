@@ -104,4 +104,26 @@
   background: var(--bg-2);
 }
 
-:root[data-skin~="acrylic"] .send[disabled] kbd { opacity: 1; }
+:root[data-skin~="acrylic"] .send[disabled] kbd {
+  color: var(--fg-2);
+  opacity: 1;
+}
+
+/* These strings carry instructions or selection facts, not decorative tertiary
+   detail. Keep their quiet typography, but use the secondary ink that remains
+   readable on both acrylic tone grounds. */
+:root[data-skin~="acrylic"] .opt .opt-sub,
+:root[data-skin~="acrylic"] .opt .endpoint-status-label {
+  color: var(--fg-2);
+}
+
+/* The footer crosses a thinner composer ground than picker metadata does, so
+   its safety sentence and draft count need the regular muted text step. */
+:root[data-skin~="acrylic"] .composer-foot { color: var(--fg-1); }
+
+/* A blocked archived row still has to identify the Session it represents.
+   Disabled chrome carries the unavailable state; do not also fade its provider
+   and model metadata below the text floor. */
+:root[data-skin~="acrylic"] .session-row.is-archived .sr-meta {
+  opacity: 1;
+}

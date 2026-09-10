@@ -1826,7 +1826,7 @@ async function observeNegativeComposition(
     const credentialBoundaryTextExact =
       credentialBoundaryCount === 1 &&
       credentialBoundaryText ===
-        "Sign-in happens in each provider's own app. The Workbench never asks for a password, API key, or token, never reads a credential file, and never stores credentials.";
+        "Sign-in happens in each provider's own app. The Workbench never asks for or stores subscription credentials; a provider API key saved in Settings is encrypted with your OS user account.";
     const primaryAction = state.locator(".state-actions .btn.primary");
     const primaryActionText =
       (await primaryAction.count()) === 1

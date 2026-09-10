@@ -7,8 +7,10 @@ import {
   createSignal,
   createUniqueId,
   onCleanup,
+  onMount,
   type Component,
 } from "solid-js";
+import { Portal } from "solid-js/web";
 import {
   normalizeSessionDisplayName,
   type SessionMetadataOperation,
@@ -22,6 +24,7 @@ import type {
 import { WORKBENCH_SESSION_DISPLAY_NAME_MAX_CODE_POINTS } from "../contract.ts";
 import {
   canCreateProject,
+  hasHostedProjectView,
   canOpenProject,
   canSelectProject,
   type WorkbenchProjectOpenState,
@@ -32,15 +35,20 @@ import {
   settingsRailPresentation,
   type WorkbenchSurface,
 } from "./settings-view-model.ts";
-import { type WorkbenchRemovalFeedback } from "./removal-presentation.ts";
+import {
+  removalFeedback,
+  type WorkbenchRemovalFeedback,
+} from "./removal-presentation.ts";
 import { presentationText } from "./presentation-text.ts";
 import {
   beginSessionRenameFromRowDoubleClick,
   beginSessionRenameFromRowKeyboard,
   focusSessionRenameInput,
   returnSessionRenameFocus,
+  requiresRecoveryArchiveAcknowledgement,
   sessionArchiveControlPresentation,
 } from "./session-metadata-presentation.ts";
+import { sessionMetadataCopy } from "./copy/session-metadata-copy.ts";
 
 import {
   recordedRequestedProfile,
@@ -55,11 +63,11 @@ import {
   railCopy,
   collapseSessionsAriaCopy,
   expandSessionsAriaCopy,
-  unselectedProjectAriaCopy,
   activeSessionsCountCopy,
   historiesAriaCopy,
   removeProjectAriaCopy,
   newSessionHereAriaCopy,
+  switchProjectAriaCopy,
   showMoreCopy,
   archivedGroupCopy,
   sessionRenameErrorCopy,
@@ -70,7 +78,11 @@ import {
 
 interface ProjectRailDisclosureState {
   readonly scopeEpoch: number;
-  readonly selectedProjectExpanded: boolean;
+  readonly projects: readonly ProjectRailProjectDisclosureState[];
+}
+
+interface ProjectRailProjectDisclosureState {
+  readonly expanded: boolean;
   readonly overflowAvailable: boolean;
   readonly overflowExpanded: boolean;
   readonly activeCount: number;
@@ -79,18 +91,17 @@ interface ProjectRailDisclosureState {
 }
 
 type ProjectRailDisclosureAction =
-  | Readonly<{ type: "toggle-selected-project" }>
-  | Readonly<{ type: "toggle-overflow" }>
-  | Readonly<{ type: "toggle-archived" }>;
+  | Readonly<{ type: "toggle-project"; projectIndex: number }>
+  | Readonly<{ type: "toggle-overflow"; projectIndex: number }>
+  | Readonly<{ type: "toggle-archived"; projectIndex: number }>;
 
-function initialProjectRailDisclosureState(
-  scopeEpoch: number,
+function initialProjectDisclosure(
+  expanded: boolean,
   activeCount: number,
   archivedCount: number,
-): ProjectRailDisclosureState {
+): ProjectRailProjectDisclosureState {
   return Object.freeze({
-    scopeEpoch,
-    selectedProjectExpanded: true,
+    expanded,
     overflowAvailable: activeCount > 5,
     overflowExpanded: false,
     activeCount,
@@ -99,31 +110,61 @@ function initialProjectRailDisclosureState(
   });
 }
 
+function initialProjectRailDisclosureState(
+  scopeEpoch: number,
+  activeCount: number,
+  archivedCount: number,
+  selectedProjectIndex = 0,
+  projectCount = 1,
+): ProjectRailDisclosureState {
+  const projects = Array.from({ length: projectCount }, (_, index) =>
+    initialProjectDisclosure(
+      index === selectedProjectIndex,
+      index === selectedProjectIndex ? activeCount : 0,
+      index === selectedProjectIndex ? archivedCount : 0,
+    ),
+  );
+  return Object.freeze({
+    scopeEpoch,
+    projects: Object.freeze(projects),
+  });
+}
+
 function reduceProjectRailDisclosure(
   state: ProjectRailDisclosureState,
   action: ProjectRailDisclosureAction,
 ): ProjectRailDisclosureState {
+  const project = state.projects[action.projectIndex];
+  if (project === undefined) return state;
+  let nextProject: ProjectRailProjectDisclosureState;
   switch (action.type) {
-    case "toggle-selected-project":
-      return Object.freeze({
-        ...state,
-        selectedProjectExpanded: !state.selectedProjectExpanded,
+    case "toggle-project":
+      nextProject = Object.freeze({
+        ...project,
+        expanded: !project.expanded,
       });
+      break;
     case "toggle-overflow":
-      return state.overflowAvailable
-        ? Object.freeze({
-            ...state,
-            overflowExpanded: !state.overflowExpanded,
-          })
-        : state;
+      if (!project.overflowAvailable) return state;
+      nextProject = Object.freeze({
+        ...project,
+        overflowExpanded: !project.overflowExpanded,
+      });
+      break;
     case "toggle-archived":
-      return state.archivedCount > 0
-        ? Object.freeze({
-            ...state,
-            archivedExpanded: !state.archivedExpanded,
-          })
-        : state;
+      if (project.archivedCount === 0) return state;
+      nextProject = Object.freeze({
+        ...project,
+        archivedExpanded: !project.archivedExpanded,
+      });
+      break;
   }
+  const projects = [...state.projects];
+  projects[action.projectIndex] = nextProject;
+  return Object.freeze({
+    ...state,
+    projects: Object.freeze(projects),
+  });
 }
 
 function reconcileProjectRailDisclosure(
@@ -131,28 +172,53 @@ function reconcileProjectRailDisclosure(
   scopeEpoch: number,
   activeCount: number,
   archivedCount: number,
+  selectedProjectIndex = 0,
+  projectCount = 1,
 ): ProjectRailDisclosureState {
-  if (state.scopeEpoch !== scopeEpoch) {
-    return initialProjectRailDisclosureState(
-      scopeEpoch,
-      activeCount,
-      archivedCount,
-    );
+  if (state.projects.length !== projectCount) {
+    if (state.projects.length > projectCount) {
+      return initialProjectRailDisclosureState(
+        scopeEpoch,
+        activeCount,
+        archivedCount,
+        selectedProjectIndex,
+        projectCount,
+      );
+    }
+    state = Object.freeze({
+      ...state,
+      projects: Object.freeze([
+        ...state.projects,
+        ...Array.from(
+          { length: projectCount - state.projects.length },
+          () => initialProjectDisclosure(false, 0, 0),
+        ),
+      ]),
+    });
+  }
+  const selected = state.projects[selectedProjectIndex];
+  if (selected === undefined) {
+    return state.scopeEpoch === scopeEpoch
+      ? state
+      : Object.freeze({ ...state, scopeEpoch });
   }
   const overflowAvailable = activeCount > 5;
   if (
-    state.overflowAvailable === overflowAvailable &&
-    state.activeCount === activeCount &&
-    state.archivedCount === archivedCount
+    state.scopeEpoch === scopeEpoch &&
+    selected.overflowAvailable === overflowAvailable &&
+    selected.activeCount === activeCount &&
+    selected.archivedCount === archivedCount
   ) {
     return state;
   }
-  return Object.freeze({
-    ...state,
+  const projects = [...state.projects];
+  projects[selectedProjectIndex] = Object.freeze({
+    ...selected,
+    expanded: selected.expanded || state.scopeEpoch !== scopeEpoch,
     overflowAvailable,
     overflowExpanded:
-      state.overflowAvailable === overflowAvailable
-        ? state.overflowExpanded
+      selected.overflowAvailable === overflowAvailable
+        ? selected.overflowExpanded
         : false,
     activeCount,
     archivedCount,
@@ -161,8 +227,38 @@ function reconcileProjectRailDisclosure(
         ? false
         : activeCount === 0
           ? true
-          : state.archivedExpanded,
+          : selected.archivedExpanded,
   });
+  return Object.freeze({
+    scopeEpoch,
+    projects: Object.freeze(projects),
+  });
+}
+
+function resizeProjectCommandCache(
+  current: ReadonlyArray<readonly WorkbenchCommandView[] | undefined>,
+  projectCount: number,
+): ReadonlyArray<readonly WorkbenchCommandView[] | undefined> {
+  if (current.length === projectCount) return current;
+  if (current.length > projectCount) {
+    return Object.freeze(
+      Array.from(
+        { length: projectCount },
+        (): readonly WorkbenchCommandView[] | undefined => undefined,
+      ),
+    );
+  }
+  return Object.freeze([
+    ...current,
+    ...Array.from(
+      { length: projectCount - current.length },
+      (): readonly WorkbenchCommandView[] | undefined => undefined,
+    ),
+  ]);
+}
+
+function projectOptionLabel(project: WorkbenchProjectOption): string {
+  return project.label;
 }
 
 function didAuthoritativeProjectScopeChange(
@@ -174,7 +270,13 @@ function didAuthoritativeProjectScopeChange(
     next.projectSwitch.phase === "idle" &&
     (previous.projectSwitch.selectionAccepted ||
       previous.projectSwitch.viewArrived);
-  if (registeredProjectSwitchCompleted) return true;
+  const delayedProjectSwitchCompleted =
+    previous.projectSwitch.phase === "error" &&
+    next.projectSwitch.phase === "idle" &&
+    next.projectSwitch.viewArrived;
+  if (registeredProjectSwitchCompleted || delayedProjectSwitchCompleted) {
+    return true;
+  }
 
   const projectAcquisitionCompleted =
     previous.projectOpen.phase === "pending" &&
@@ -184,7 +286,7 @@ function didAuthoritativeProjectScopeChange(
     next.projectOpen.viewArrived;
   if (!projectAcquisitionCompleted) return false;
   if (next.projectOpen.resetRequired) return true;
-  if (!next.result?.ok) return false;
+  if (!hasHostedProjectView(next.result)) return false;
 
   const selectedProject = next.result.view.projectSelection.projects.find(
     (project) => project.selected,
@@ -361,6 +463,7 @@ export const ProjectRail: Component<{
   readonly onMutateSessionMetadata: (
     command: WorkbenchCommandView,
     operation: SessionMetadataOperation,
+    acknowledgedUnknownOutcome?: true,
   ) => Promise<WorkbenchSessionMetadataMutationResult>;
   readonly removalPending: boolean;
   readonly removalNotice: WorkbenchRemovalFeedback | null;
@@ -371,33 +474,93 @@ export const ProjectRail: Component<{
     project: WorkbenchProjectOption,
   ) => void;
 }> = (props) => {
-  const activeCommands = () =>
+  const [recoveryArchiveConfirmation, setRecoveryArchiveConfirmation] =
+    createSignal<WorkbenchCommandView | null>(null);
+  const [preflightRemovalNotice, setPreflightRemovalNotice] =
+    createSignal<WorkbenchRemovalFeedback | null>(null);
+  const removalNotice = () => preflightRemovalNotice() ?? props.removalNotice;
+  const requestSessionRemoval = (command: WorkbenchCommandView): void => {
+    if (command.status === "accepted" || command.status === "in-flight") {
+      setPreflightRemovalNotice(
+        removalFeedback("session", {
+          status: "blocked",
+          activity: command.status,
+        }),
+      );
+      return;
+    }
+    setPreflightRemovalNotice(null);
+    props.onRequestSessionRemoval(command);
+  };
+  const selectedProjectIndex = () =>
+    props.view.projectSelection.projects.findIndex((project) => project.selected);
+  const selectedActiveCommands = () =>
     props.view.commands.filter(
       (command) => command.session?.archived !== true,
     );
-  const archivedCommands = () =>
+  const selectedArchivedCommands = () =>
     props.view.commands.filter(
       (command) => command.session?.archived === true,
     );
+  const initialCommandCache = (): ReadonlyArray<
+    readonly WorkbenchCommandView[] | undefined
+  > => {
+    const cache: Array<readonly WorkbenchCommandView[] | undefined> =
+      Array.from(
+        { length: props.view.projectSelection.projects.length },
+        () => undefined,
+      );
+    const selectedIndex = selectedProjectIndex();
+    if (selectedIndex >= 0) cache[selectedIndex] = props.view.commands;
+    return Object.freeze(cache);
+  };
+  const [commandCache, setCommandCache] = createSignal(initialCommandCache());
   const [disclosure, setDisclosure] = createSignal(
     initialProjectRailDisclosureState(
       props.projectScopeEpoch,
-      activeCommands().length,
-      archivedCommands().length,
+      selectedActiveCommands().length,
+      selectedArchivedCommands().length,
+      selectedProjectIndex(),
+      props.view.projectSelection.projects.length,
     ),
   );
-  const currentDisclosure = createMemo(() =>
+  const reconciledDisclosure = createMemo(() =>
     reconcileProjectRailDisclosure(
       disclosure(),
       props.projectScopeEpoch,
-      activeCommands().length,
-      archivedCommands().length,
+      selectedActiveCommands().length,
+      selectedArchivedCommands().length,
+      selectedProjectIndex(),
+      props.view.projectSelection.projects.length,
     ),
   );
   createEffect(() => {
     const current = disclosure();
-    const reconciled = currentDisclosure();
+    const reconciled = reconciledDisclosure();
     if (reconciled !== current) setDisclosure(reconciled);
+  });
+  // The host intentionally keeps only one Project backend open. Retain each
+  // visited Project's last sanitized command list in renderer memory so its
+  // disclosure can remain populated while another Project is selected. Cached
+  // rows are read-only; folding a disclosure does not discard them, and
+  // selecting the Project refreshes them from its backend.
+  createEffect(() => {
+    const projectCount = props.view.projectSelection.projects.length;
+    const selectedIndex = selectedProjectIndex();
+    const commands = props.view.commands;
+    setCommandCache((current) => {
+      const next = [...resizeProjectCommandCache(current, projectCount)];
+      if (selectedIndex >= 0) {
+        next[selectedIndex] = commands;
+      }
+      if (
+        current.length === next.length &&
+        current.every((entry, index) => entry === next[index])
+      ) {
+        return current;
+      }
+      return Object.freeze(next);
+    });
   });
   const updateDisclosure = (action: ProjectRailDisclosureAction): void => {
     setDisclosure((current) =>
@@ -405,17 +568,15 @@ export const ProjectRail: Component<{
         reconcileProjectRailDisclosure(
           current,
           props.projectScopeEpoch,
-          activeCommands().length,
-          archivedCommands().length,
+          selectedActiveCommands().length,
+          selectedArchivedCommands().length,
+          selectedProjectIndex(),
+          props.view.projectSelection.projects.length,
         ),
         action,
       ),
     );
   };
-  const visibleCommands = () =>
-    currentDisclosure().overflowExpanded
-      ? activeCommands()
-      : activeCommands().slice(0, 5);
   const selectedProjectAvailable = () =>
     props.view.projectSelection.projects.find((project) => project.selected)
       ?.availability === "available";
@@ -451,76 +612,74 @@ export const ProjectRail: Component<{
       <div class="session-scroll">
         <For each={props.view.projectSelection.projects}>
           {(project, index) => {
+            const projectCommands = () =>
+              project.selected
+                ? props.view.commands
+                : (commandCache()[index()] ?? []);
+            const activeCommands = () =>
+              projectCommands().filter(
+                (command) => command.session?.archived !== true,
+              );
+            const archivedCommands = () =>
+              projectCommands().filter(
+                (command) => command.session?.archived === true,
+              );
+            const currentDisclosure = () =>
+              reconciledDisclosure().projects[index()] ??
+              initialProjectDisclosure(false, 0, 0);
+            const visibleCommands = () =>
+              currentDisclosure().overflowExpanded
+                ? activeCommands()
+                : activeCommands().slice(0, 5);
             const pending = () =>
               props.projectSwitch.phase === "pending" &&
               props.projectSwitch.targetIndex === index();
-            const expanded = () =>
-              project.selected
-                ? currentDisclosure().selectedProjectExpanded
-                : pending();
+            const expanded = () => currentDisclosure().expanded || pending();
+            const commandsLoaded = () =>
+              project.selected || commandCache()[index()] !== undefined;
             const sessionsId = () => `project-sessions-${index() + 1}`;
-            const collapsedCopy = () =>
-              project.availability === "available"
-                ? railCopy.collapsedAvailable
-                : railCopy.collapsedUnavailable;
+            const switchTitle = () =>
+              project.availability !== "available"
+                ? railCopy.collapsedUnavailable
+                : props.draftBlocked
+                  ? railCopy.clearDraftBeforeSwitch
+                  : props.actionBlocked
+                    ? railCopy.pendingActionBeforeSwitch
+                    : commandsLoaded()
+                      ? railCopy.switchProjectTitle
+                      : railCopy.collapsedAvailable;
             return (
               <section
                 class="proj"
                 classList={{ "is-open": project.selected }}
                 data-open={expanded() ? "true" : "false"}
               >
-                {/* `.proj-head` in styles.css declares four explicit column
-                    tracks for the four controls it was drawn with. The
-                    histories trigger is a fifth child, and a fifth auto-placed
-                    item in a four-track row-flow grid wraps onto an implicit
-                    second row, dropping the New Agent Session control below the
-                    Project name. Column flow spends the overflow on an implicit
-                    column instead, which is identical placement for the
-                    four-child case and stays correct if the shared sheet later
-                    grows the fifth track. Owned here because styles.css is not
-                    this change's to edit. */}
+                {/* The header has a variable number of actions. Column flow
+                    keeps every action beside the Project name instead of
+                    wrapping later controls onto a second row. */}
                 <div class="proj-head" style={{ "grid-auto-flow": "column" }}>
                   <button
                     type="button"
                     class="proj-toggle registered-project-button"
-                    disabled={
-                      !project.selected && !props.canSelectProject(index())
-                    }
                     aria-expanded={expanded()}
                     aria-controls={sessionsId()}
                     aria-current={project.selected ? "page" : undefined}
-                    aria-busy={pending()}
                     aria-label={
-                      project.selected
-                        ? (expanded() ? collapseSessionsAriaCopy(project.label) : expandSessionsAriaCopy(project.label))
-                        : unselectedProjectAriaCopy(
-                            project.label,
-                            String(index() + 1),
-                            project.availability === "available"
-                              ? railCopy.closedState
-                              : railCopy.unavailableState,
-                          )
+                      expanded()
+                        ? collapseSessionsAriaCopy(projectOptionLabel(project))
+                        : expandSessionsAriaCopy(projectOptionLabel(project))
                     }
                     title={
-                      project.selected
-                        ? expanded()
-                          ? railCopy.collapseThisTitle
-                          : railCopy.expandThisTitle
-                        : project.availability !== "available"
-                          ? railCopy.collapsedUnavailable
-                          : props.draftBlocked
-                            ? railCopy.clearDraftBeforeSwitch
-                            : props.actionBlocked
-                              ? railCopy.pendingActionBeforeSwitch
-                              : railCopy.openThisProject
+                      expanded()
+                        ? railCopy.collapseThisTitle
+                        : railCopy.expandThisTitle
                     }
-                    onClick={() => {
-                      if (project.selected) {
-                        updateDisclosure({ type: "toggle-selected-project" });
-                      } else {
-                        props.onSelectProject(index());
-                      }
-                    }}
+                    onClick={() =>
+                      updateDisclosure({
+                        type: "toggle-project",
+                        projectIndex: index(),
+                      })
+                    }
                   >
                     <span class="proj-caret" aria-hidden="true">
                       ▾
@@ -532,17 +691,36 @@ export const ProjectRail: Component<{
                         title={railCopy.openDotTitle}
                       />
                     </Show>
-                    <span class="proj-name">{project.label}</span>
+                    <span class="proj-name">{projectOptionLabel(project)}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-btn project-switch-trigger"
+                    style={{ opacity: "1" }}
+                    hidden={project.selected}
+                    aria-label={switchProjectAriaCopy(projectOptionLabel(project))}
+                    title={switchTitle()}
+                    aria-busy={pending()}
+                    disabled={!props.canSelectProject(index())}
+                    onClick={() => props.onSelectProject(index())}
+                  >
+                    <svg
+                      class="session-action-glyph"
+                      viewBox="0 0 20 20"
+                      aria-hidden="true"
+                    >
+                      <path d="M4 10h10m-4-4 4 4-4 4" />
+                    </svg>
                   </button>
                   <span
                     class="proj-count"
                     aria-label={
-                      project.selected
+                      commandsLoaded()
                         ? activeSessionsCountCopy(String(activeCommands().length))
                         : railCopy.countNotLoaded
                     }
                   >
-                    {project.selected ? activeCommands().length : "—"}
+                    {commandsLoaded() ? activeCommands().length : "—"}
                   </span>
                   <Show when={props.onRequestProjectHistories}>
                     {(request) => (
@@ -597,7 +775,7 @@ export const ProjectRail: Component<{
                   <button
                     type="button"
                     class="icon-btn"
-                    aria-label={newSessionHereAriaCopy(project.label)}
+                    aria-label={newSessionHereAriaCopy(projectOptionLabel(project))}
                     title={
                       project.selected
                         ? props.runtimeUnavailable
@@ -613,17 +791,24 @@ export const ProjectRail: Component<{
                 </div>
 
                 <Show
-                  when={project.selected}
+                  when={commandsLoaded()}
                   fallback={
                     <div
                       id={sessionsId()}
-                      class="proj-sessions collapsed-note"
+                      class="proj-sessions"
                     >
-                      <div class="proj-empty">{collapsedCopy()}</div>
+                      <p class="project-cache-note">
+                        {railCopy.sessionsNotLoadedNote}
+                      </p>
                     </div>
                   }
                 >
                   <div id={sessionsId()} class="proj-sessions">
+                    <Show when={!project.selected}>
+                      <p class="project-cache-note">
+                        {railCopy.cachedProjectReadOnlyNote}
+                      </p>
+                    </Show>
                     <Show
                       when={activeCommands().length > 0}
                       fallback={
@@ -658,17 +843,25 @@ export const ProjectRail: Component<{
                         {(command) => (
                           <SessionRailRow
                             command={command}
-                            selected={command.key === props.selectedKey}
+                            selected={
+                              project.selected &&
+                              command.key === props.selectedKey
+                            }
                             disabled={
+                              !project.selected ||
                               props.projectSwitch.phase === "pending" ||
                               props.projectOpen.phase === "pending" ||
                               props.projectOpen.phase === "recovery-required"
                             }
+                            readOnly={!project.selected}
                             mutationPending={props.sessionMetadataPending}
                             removalPending={props.removalPending}
                             onSelect={() => props.onSelect(command.key)}
                             onMutate={props.onMutateSessionMetadata}
-                            onRequestRemoval={props.onRequestSessionRemoval}
+                            onRequestRecoveryArchiveConfirmation={
+                              setRecoveryArchiveConfirmation
+                            }
+                            onRequestRemoval={requestSessionRemoval}
                           />
                         )}
                       </For>
@@ -681,7 +874,10 @@ export const ProjectRail: Component<{
                           aria-expanded={currentDisclosure().overflowExpanded}
                           aria-controls={sessionsId()}
                           onClick={() =>
-                            updateDisclosure({ type: "toggle-overflow" })
+                            updateDisclosure({
+                              type: "toggle-overflow",
+                              projectIndex: index(),
+                            })
                           }
                         >
                           {currentDisclosure().overflowExpanded
@@ -698,7 +894,10 @@ export const ProjectRail: Component<{
                           aria-expanded={currentDisclosure().archivedExpanded}
                           aria-controls={`archived-sessions-${index() + 1}`}
                           onClick={() =>
-                            updateDisclosure({ type: "toggle-archived" })
+                            updateDisclosure({
+                              type: "toggle-archived",
+                              projectIndex: index(),
+                            })
                           }
                         >
                           {archivedGroupCopy(archivedCommands().length)}
@@ -712,22 +911,28 @@ export const ProjectRail: Component<{
                               {(command) => (
                                 <SessionRailRow
                                   command={command}
-                                  selected={command.key === props.selectedKey}
+                                  selected={
+                                    project.selected &&
+                                    command.key === props.selectedKey
+                                  }
                                   disabled={
+                                    !project.selected ||
                                     props.projectSwitch.phase === "pending" ||
                                     props.projectOpen.phase === "pending" ||
                                     props.projectOpen.phase ===
                                       "recovery-required"
                                   }
+                                  readOnly={!project.selected}
                                   mutationPending={
                                     props.sessionMetadataPending
                                   }
                                   removalPending={props.removalPending}
                                   onSelect={() => props.onSelect(command.key)}
                                   onMutate={props.onMutateSessionMetadata}
-                                  onRequestRemoval={
-                                    props.onRequestSessionRemoval
+                                  onRequestRecoveryArchiveConfirmation={
+                                    setRecoveryArchiveConfirmation
                                   }
+                                  onRequestRemoval={requestSessionRemoval}
                                 />
                               )}
                             </For>
@@ -761,7 +966,7 @@ export const ProjectRail: Component<{
         )}
       </Show>
 
-      <Show when={props.removalNotice}>
+      <Show when={removalNotice()}>
         {(notice) => (
           <p
             class="rail-feedback rail-removal-notice"
@@ -772,6 +977,26 @@ export const ProjectRail: Component<{
           >
             {presentationText(notice().message)}
           </p>
+        )}
+      </Show>
+
+      <Show when={recoveryArchiveConfirmation()}>
+        {(command) => (
+          <RecoveryArchiveConfirmation
+            command={command()}
+            pending={props.sessionMetadataPending}
+            onCancel={() => setRecoveryArchiveConfirmation(null)}
+            onConfirm={() => {
+              const selected = recoveryArchiveConfirmation();
+              if (selected === null || props.sessionMetadataPending) return;
+              setRecoveryArchiveConfirmation(null);
+              void props.onMutateSessionMetadata(
+                selected,
+                { kind: "archive" },
+                true,
+              );
+            }}
+          />
         )}
       </Show>
 
@@ -811,13 +1036,18 @@ const SessionRailRow: Component<{
   readonly command: WorkbenchCommandView;
   readonly selected: boolean;
   readonly disabled: boolean;
+  readonly readOnly: boolean;
   readonly mutationPending: boolean;
   readonly removalPending: boolean;
   readonly onSelect: () => void;
   readonly onMutate: (
     command: WorkbenchCommandView,
     operation: SessionMetadataOperation,
+    acknowledgedUnknownOutcome?: true,
   ) => Promise<WorkbenchSessionMetadataMutationResult>;
+  readonly onRequestRecoveryArchiveConfirmation: (
+    command: WorkbenchCommandView,
+  ) => void;
   readonly onRequestRemoval: (command: WorkbenchCommandView) => void;
 }> = (props) => {
   const commandKey = props.command.key;
@@ -889,7 +1119,8 @@ const SessionRailRow: Component<{
         command={props.command}
         selected={props.selected}
         disabled={props.disabled}
-        renameAvailable={props.command.session !== undefined}
+        readOnly={props.readOnly}
+        renameAvailable={!props.readOnly && props.command.session !== undefined}
         onSelect={props.onSelect}
         onRowRef={(row) => {
           renameTrigger = row;
@@ -902,7 +1133,7 @@ const SessionRailRow: Component<{
           beginSessionRenameFromRowKeyboard(event, beginRename)
         }
       />
-      <Show when={props.command.session !== undefined}>
+      <Show when={props.command.session !== undefined && !props.readOnly}>
         <div class="session-row-actions">
           <button
             type="button"
@@ -910,12 +1141,19 @@ const SessionRailRow: Component<{
             aria-label={archivePresentation().accessibleName}
             title={archivePresentation().title}
             disabled={archivePresentation().disabled}
-            onClick={() =>
-              void props.onMutate(
-                props.command,
-                archivePresentation().operation,
-              )
-            }
+            onClick={() => {
+              const operation = archivePresentation().operation;
+              if (
+                requiresRecoveryArchiveAcknowledgement(
+                  props.command,
+                  operation,
+                )
+              ) {
+                props.onRequestRecoveryArchiveConfirmation(props.command);
+                return;
+              }
+              void props.onMutate(props.command, operation);
+            }}
           >
             <Show
               when={archivePresentation().operation.kind === "archive"}
@@ -1003,10 +1241,79 @@ const SessionRailRow: Component<{
   );
 };
 
+const RecoveryArchiveConfirmation: Component<{
+  readonly command: WorkbenchCommandView;
+  readonly pending: boolean;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
+}> = (props) => {
+  const headingId = `recovery-archive-title-${createUniqueId()}`;
+  const descriptionId = `recovery-archive-description-${createUniqueId()}`;
+  let cancel: HTMLButtonElement | undefined;
+  let returnFocus: HTMLElement | undefined;
+
+  onMount(() => {
+    returnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : undefined;
+    cancel?.focus({ preventScroll: true });
+  });
+  onCleanup(() => {
+    queueMicrotask(() => {
+      if (returnFocus?.isConnected === true) {
+        returnFocus.focus({ preventScroll: true });
+      }
+    });
+  });
+
+  return (
+    <Portal>
+      <div class="removal-dialog-backdrop">
+        <section
+          class="removal-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby={headingId}
+          aria-describedby={descriptionId}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !props.pending) {
+              event.preventDefault();
+              props.onCancel();
+            }
+          }}
+        >
+          <h2 id={headingId}>{sessionMetadataCopy.archiveTitle}</h2>
+          <p id={descriptionId}>{sessionMetadataCopy.recoveryArchiveTitle}</p>
+          <div class="removal-dialog-actions">
+            <button
+              ref={cancel}
+              type="button"
+              class="btn"
+              disabled={props.pending}
+              onClick={props.onCancel}
+            >
+              {commonCopy.cancel}
+            </button>
+            <button
+              type="button"
+              class="btn danger"
+              disabled={props.pending}
+              onClick={props.onConfirm}
+            >
+              {sessionMetadataCopy.archiveLabel}
+            </button>
+          </div>
+        </section>
+      </div>
+    </Portal>
+  );
+};
+
 const SessionRow: Component<{
   readonly command: WorkbenchCommandView;
   readonly selected: boolean;
   readonly disabled: boolean;
+  readonly readOnly: boolean;
   readonly renameAvailable: boolean;
   readonly onSelect: () => void;
   readonly onRowRef: (row: HTMLButtonElement) => void;
@@ -1025,10 +1332,15 @@ const SessionRow: Component<{
       ref={props.onRowRef}
       type="button"
       class="session-row"
-      classList={{ "is-archived": props.command.session?.archived === true }}
+      classList={{
+        "is-archived": props.command.session?.archived === true,
+        "is-read-only": props.readOnly,
+      }}
       aria-keyshortcuts={props.renameAvailable ? "F2" : undefined}
       title={
-        props.renameAvailable
+        props.readOnly
+          ? railCopy.cachedSessionReadOnlyTitle
+          : props.renameAvailable
           ? railCopy.renameHintTitle
           : undefined
       }

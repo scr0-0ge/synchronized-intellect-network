@@ -1,3 +1,5 @@
+import { reconstructWorkbenchSubscriptionUsage } from "./result-sanitizer.ts";
+import type { WorkbenchSubscriptionUsageObservation } from "./contract.ts";
 import { randomUUID } from "node:crypto";
 import {
   lstat,
@@ -12,11 +14,19 @@ import { basename, dirname, join } from "node:path";
 import {
   defaultWorkbenchClaudePermissionHandling,
   defaultWorkbenchAppearancePreference,
+  defaultWorkbenchFamilyEndpointPreferences,
   defaultWorkbenchRuntimeExecutablePaths,
+  workbenchEndpointPreferenceFamily,
   WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH,
   type WorkbenchRuntimeExecutablePaths,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchAppearancePreference,
+  type WorkbenchEndpointFamilyId,
+  type WorkbenchClaudeEndpointPreference,
+  type WorkbenchCodexEndpointPreference,
+  type WorkbenchFamilyEndpointPreference,
+  type WorkbenchFamilyEndpointPreferences,
+  type WorkbenchKimiEndpointPreference,
 } from "./contract.ts";
 
 export { defaultWorkbenchAppearancePreference } from "./contract.ts";
@@ -49,23 +59,33 @@ export interface WorkbenchAppearancePreferenceStore {
   saveClaudePermissionHandling(
     permissionHandling: WorkbenchClaudePermissionHandling,
   ): Promise<WorkbenchClaudePermissionHandling>;
+  readEndpointPreferences(): Promise<WorkbenchFamilyEndpointPreferences>;
+  saveEndpointPreference(
+    preference: WorkbenchFamilyEndpointPreference,
+  ): Promise<WorkbenchFamilyEndpointPreference>;
   readRuntimeExecutables(): Promise<WorkbenchRuntimeExecutablePaths>;
   saveRuntimeExecutables(
     executables: WorkbenchRuntimeExecutablePaths,
   ): Promise<WorkbenchRuntimeExecutablePaths>;
+  readClaudeSubscriptionUsage(): Promise<WorkbenchSubscriptionUsageObservation | null>;
+  saveClaudeSubscriptionUsage(observation: WorkbenchSubscriptionUsageObservation): Promise<WorkbenchSubscriptionUsageObservation>;
   close(): Promise<void>;
 }
 
 interface WorkbenchPreferenceDocument {
+  readonly claudeSubscriptionUsage: WorkbenchSubscriptionUsageObservation | null;
   readonly appearance: WorkbenchAppearancePreference;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
+  readonly endpointPreference: WorkbenchFamilyEndpointPreferences;
   readonly runtimeExecutables: WorkbenchRuntimeExecutablePaths;
 }
 
 const defaultWorkbenchPreferenceDocument: WorkbenchPreferenceDocument =
   Object.freeze({
+    claudeSubscriptionUsage: null,
     appearance: defaultWorkbenchAppearancePreference,
     claudePermissionHandling: defaultWorkbenchClaudePermissionHandling,
+    endpointPreference: defaultWorkbenchFamilyEndpointPreferences,
     runtimeExecutables: defaultWorkbenchRuntimeExecutablePaths,
   });
 
@@ -121,7 +141,9 @@ export function createWorkbenchAppearancePreferenceStore(options: {
           capturePreferenceDocument(
             captured,
             current.claudePermissionHandling,
+            current.endpointPreference,
             current.runtimeExecutables,
+            current.claudeSubscriptionUsage,
           ),
           atomicReplace,
         );
@@ -152,7 +174,45 @@ export function createWorkbenchAppearancePreferenceStore(options: {
           capturePreferenceDocument(
             current.appearance,
             captured,
+            current.endpointPreference,
             current.runtimeExecutables,
+            current.claudeSubscriptionUsage,
+          ),
+          atomicReplace,
+        );
+        return captured;
+      });
+    },
+    readEndpointPreferences(): Promise<WorkbenchFamilyEndpointPreferences> {
+      return enqueue(async () =>
+        (await readPreferenceDocument(options.filePath)).endpointPreference,
+      );
+    },
+    saveEndpointPreference(
+      preference: WorkbenchFamilyEndpointPreference,
+    ): Promise<WorkbenchFamilyEndpointPreference> {
+      let captured: WorkbenchFamilyEndpointPreference;
+      try {
+        captured = captureFamilyEndpointPreference(preference);
+      } catch {
+        return Promise.reject(
+          new WorkbenchAppearancePreferenceStoreError("preferences-invalid"),
+        );
+      }
+      return enqueue(async () => {
+        const current = await readPreferenceDocument(options.filePath);
+        await writePreference(
+          options.filePath,
+          capturePreferenceDocument(
+            current.appearance,
+            current.claudePermissionHandling,
+            captureFamilyEndpointPreferences(
+              current.endpointPreference,
+              workbenchEndpointPreferenceFamily(captured),
+              captured,
+            ),
+            current.runtimeExecutables,
+            current.claudeSubscriptionUsage,
           ),
           atomicReplace,
         );
@@ -182,10 +242,27 @@ export function createWorkbenchAppearancePreferenceStore(options: {
           capturePreferenceDocument(
             current.appearance,
             current.claudePermissionHandling,
+            current.endpointPreference,
             captured,
+            current.claudeSubscriptionUsage,
           ),
           atomicReplace,
         );
+        return captured;
+      });
+    },
+    readClaudeSubscriptionUsage() {
+      return enqueue(async () => (await readPreferenceDocument(options.filePath)).claudeSubscriptionUsage);
+    },
+    saveClaudeSubscriptionUsage(observation: WorkbenchSubscriptionUsageObservation) {
+      const captured = reconstructWorkbenchSubscriptionUsage(observation);
+      if (captured === undefined) return Promise.reject(new WorkbenchAppearancePreferenceStoreError("preferences-invalid"));
+      return enqueue(async () => {
+        const current = await readPreferenceDocument(options.filePath);
+        if (current.claudeSubscriptionUsage !== null && current.claudeSubscriptionUsage.observedAt > captured.observedAt) {
+          return current.claudeSubscriptionUsage;
+        }
+        await writePreference(options.filePath, Object.freeze({ ...current, claudeSubscriptionUsage: captured }), atomicReplace);
         return captured;
       });
     },
@@ -238,6 +315,7 @@ async function readPreferenceDocument(
         return capturePreferenceDocument(
           captureLegacyAppearance(document.appearance),
           defaultWorkbenchClaudePermissionHandling,
+          defaultWorkbenchFamilyEndpointPreferences,
           defaultWorkbenchRuntimeExecutablePaths,
         );
       }
@@ -245,6 +323,7 @@ async function readPreferenceDocument(
         return capturePreferenceDocument(
           captureVersionTwoAppearance(document.appearance),
           defaultWorkbenchClaudePermissionHandling,
+          defaultWorkbenchFamilyEndpointPreferences,
           defaultWorkbenchRuntimeExecutablePaths,
         );
       }
@@ -252,6 +331,7 @@ async function readPreferenceDocument(
         return capturePreferenceDocument(
           captureAppearance(document.appearance),
           defaultWorkbenchClaudePermissionHandling,
+          defaultWorkbenchFamilyEndpointPreferences,
           defaultWorkbenchRuntimeExecutablePaths,
         );
       }
@@ -267,6 +347,29 @@ async function readPreferenceDocument(
       return capturePreferenceDocument(
         captureAppearance(document.appearance),
         captureClaudePermissionHandling(document.claudePermissionHandling),
+        defaultWorkbenchFamilyEndpointPreferences,
+        defaultWorkbenchRuntimeExecutablePaths,
+      );
+    }
+    // main-resync: both lines of descent minted a schemaVersion 5 with their
+    // own third field, so the two v5 shapes are told apart by exact key set —
+    // the field the other line never wrote defaults in — and the merged writer
+    // moved on to 6, which carries both fields.
+    if (
+      isExactDataRecord(document, [
+        "appearance",
+        "claudePermissionHandling",
+        "kimiEndpointPreference",
+        "schemaVersion",
+      ]) &&
+      document.schemaVersion === 5
+    ) {
+      return capturePreferenceDocument(
+        captureAppearance(document.appearance),
+        captureClaudePermissionHandling(document.claudePermissionHandling),
+        captureFamilyEndpointPreferencesFromKimi(
+          captureKimiEndpointPreference(document.kimiEndpointPreference),
+        ),
         defaultWorkbenchRuntimeExecutablePaths,
       );
     }
@@ -282,7 +385,47 @@ async function readPreferenceDocument(
       return capturePreferenceDocument(
         captureAppearance(document.appearance),
         captureClaudePermissionHandling(document.claudePermissionHandling),
+        defaultWorkbenchFamilyEndpointPreferences,
         captureRuntimeExecutables(document.runtimeExecutables),
+      );
+    }
+    if (
+      isExactDataRecord(document, [
+        "appearance",
+        "claudePermissionHandling",
+        "kimiEndpointPreference",
+        "runtimeExecutables",
+        "schemaVersion",
+      ]) &&
+      document.schemaVersion === 6
+    ) {
+      // Ticket 25 migration: the pre-family v6 document carries the Kimi
+      // facade preference under its old kimi-only key. The kimi value is
+      // read verbatim; the claude/codex families take their defaults
+      // (subscription first, exactly the automatic order).
+      return capturePreferenceDocument(
+        captureAppearance(document.appearance),
+        captureClaudePermissionHandling(document.claudePermissionHandling),
+        captureFamilyEndpointPreferencesFromKimi(
+          captureKimiEndpointPreference(document.kimiEndpointPreference),
+        ),
+        captureRuntimeExecutables(document.runtimeExecutables),
+      );
+    }
+    if (
+      (isExactDataRecord(document, [
+        "appearance", "claudePermissionHandling", "endpointPreference", "runtimeExecutables", "schemaVersion",
+      ]) || isExactDataRecord(document, [
+        "appearance", "claudePermissionHandling", "claudeSubscriptionUsage", "endpointPreference", "runtimeExecutables", "schemaVersion",
+      ])) &&
+      document.schemaVersion === 7
+    ) {
+      return capturePreferenceDocument(
+        captureAppearance(document.appearance),
+        captureClaudePermissionHandling(document.claudePermissionHandling),
+        captureFamilyEndpointPreferencesRecord(document.endpointPreference),
+        captureRuntimeExecutables(document.runtimeExecutables),
+        document.claudeSubscriptionUsage === undefined ? null : captureSubscriptionUsage(document.claudeSubscriptionUsage),
       );
     }
     throw new Error("invalid-appearance-preferences");
@@ -309,9 +452,11 @@ async function writePreference(
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const contents = `${JSON.stringify({
-      schemaVersion: 5,
+      schemaVersion: 7,
+      ...(preference.claudeSubscriptionUsage === null ? {} : { claudeSubscriptionUsage: preference.claudeSubscriptionUsage }),
       appearance: preference.appearance,
       claudePermissionHandling: preference.claudePermissionHandling,
+      endpointPreference: preference.endpointPreference,
       runtimeExecutables: preference.runtimeExecutables,
     })}\n`;
     if (
@@ -339,12 +484,16 @@ async function writePreference(
 function capturePreferenceDocument(
   appearance: WorkbenchAppearancePreference,
   claudePermissionHandling: WorkbenchClaudePermissionHandling,
+  endpointPreference: WorkbenchFamilyEndpointPreferences,
   runtimeExecutables: WorkbenchRuntimeExecutablePaths,
+  claudeSubscriptionUsage: WorkbenchSubscriptionUsageObservation | null = null,
 ): WorkbenchPreferenceDocument {
   return Object.freeze({
     appearance,
     claudePermissionHandling,
+    endpointPreference,
     runtimeExecutables,
+    claudeSubscriptionUsage,
   });
 }
 
@@ -375,6 +524,91 @@ function captureClaudePermissionHandling(
     throw new Error("invalid-appearance-preferences");
   }
   return value;
+}
+
+function captureKimiEndpointPreference(
+  value: unknown,
+): WorkbenchKimiEndpointPreference {
+  if (value !== "kimi-code" && value !== "kimi-platform") {
+    throw new Error("invalid-appearance-preferences");
+  }
+  return value;
+}
+
+/**
+ * The v5-kimi/v6 → v7 migration read: the Kimi value carries over verbatim,
+ * the new claude/codex families start at their defaults (the automatic
+ * order, so nothing observable changes for an untouched preference).
+ */
+function captureFamilyEndpointPreferencesFromKimi(
+  kimi: WorkbenchKimiEndpointPreference,
+): WorkbenchFamilyEndpointPreferences {
+  return Object.freeze({
+    ...defaultWorkbenchFamilyEndpointPreferences,
+    kimi,
+  });
+}
+
+/** One family's saved preference (fail-closed on any non-member value). */
+function captureFamilyEndpointPreference(
+  value: unknown,
+): WorkbenchFamilyEndpointPreference {
+  const allowed: readonly unknown[] = [
+    "kimi-code",
+    "kimi-platform",
+    "claude-code-desktop",
+    "claude-api",
+    "codex-desktop",
+    "codex-api",
+  ];
+  if (!allowed.includes(value)) {
+    throw new Error("invalid-appearance-preferences");
+  }
+  return value as WorkbenchFamilyEndpointPreference;
+}
+
+/** The v7 endpointPreference record: exact key set, every value a member. */
+function captureFamilyEndpointPreferencesRecord(
+  value: unknown,
+): WorkbenchFamilyEndpointPreferences {
+  if (!isExactDataRecord(value, ["claude", "codex", "kimi"])) {
+    throw new Error("invalid-appearance-preferences");
+  }
+  return Object.freeze({
+    claude: captureClaudeEndpointPreference(value.claude),
+    codex: captureCodexEndpointPreference(value.codex),
+    kimi: captureKimiEndpointPreference(value.kimi),
+  });
+}
+
+function captureClaudeEndpointPreference(
+  value: unknown,
+): WorkbenchClaudeEndpointPreference {
+  if (value !== "claude-code-desktop" && value !== "claude-api") {
+    throw new Error("invalid-appearance-preferences");
+  }
+  return value;
+}
+
+function captureCodexEndpointPreference(
+  value: unknown,
+): WorkbenchCodexEndpointPreference {
+  if (value !== "codex-desktop" && value !== "codex-api") {
+    throw new Error("invalid-appearance-preferences");
+  }
+  return value;
+}
+
+/** Replace one family's slot, keeping the other two exactly as they were. */
+function captureFamilyEndpointPreferences(
+  current: WorkbenchFamilyEndpointPreferences,
+  family: WorkbenchEndpointFamilyId,
+  preference: WorkbenchFamilyEndpointPreference,
+): WorkbenchFamilyEndpointPreferences {
+  return Object.freeze({
+    ...current,
+    [family]: preference,
+  });
 }
 
 function captureAppearance(value: unknown): WorkbenchAppearancePreference {
@@ -609,4 +843,10 @@ function assertNoDuplicateObjectKeys(contents: string): void {
   if (index !== contents.length) {
     throw new Error("invalid-appearance-preferences");
   }
+}
+
+function captureSubscriptionUsage(value: unknown): WorkbenchSubscriptionUsageObservation {
+  const observation = reconstructWorkbenchSubscriptionUsage(value);
+  if (observation === undefined) throw new WorkbenchAppearancePreferenceStoreError("preferences-invalid");
+  return observation;
 }

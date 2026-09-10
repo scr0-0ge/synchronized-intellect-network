@@ -29,6 +29,10 @@ export type WorkbenchCreateProjectCreateResult =
   | "collision-alias"
   | "collision-reparse"
   | "target-appeared"
+  | "parent-directory-missing"
+  | "parent-is-file"
+  | "parent-is-alias"
+  | "parent-is-reparse"
   | "parent-unavailable"
   | "create-denied"
   | "create-failed-known-no-commit"
@@ -43,7 +47,6 @@ export type WorkbenchCreateProjectRegistrationResult =
 export interface WorkbenchCreateProjectActiveOperation {
   readonly operationNumber: number;
   readonly phase: WorkbenchCreateProjectPhase;
-  readonly targetPath: string | null;
   readonly targetToken: string | null;
   readonly chooserResult: WorkbenchCreateProjectChooserResult | null;
   readonly createResult: WorkbenchCreateProjectCreateResult | null;
@@ -83,7 +86,6 @@ export type WorkbenchCreateProjectEffect =
   | {
       readonly kind: "create-if-absent" | "register-trusted-project";
       readonly operationNumber: number;
-      readonly targetPath: string;
       readonly targetToken: string;
     };
 
@@ -100,7 +102,6 @@ export type WorkbenchCreateProjectTransitionEvent =
       readonly kind: "chooser-result";
       readonly operationNumber: number;
       readonly result: string;
-      readonly targetPath: string | null;
       readonly targetToken: string | null;
     }
   | {
@@ -134,10 +135,9 @@ const activeKeys = [
   "phase",
   "registrationCommitted",
   "registrationResult",
-  "targetPath",
   "targetToken",
 ] as const;
-const completedKeys = activeKeys.filter((key) => key !== "targetPath");
+const completedKeys = activeKeys;
 const stateKeys = [
   "active",
   "last",
@@ -154,6 +154,10 @@ const createResults = [
   "collision-alias",
   "collision-reparse",
   "target-appeared",
+  "parent-directory-missing",
+  "parent-is-file",
+  "parent-is-alias",
+  "parent-is-reparse",
   "parent-unavailable",
   "create-denied",
   "create-failed-known-no-commit",
@@ -398,7 +402,6 @@ function acceptIntent(
   mutable(next).active = {
     operationNumber,
     phase: "chooser-ready",
-    targetPath: null,
     targetToken: null,
     chooserResult: null,
     createResult: null,
@@ -449,7 +452,6 @@ function claimEffect(
     : {
         kind: expected,
         operationNumber: active.operationNumber,
-        targetPath: active.targetPath!,
         targetToken: active.targetToken!,
       };
   return transitionResult(next, true, "effect-claimed", [effect]);
@@ -464,7 +466,7 @@ function recordEffectResult(
     | "create-result"
     | "registration-result";
   const expectedKeys = kind === "chooser-result"
-    ? ["kind", "operationNumber", "result", "targetPath", "targetToken"]
+    ? ["kind", "operationNumber", "result", "targetToken"]
     : ["kind", "operationNumber", "result"];
   if (
     !hasExactDataProperties(event, expectedKeys) ||
@@ -498,22 +500,18 @@ function recordEffectResult(
   if (kind === "chooser-result") {
     active.chooserResult = normalized.result as WorkbenchCreateProjectChooserResult;
     if (normalized.result === "selected") {
-      active.targetPath = normalized.targetPath!;
       active.targetToken = normalized.targetToken!;
       if (next.recoveryTargets.includes(normalized.targetToken!)) {
         active.outcome = "created-recovery-required";
-        active.targetPath = null;
         active.phase = "response-ready";
       } else {
         active.phase = "create-ready";
       }
     } else if (normalized.result === "cancelled") {
       active.outcome = "cancelled";
-      active.targetPath = null;
       active.phase = "response-ready";
     } else {
       active.outcome = "unavailable";
-      active.targetPath = null;
       active.phase = "response-ready";
     }
   } else if (kind === "create-result") {
@@ -527,12 +525,10 @@ function recordEffectResult(
       )
     ) {
       active.outcome = "unavailable";
-      active.targetPath = null;
       active.phase = "response-ready";
     } else {
       addRecoveryTarget(next, active.targetToken);
       active.outcome = "created-recovery-required";
-      active.targetPath = null;
       active.phase = "response-ready";
     }
   } else {
@@ -545,7 +541,6 @@ function recordEffectResult(
       addRecoveryTarget(next, active.targetToken);
       active.outcome = "created-recovery-required";
     }
-    active.targetPath = null;
     active.phase = "response-ready";
   }
   incrementRevision(next);
@@ -596,22 +591,17 @@ function reconcileRestart(
   if (state.lifecycle === "closed" || state.active === null) {
     return transitionResult(state, false, "restart-stable");
   }
-  if (
-    state.active.phase === "chooser-ready" ||
-    state.active.phase === "create-ready" ||
-    state.active.phase === "response-ready"
-  ) {
+  if (state.active.phase === "chooser-ready" || state.active.phase === "response-ready") {
     return transitionResult(state, false, "restart-stable");
   }
   const next = cloneState(state);
   const active = mutable(next.active!);
-  if (active.phase === "chooser-claimed") {
+  if (active.phase === "chooser-claimed" || active.phase === "create-ready") {
     active.outcome = "unavailable";
   } else {
     addRecoveryTarget(next, active.targetToken);
     active.outcome = "created-recovery-required";
   }
-  active.targetPath = null;
   active.phase = "response-ready";
   incrementRevision(next);
   return transitionResult(next, true, "restart-reconciled");
@@ -672,8 +662,7 @@ function validateActiveOperation(
     typeof record.createCommitted !== "boolean" ||
     typeof record.registrationCommitted !== "boolean" ||
     (record.registrationCommitted && !record.createCommitted) ||
-    (record.targetToken !== null && !isTargetToken(record.targetToken)) ||
-    (record.targetPath !== null && !isPrivateTargetPath(record.targetPath))
+    (record.targetToken !== null && !isTargetToken(record.targetToken))
   ) {
     return false;
   }
@@ -740,10 +729,8 @@ function terminalRelation(
 ): boolean {
   const token = record.targetToken;
   const isRecovery = token !== null && recovery.has(token);
-  const pathScrubbed = completed ||
-    ("targetPath" in record && record.targetPath === null);
   if (record.outcome === "created") {
-    return isTargetToken(token) && pathScrubbed &&
+    return isTargetToken(token) &&
       record.chooserResult === "selected" &&
       record.createResult === "created" &&
       record.registrationResult === "committed" &&
@@ -753,7 +740,6 @@ function terminalRelation(
   }
   if (record.outcome === "cancelled") {
     return token === null &&
-      (!completed ? (record as WorkbenchCreateProjectActiveOperation).targetPath === null : true) &&
       record.chooserResult === "cancelled" &&
       record.createResult === null &&
       record.registrationResult === null &&
@@ -763,8 +749,7 @@ function terminalRelation(
   if (record.outcome === "created-recovery-required") {
     if (
       !isTargetToken(token) ||
-      !pathScrubbed ||
-      record.chooserResult !== "selected" ||
+        record.chooserResult !== "selected" ||
       !isRecovery ||
       record.registrationCommitted
     ) {
@@ -789,13 +774,12 @@ function terminalRelation(
     return false;
   }
   if (token === null) {
-    return (!completed ? (record as WorkbenchCreateProjectActiveOperation).targetPath === null : true) &&
-      record.createResult === null &&
+    return record.createResult === null &&
       (record.chooserResult === null ||
         record.chooserResult === "failed" ||
         record.chooserResult === "malformed");
   }
-  return isTargetToken(token) && pathScrubbed &&
+  return isTargetToken(token) &&
     record.chooserResult === "selected" &&
     !isRecovery &&
     ((completed && record.createResult === null) ||
@@ -805,8 +789,7 @@ function terminalRelation(
 }
 
 function emptyBeforeChooser(record: WorkbenchCreateProjectActiveOperation): boolean {
-  return record.targetPath === null &&
-    record.targetToken === null &&
+  return record.targetToken === null &&
     record.chooserResult === null &&
     record.createResult === null &&
     record.registrationResult === null &&
@@ -820,9 +803,6 @@ function selectedTarget(
   recovery: ReadonlySet<string>,
 ): boolean {
   return isTargetToken(record.targetToken) &&
-    isPrivateTargetPath(record.targetPath) &&
-    record.targetToken ===
-      createWorkbenchCreateProjectTargetToken(record.targetPath) &&
     record.chooserResult === "selected" &&
     !recovery.has(record.targetToken);
 }
@@ -830,36 +810,30 @@ function selectedTarget(
 function normalizeResult(
   kind: "chooser-result" | "create-result" | "registration-result",
   event: Record<string, unknown>,
-): { readonly result: string; readonly targetPath: string | null; readonly targetToken: string | null } {
+): { readonly result: string; readonly targetToken: string | null } {
   if (kind === "chooser-result") {
     if (
       event.result === "selected" &&
-      isPrivateTargetPath(event.targetPath) &&
-      isTargetToken(event.targetToken) &&
-      event.targetToken ===
-        createWorkbenchCreateProjectTargetToken(event.targetPath)
+      isTargetToken(event.targetToken)
     ) {
       return {
         result: "selected",
-        targetPath: event.targetPath,
         targetToken: event.targetToken,
       };
     }
     if (
       (event.result === "cancelled" || event.result === "failed") &&
-      event.targetPath === null &&
       event.targetToken === null
     ) {
-      return { result: event.result, targetPath: null, targetToken: null };
+      return { result: event.result, targetToken: null };
     }
-    return { result: "malformed", targetPath: null, targetToken: null };
+    return { result: "malformed", targetToken: null };
   }
   if (kind === "create-result") {
     return {
       result: createResults.includes(
         event.result as WorkbenchCreateProjectCreateResult,
       ) ? event.result as string : "unknown",
-      targetPath: null,
       targetToken: null,
     };
   }
@@ -867,7 +841,6 @@ function normalizeResult(
     result: registrationResults.includes(
       event.result as WorkbenchCreateProjectRegistrationResult,
     ) ? event.result as string : "unknown",
-    targetPath: null,
     targetToken: null,
   };
 }
@@ -880,8 +853,7 @@ function isDuplicateResult(
   if (kind === "chooser-result") {
     return active.chooserResult === normalized.result &&
       (normalized.result !== "selected" ||
-        (active.targetPath === normalized.targetPath &&
-          active.targetToken === normalized.targetToken));
+        active.targetToken === normalized.targetToken);
   }
   return kind === "create-result"
     ? active.createResult === normalized.result

@@ -11,7 +11,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PRODUCTION_MANIFEST = {
-  name: "unified-agent-workbench",
+  name: "synchronized-intellect-network",
   productName: "Synchronized Intellect Network",
   version: "0.0.0",
   private: true,

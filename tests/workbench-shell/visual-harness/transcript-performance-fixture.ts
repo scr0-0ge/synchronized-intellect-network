@@ -22,7 +22,14 @@ export function createTranscriptPerformanceFixture(
       Object.freeze({ kind: "turn-started" as const }),
       Object.freeze({
         kind: "agent-message" as const,
-        text: `Seeded agent response ${ordinal}. This bounded sentence keeps turn heights deterministic.`,
+        text:
+          ordinal === 493
+            ? `${Array.from(
+                { length: 40 },
+                (_, line) =>
+                  `Seeded detail ${line + 1}. This line keeps the first literal match below the initial viewport.`,
+              ).join("\n\n")}\n\nPERF_DEEP_NEEDLE is the first and only deep match.`
+            : `Seeded agent response ${ordinal}. This bounded sentence keeps turn heights deterministic.`,
       }),
       Object.freeze({
         kind: "turn-completed" as const,

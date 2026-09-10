@@ -145,7 +145,7 @@ test("Claude get_settings demotes validated errors to a counted diagnostic and d
   assert.equal(JSON.stringify(applied).includes("settings.json"), false);
 });
 
-test("Claude get_settings fails closed on unknown keys and adversarial record shapes", () => {
+test("Claude get_settings fails closed on malformed consumed fields and adversarial record shapes", () => {
   const accessorApplied = validSettingsEnvelope();
   Object.defineProperty(accessorApplied.applied, "ultracode", {
     configurable: true,
@@ -162,36 +162,9 @@ test("Claude get_settings fails closed on unknown keys and adversarial record sh
     readonly name: string;
     readonly value: unknown;
   }[] = [
-    {
-      name: "unknown top-level key",
-      value: {
-        ...validSettingsEnvelope(),
-        ultracodeKeywordTrigger: true,
-      },
-    },
-    {
-      name: "unknown applied key",
-      value: {
-        ...validSettingsEnvelope(),
-        applied: {
-          ...validAppliedSettings(),
-          ultracodeKeywordTrigger: true,
-        },
-      },
-    },
-    {
-      name: "unknown source-record key",
-      value: {
-        ...validSettingsEnvelope(),
-        sources: [
-          {
-            settings: { ultracode: true },
-            source: "flagSettings",
-            inherited: false,
-          },
-        ],
-      },
-    },
+
+
+
     {
       name: "unsafe source name",
       value: {
@@ -239,12 +212,12 @@ test("Claude get_settings fails closed on unknown keys and adversarial record sh
       },
     },
     {
-      name: "ultracode is not an effort literal",
+      name: "effort must be a string or null",
       value: {
         ...validSettingsEnvelope(),
         applied: {
           ...validAppliedSettings(),
-          effort: "ultracode",
+          effort: 42,
         },
       },
     },
@@ -271,20 +244,7 @@ test("Claude get_settings fails closed on unknown keys and adversarial record sh
         ],
       },
     },
-    {
-      name: "widened settings error record",
-      value: {
-        ...validSettingsEnvelope(),
-        errors: [
-          {
-            file: "settings.json",
-            message: "invalid setting",
-            path: "/project/settings.json",
-            futureErrorField: true,
-          },
-        ],
-      },
-    },
+
     {
       name: "sparse sources array",
       value: {

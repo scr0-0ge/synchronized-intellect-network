@@ -1,4 +1,13 @@
+import { WORKBENCH_LOAD_SUBSCRIPTION_USAGE_CHANNEL, WORKBENCH_SUBSCRIPTION_USAGE_CHANGED_CHANNEL, type WorkbenchSubscriptionUsageResult } from "./contract.ts";
+import { sanitizeWorkbenchSubscriptionUsageResult } from "./result-sanitizer.ts";
 import {
+  WORKBENCH_READ_USER_INPUT_CHANNEL,
+  WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
+  WORKBENCH_USER_INPUT_CHANGED_CHANNEL,
+  type WorkbenchUserInputReadRequest,
+  type WorkbenchUserInputResponse,
+  type WorkbenchUserInputResult,
+  type WorkbenchUserInputResponseResult,
   WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL,
   WORKBENCH_BEGIN_SUBSCRIPTION_AUTHENTICATION_CHANNEL,
   WORKBENCH_CREATE_PROJECT_CHANNEL,
@@ -6,8 +15,12 @@ import {
   WORKBENCH_DISCOVER_PROJECT_HISTORIES_CHANNEL,
   WORKBENCH_HIDE_PROJECT_HISTORY_CHANNEL,
   WORKBENCH_DISPOSE_CHANNEL,
+  WORKBENCH_ENDPOINT_KEY_CHANNELS,
+  WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS,
   WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL,
   WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL,
+  WORKBENCH_LOAD_ENDPOINT_PREFERENCES_CHANNEL,
+  WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL,
   WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
   WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
   publicRuntimeExecutableUnavailable,
@@ -20,16 +33,22 @@ import {
   WORKBENCH_OPEN_PROJECT_CHANNEL,
   WORKBENCH_PREPARE_SUBSCRIPTION_AUTHENTICATION_CHANNEL,
   WORKBENCH_PROJECT_VIEW_CHANNEL,
+  WORKBENCH_REFRESH_ENDPOINT_CATALOG_FRESHNESS_CHANNEL,
   WORKBENCH_REMOVE_PROJECT_CHANNEL,
   WORKBENCH_REMOVE_SESSION_CHANNEL,
   WORKBENCH_SELECT_PROJECT_CHANNEL,
   WORKBENCH_SAVE_APPEARANCE_PREFERENCE_CHANNEL,
   WORKBENCH_SAVE_CLAUDE_PERMISSION_HANDLING_CHANNEL,
+  WORKBENCH_SAVE_ENDPOINT_PREFERENCE_CHANNEL,
   WORKBENCH_SUBMIT_CHANNEL,
   WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   publicInvalidProfileDefaultSelection,
   publicAppearancePreferenceUnavailable,
   publicClaudePermissionHandlingUnavailable,
+  publicEndpointPreferenceUnavailable,
+  publicEndpointKeyUnavailable,
+  publicEndpointKeyInvalidValue,
+  publicEndpointCatalogFreshnessUnavailable,
   publicCreateProjectResult,
   publicInvalidProfileSelection,
   publicInvalidSubmission,
@@ -55,13 +74,23 @@ import {
   type WorkbenchRuntimeExecutableSaveResult,
   type WorkbenchRuntimeExecutablesLoadResult,
   type WorkbenchClaudePermissionHandlingSaveResult,
+  type WorkbenchFamilyEndpointPreference,
+  type WorkbenchEndpointPreferenceLoadResult,
+  type WorkbenchEndpointPreferenceSaveResult,
   type WorkbenchCreateProjectResult,
   type WorkbenchDirectSessionProfileDefaultRequest,
   type WorkbenchDirectSessionProfileDefaultResult,
   type WorkbenchDirectSessionProfileLoadRequest,
+  type WorkbenchEndpointKeyChannel,
+  type WorkbenchEndpointKeyEndpointId,
+  type WorkbenchEndpointKeyRemoveResult,
+  type WorkbenchEndpointKeyRevealResult,
+  type WorkbenchEndpointKeySaveResult,
+  type WorkbenchEndpointKeyStatusResult,
+  type WorkbenchEndpointProbeResult,
+  type WorkbenchEndpointCatalogFreshnessResult,
   type WorkbenchPublicDirectSessionProfileResult,
   type WorkbenchPublicDirectSessionProfileResultFor,
-  type WorkbenchHostedProjectListener,
   type WorkbenchInterruptRequest,
   type WorkbenchInterruptResult,
   type WorkbenchSteerRequest,
@@ -75,6 +104,7 @@ import {
   type WorkbenchProjectSelectionRequest,
   type WorkbenchProjectSelectionResult,
   type WorkbenchProjectRemovalResult,
+  type WorkbenchProjectTransfer,
   type WorkbenchRendererBridge,
   type WorkbenchSessionMetadataMutationRequest,
   type WorkbenchSessionMetadataMutationResult,
@@ -87,6 +117,7 @@ import {
 import {
   reconstructWorkbenchAppearancePreference,
   reconstructWorkbenchClaudePermissionHandling,
+  reconstructWorkbenchFamilyEndpointPreference,
   reconstructWorkbenchDirectInputRequest,
   reconstructWorkbenchDirectSessionProfileDefaultRequest,
   reconstructWorkbenchDirectSessionProfileLoadRequest,
@@ -97,6 +128,13 @@ import {
   reconstructWorkbenchProjectSelectionRequest,
   reconstructWorkbenchSessionMetadataMutationRequest,
   reconstructWorkbenchSessionRemovalRequest,
+  reconstructWorkbenchEndpointKeySaveRequest,
+  sanitizeWorkbenchEndpointKeyRemoveResult,
+  sanitizeWorkbenchEndpointKeyRevealResult,
+  sanitizeWorkbenchEndpointKeySaveResult,
+  sanitizeWorkbenchEndpointKeyStatusResult,
+  sanitizeWorkbenchEndpointProbeResult,
+  sanitizeWorkbenchEndpointCatalogFreshnessResult,
   sanitizeWorkbenchProjectHistoryAdoptionResult,
   sanitizeWorkbenchProjectHistoryDiscoveryResult,
   sanitizeWorkbenchProjectHistoryHideResult,
@@ -109,8 +147,10 @@ import {
   sanitizeWorkbenchRuntimeExecutableSaveResult,
   reconstructWorkbenchRuntimeExecutableSaveRequest,
   sanitizeWorkbenchClaudePermissionHandlingSaveResult,
+  sanitizeWorkbenchEndpointPreferenceLoadResult,
+  sanitizeWorkbenchEndpointPreferenceSaveResult,
   sanitizeWorkbenchDirectSessionProfileResult,
-  sanitizeWorkbenchHostedProjectResult,
+  createWorkbenchProjectTransferSanitizer,
   sanitizeWorkbenchInterruptResult,
   sanitizeWorkbenchSteerResult,
   sanitizeWorkbenchOpenProjectResult,
@@ -146,6 +186,25 @@ import {
   type HistoryRecoverySnapshotResult,
 } from "./history-recovery-contract.ts";
 import {
+  WORKBENCH_CHECK_CLI_UPDATES_CHANNEL,
+  WORKBENCH_RELAUNCH_APP_CHANNEL,
+  WORKBENCH_RUN_CLI_UPDATE_CHANNEL,
+  publicCliUpdateCheckUnavailable,
+  publicCliUpdateRelaunchUnavailable,
+  publicCliUpdateRunUnavailable,
+  type WorkbenchCliUpdateBridge,
+  type WorkbenchCliUpdateCheckResult,
+  type WorkbenchCliUpdateCliId,
+  type WorkbenchCliUpdateRelaunchResult,
+  type WorkbenchCliUpdateRunResult,
+} from "./cli-update-contract.ts";
+import {
+  reconstructWorkbenchCliUpdateRunRequest,
+  sanitizeWorkbenchCliUpdateCheckResult,
+  sanitizeWorkbenchCliUpdateRelaunchResult,
+  sanitizeWorkbenchCliUpdateRunResult,
+} from "./cli-update-sanitizer.ts";
+import {
   failedAction,
   reconstructHistoryRecoveryBrowseRequest,
   reconstructHistoryRecoveryCancelRequest,
@@ -159,15 +218,17 @@ import {
   unavailableSnapshot,
 } from "./history-recovery-sanitizer.ts";
 
+import { reconstructUserInputRead, reconstructUserInputResponse, sanitizeUserInputResult, sanitizeUserInputResponseResult } from "./user-input-sanitizer.ts";
+
 type ProjectViewIpcListener = (event: unknown, value: unknown) => void;
 
 export interface FixedProjectViewIpc {
   on(
-    channel: typeof WORKBENCH_PROJECT_VIEW_CHANNEL,
+    channel: typeof WORKBENCH_PROJECT_VIEW_CHANNEL | typeof WORKBENCH_USER_INPUT_CHANGED_CHANNEL | typeof WORKBENCH_SUBSCRIPTION_USAGE_CHANGED_CHANNEL,
     listener: ProjectViewIpcListener,
   ): void;
   removeListener(
-    channel: typeof WORKBENCH_PROJECT_VIEW_CHANNEL,
+    channel: typeof WORKBENCH_PROJECT_VIEW_CHANNEL | typeof WORKBENCH_USER_INPUT_CHANGED_CHANNEL | typeof WORKBENCH_SUBSCRIPTION_USAGE_CHANGED_CHANNEL,
     listener: ProjectViewIpcListener,
   ): void;
   send(
@@ -177,15 +238,22 @@ export interface FixedProjectViewIpc {
   ): void;
   invoke(
     channel:
+      | typeof WORKBENCH_READ_USER_INPUT_CHANNEL
+      | typeof WORKBENCH_RESPOND_USER_INPUT_CHANNEL
       | typeof WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL
       | typeof WORKBENCH_CREATE_PROJECT_CHANNEL
       | typeof WORKBENCH_DISCOVER_PROJECT_HISTORIES_CHANNEL
       | typeof WORKBENCH_HIDE_PROJECT_HISTORY_CHANNEL
       | typeof WORKBENCH_BEGIN_SUBSCRIPTION_AUTHENTICATION_CHANNEL
       | typeof WORKBENCH_CANCEL_PREPARED_SUBSCRIPTION_AUTHENTICATION_CHANNEL
+      | typeof WORKBENCH_CHECK_CLI_UPDATES_CHANNEL
       | typeof WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL
       | typeof WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL
       | typeof WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL
+      | typeof WORKBENCH_LOAD_SUBSCRIPTION_USAGE_CHANNEL
+      | typeof WORKBENCH_LOAD_ENDPOINT_PREFERENCES_CHANNEL
+      | typeof WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL
+      | WorkbenchEndpointKeyChannel
       | typeof WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL
       | typeof WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL
       | typeof WORKBENCH_HISTORY_RECOVERY_BROWSE_CHANNEL
@@ -199,11 +267,15 @@ export interface FixedProjectViewIpc {
       | typeof WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL
       | typeof WORKBENCH_OPEN_PROJECT_CHANNEL
       | typeof WORKBENCH_PREPARE_SUBSCRIPTION_AUTHENTICATION_CHANNEL
+      | typeof WORKBENCH_REFRESH_ENDPOINT_CATALOG_FRESHNESS_CHANNEL
       | typeof WORKBENCH_REMOVE_PROJECT_CHANNEL
       | typeof WORKBENCH_REMOVE_SESSION_CHANNEL
+      | typeof WORKBENCH_RUN_CLI_UPDATE_CHANNEL
+      | typeof WORKBENCH_RELAUNCH_APP_CHANNEL
       | typeof WORKBENCH_SELECT_PROJECT_CHANNEL
       | typeof WORKBENCH_SAVE_APPEARANCE_PREFERENCE_CHANNEL
       | typeof WORKBENCH_SAVE_CLAUDE_PERMISSION_HANDLING_CHANNEL
+      | typeof WORKBENCH_SAVE_ENDPOINT_PREFERENCE_CHANNEL
       | typeof WORKBENCH_SUBMIT_CHANNEL
       | typeof WORKBENCH_WRITE_CLIPBOARD_TEXT_CHANNEL
       | typeof WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
@@ -217,7 +289,25 @@ type ActivePreloadObservation = {
   readonly dispose: () => void;
 };
 
-export type WorkbenchPreloadBridge = WorkbenchRendererBridge &
+const unavailableProjectTransfer = (): WorkbenchProjectTransfer =>
+  Object.freeze({
+    kind: "snapshot",
+    revision: 1,
+    result: publicHostedProjectFailure(),
+  });
+
+export type WorkbenchProjectTransferListener = (
+  transfer: WorkbenchProjectTransfer,
+) => void;
+
+export type WorkbenchRendererTransferBridge = Omit<
+  WorkbenchRendererBridge,
+  "observeProject"
+> & {
+  observeProject(listener: WorkbenchProjectTransferListener): () => void;
+};
+
+export type WorkbenchPreloadBridge = WorkbenchRendererTransferBridge &
   Required<
     Pick<
       WorkbenchRendererBridge,
@@ -228,6 +318,13 @@ export type WorkbenchPreloadBridge = WorkbenchRendererBridge &
       | "prepareSubscriptionAuthentication"
       | "beginSubscriptionAuthentication"
       | "cancelPreparedSubscriptionAuthentication"
+      | "loadEndpointKeyStatus"
+      | "saveEndpointKey"
+      | "removeEndpointKey"
+      | "revealEndpointKey"
+      | "probeEndpointKey"
+      | "loadEndpointCatalogFreshness"
+      | "refreshEndpointCatalogFreshness"
       | "getSnapshot"
       | "browse"
       | "perform"
@@ -235,7 +332,12 @@ export type WorkbenchPreloadBridge = WorkbenchRendererBridge &
       | "notifyTurnCompleted"
       | "writeClipboardText"
     >
-  >;
+  > &
+  // CLI update surface (ticket 18): declared on its own contract module —
+  // this lane's territory does not open the central renderer-bridge
+  // interface — so the preload bridge carries it as an intersection and
+  // Settings narrows the renderer bridge back to it.
+  WorkbenchCliUpdateBridge;
 
 export function createWorkbenchPreloadBridge(
   ipc: FixedProjectViewIpc,
@@ -266,7 +368,26 @@ export function createWorkbenchPreloadBridge(
   return Object.freeze({
     ...createWorkbenchClipboardPreloadBridge(ipc),
     ...createWorkbenchNotificationPreloadBridge(ipc),
-    observeProject(listener: WorkbenchHostedProjectListener): () => void {
+    observeSubscriptionUsage(listener: (result: WorkbenchSubscriptionUsageResult) => void): () => void {
+      let active = true;
+      let pushed = false;
+      const deliver = (value: unknown) => {
+        if (active) listener(sanitizeWorkbenchSubscriptionUsageResult(value));
+      };
+      const handler: ProjectViewIpcListener = (_event, value) => { pushed = true; deliver(value); };
+      ipc.on(WORKBENCH_SUBSCRIPTION_USAGE_CHANGED_CHANNEL, handler);
+      // Subscribe before the single disk read. A later push wins over an
+      // in-flight initial read, including a stale read failure.
+      void ipc.invoke(WORKBENCH_LOAD_SUBSCRIPTION_USAGE_CHANNEL).then(
+        value => { if (!pushed) deliver(value); },
+        () => { if (!pushed) deliver({ ok: false }); },
+      );
+      return () => {
+        active = false;
+        ipc.removeListener(WORKBENCH_SUBSCRIPTION_USAGE_CHANGED_CHANNEL, handler);
+      };
+    },
+    observeProject(listener: WorkbenchProjectTransferListener): () => void {
       activeObservation?.dispose();
       let record!: ActivePreloadObservation;
       const dispose = () => {
@@ -284,11 +405,25 @@ export function createWorkbenchPreloadBridge(
           // Disposal is idempotent and never rejects into renderer code.
         }
       };
+      const sanitize = createWorkbenchProjectTransferSanitizer();
+      let recovering = false;
       const handler: ProjectViewIpcListener = (_event, value) => {
         if (!record.active || activeObservation !== record) return;
-        const result = sanitizeWorkbenchHostedProjectResult(value);
+        const transfer = sanitize(value);
+        if (transfer === undefined) {
+          console.warn("Live Project transfer mismatch; requesting a full snapshot.");
+          try {
+            listener(unavailableProjectTransfer());
+            if (!recovering) {
+              recovering = true;
+              ipc.send(WORKBENCH_OBSERVE_CHANNEL);
+            }
+          } catch { dispose(); }
+          return;
+        }
+        recovering = false;
         try {
-          listener(result);
+          listener(transfer);
         } catch {
           dispose();
           return;
@@ -302,7 +437,7 @@ export function createWorkbenchPreloadBridge(
       } catch {
         dispose();
         try {
-          listener(publicHostedProjectFailure());
+          listener(unavailableProjectTransfer());
         } catch {
           // A renderer listener cannot create an unhandled transport failure.
         }
@@ -569,6 +704,162 @@ export function createWorkbenchPreloadBridge(
         return publicClaudePermissionHandlingUnavailable();
       }
     },
+    async loadEndpointPreferences(): Promise<WorkbenchEndpointPreferenceLoadResult> {
+      try {
+        return sanitizeWorkbenchEndpointPreferenceLoadResult(
+          await ipc.invoke(WORKBENCH_LOAD_ENDPOINT_PREFERENCES_CHANNEL),
+        );
+      } catch {
+        return publicEndpointPreferenceUnavailable();
+      }
+    },
+    async saveEndpointPreference(
+      preference: WorkbenchFamilyEndpointPreference,
+    ): Promise<WorkbenchEndpointPreferenceSaveResult> {
+      const reconstructed =
+        reconstructWorkbenchFamilyEndpointPreference(preference);
+      if (!reconstructed.ok) {
+        return publicEndpointPreferenceUnavailable();
+      }
+      try {
+        return sanitizeWorkbenchEndpointPreferenceSaveResult(
+          await ipc.invoke(
+            WORKBENCH_SAVE_ENDPOINT_PREFERENCE_CHANNEL,
+            reconstructed.preference,
+          ),
+        );
+      } catch {
+        return publicEndpointPreferenceUnavailable();
+      }
+    },
+    async loadEndpointKeyStatus(
+      endpointId: WorkbenchEndpointKeyEndpointId,
+    ): Promise<WorkbenchEndpointKeyStatusResult> {
+      if (!isEndpointKeyEndpointId(endpointId)) {
+        return publicEndpointKeyUnavailable();
+      }
+      try {
+        return sanitizeWorkbenchEndpointKeyStatusResult(
+          await ipc.invoke(WORKBENCH_ENDPOINT_KEY_CHANNELS[endpointId].loadStatus),
+        );
+      } catch {
+        return publicEndpointKeyUnavailable();
+      }
+    },
+    async saveEndpointKey(
+      endpointId: WorkbenchEndpointKeyEndpointId,
+      request: Readonly<{ keyValue: string }>,
+    ): Promise<WorkbenchEndpointKeySaveResult> {
+      if (!isEndpointKeyEndpointId(endpointId)) {
+        return publicEndpointKeyUnavailable();
+      }
+      const reconstructed =
+        reconstructWorkbenchEndpointKeySaveRequest(request);
+      if (!reconstructed.ok) return publicEndpointKeyInvalidValue();
+      try {
+        return sanitizeWorkbenchEndpointKeySaveResult(
+          await ipc.invoke(
+            WORKBENCH_ENDPOINT_KEY_CHANNELS[endpointId].save,
+            Object.freeze({ keyValue: reconstructed.keyValue }),
+          ),
+        );
+      } catch {
+        return publicEndpointKeyUnavailable();
+      }
+    },
+    async removeEndpointKey(
+      endpointId: WorkbenchEndpointKeyEndpointId,
+    ): Promise<WorkbenchEndpointKeyRemoveResult> {
+      if (!isEndpointKeyEndpointId(endpointId)) {
+        return publicEndpointKeyUnavailable();
+      }
+      try {
+        return sanitizeWorkbenchEndpointKeyRemoveResult(
+          await ipc.invoke(WORKBENCH_ENDPOINT_KEY_CHANNELS[endpointId].remove),
+        );
+      } catch {
+        return publicEndpointKeyUnavailable();
+      }
+    },
+    async revealEndpointKey(
+      endpointId: WorkbenchEndpointKeyEndpointId,
+    ): Promise<WorkbenchEndpointKeyRevealResult> {
+      if (!isEndpointKeyEndpointId(endpointId)) {
+        return publicEndpointKeyUnavailable();
+      }
+      try {
+        return sanitizeWorkbenchEndpointKeyRevealResult(
+          await ipc.invoke(WORKBENCH_ENDPOINT_KEY_CHANNELS[endpointId].reveal),
+        );
+      } catch {
+        return publicEndpointKeyUnavailable();
+      }
+    },
+    async probeEndpointKey(
+      endpointId: WorkbenchEndpointKeyEndpointId,
+    ): Promise<WorkbenchEndpointProbeResult> {
+      if (!isEndpointKeyEndpointId(endpointId)) {
+        return publicEndpointKeyUnavailable();
+      }
+      try {
+        return sanitizeWorkbenchEndpointProbeResult(
+          await ipc.invoke(WORKBENCH_ENDPOINT_KEY_CHANNELS[endpointId].probe),
+        );
+      } catch {
+        return publicEndpointKeyUnavailable();
+      }
+    },
+    async loadEndpointCatalogFreshness(): Promise<WorkbenchEndpointCatalogFreshnessResult> {
+      try {
+        return sanitizeWorkbenchEndpointCatalogFreshnessResult(
+          await ipc.invoke(WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL),
+        );
+      } catch {
+        return publicEndpointCatalogFreshnessUnavailable();
+      }
+    },
+    async refreshEndpointCatalogFreshness(): Promise<WorkbenchEndpointCatalogFreshnessResult> {
+      try {
+        return sanitizeWorkbenchEndpointCatalogFreshnessResult(
+          await ipc.invoke(
+            WORKBENCH_REFRESH_ENDPOINT_CATALOG_FRESHNESS_CHANNEL,
+          ),
+        );
+      } catch {
+        return publicEndpointCatalogFreshnessUnavailable();
+      }
+    },
+    async checkCliUpdates(): Promise<WorkbenchCliUpdateCheckResult> {
+      try {
+        return sanitizeWorkbenchCliUpdateCheckResult(
+          await ipc.invoke(WORKBENCH_CHECK_CLI_UPDATES_CHANNEL),
+        );
+      } catch {
+        return publicCliUpdateCheckUnavailable();
+      }
+    },
+    async runCliUpdate(
+      cliId: WorkbenchCliUpdateCliId,
+    ): Promise<WorkbenchCliUpdateRunResult> {
+      const reconstructed = reconstructWorkbenchCliUpdateRunRequest(cliId);
+      if (!reconstructed.ok) return publicCliUpdateRunUnavailable();
+      try {
+        return sanitizeWorkbenchCliUpdateRunResult(
+          await ipc.invoke(WORKBENCH_RUN_CLI_UPDATE_CHANNEL, reconstructed.value),
+          reconstructed.value,
+        );
+      } catch {
+        return publicCliUpdateRunUnavailable();
+      }
+    },
+    async relaunchApp(): Promise<WorkbenchCliUpdateRelaunchResult> {
+      try {
+        const result = await ipc.invoke(WORKBENCH_RELAUNCH_APP_CHANNEL);
+        return sanitizeWorkbenchCliUpdateRelaunchResult(result);
+      } catch {
+        return publicCliUpdateRelaunchUnavailable();
+      }
+    },
     async loadRuntimeExecutables(): Promise<WorkbenchRuntimeExecutablesLoadResult> {
       try {
         return sanitizeWorkbenchRuntimeExecutablesLoadResult(
@@ -798,6 +1089,23 @@ export function createWorkbenchPreloadBridge(
         return publicUnavailableSubmission();
       }
     },
+    observeUserInput(listener: () => void): () => void {
+      const handler: ProjectViewIpcListener = (_event, value) => { if (value === null) listener(); };
+      ipc.on(WORKBENCH_USER_INPUT_CHANGED_CHANNEL, handler);
+      return () => ipc.removeListener(WORKBENCH_USER_INPUT_CHANGED_CHANNEL, handler);
+    },
+    async readUserInput(request: WorkbenchUserInputReadRequest): Promise<WorkbenchUserInputResult> {
+      const parsed = reconstructUserInputRead(request);
+      if (!parsed) return { ok: false };
+      try { return sanitizeUserInputResult(await ipc.invoke(WORKBENCH_READ_USER_INPUT_CHANNEL, parsed)); }
+      catch { return { ok: false }; }
+    },
+    async respondToUserInput(request: WorkbenchUserInputResponse): Promise<WorkbenchUserInputResponseResult> {
+      const parsed = reconstructUserInputResponse(request);
+      if (!parsed) return { status: "invalid-answer" };
+      try { return sanitizeUserInputResponseResult(await ipc.invoke(WORKBENCH_RESPOND_USER_INPUT_CHANNEL, parsed)); }
+      catch { return { status: "unavailable" }; }
+    },
     async interruptActiveTurn(
       request: WorkbenchInterruptRequest,
     ): Promise<WorkbenchInterruptResult> {
@@ -883,8 +1191,16 @@ export function createWorkbenchPreloadBridge(
     }
   }
 
-  async function invokeAuthentication(
-    channel:
+  /** Fail-closed membership check: renderer-originated ids are untrusted. */
+  function isEndpointKeyEndpointId(
+    value: WorkbenchEndpointKeyEndpointId,
+  ): boolean {
+    return (
+      WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS as readonly string[]
+    ).includes(value);
+  }
+
+  async function invokeAuthentication(    channel:
       | typeof WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL
       | typeof WORKBENCH_PREPARE_SUBSCRIPTION_AUTHENTICATION_CHANNEL
       | typeof WORKBENCH_BEGIN_SUBSCRIPTION_AUTHENTICATION_CHANNEL

@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -41,6 +42,10 @@ test("only the held turn owner acknowledges release across app-server invocation
   const controlDirectory = join(temporaryRoot, "control");
   const appServerPath = join(projectDirectory, "app-server.cjs");
   const readyPath = join(controlDirectory, "held-runtime-ready.json");
+  const releasePendingPath = join(
+    controlDirectory,
+    "held-runtime-release.pending",
+  );
   const releasePath = join(controlDirectory, "held-runtime-release.txt");
   const exitPath = join(controlDirectory, "held-runtime-exit.json");
   const ownerNonce = randomUUID();
@@ -95,10 +100,11 @@ test("only the held turn owner acknowledges release across app-server invocation
     await waitForChildExit(catalogRuntime);
     const nonTurnAckAbsent = !(await fileExists(exitPath));
 
-    await writeFile(releasePath, `${ownerNonce}\n`, {
+    await writeFile(releasePendingPath, `${ownerNonce}\n`, {
       encoding: "utf8",
       flag: "wx",
     });
+    await rename(releasePendingPath, releasePath);
     await waitForProtocol(
       turnProtocol,
       (messages) =>
@@ -267,15 +273,15 @@ test("F72 held-active driver is explicit, durable, owner-bound, and cleanup-safe
   );
   assert.match(
     heldRuntimeSource,
-    /writeFileSync\([\s\S]*readyPath,[\s\S]*flag: "wx"/u,
+    /function publishControlFile\(targetPath, contents\) \{[\s\S]*writeFileSync\(pendingPath, contents,[\s\S]*flag: "wx"[\s\S]*renameSync\(pendingPath, targetPath\)/u,
   );
   assert.match(heldRuntimeSource, /let heldTurnOwned = false;/u);
   assertOrdered(heldRuntimeSource, [
     "if (!heldTurnOwned) process.exit(exitCode);",
-    "fileSystem.writeFileSync(\n      exitPath,",
+    "publishControlFile(\n      exitPath,",
   ]);
   assertOrdered(heldRuntimeSource, [
-    "fileSystem.writeFileSync(\n      readyPath,",
+    "publishControlFile(\n      readyPath,",
     "heldTurnOwned = true;",
     "waitForRelease();",
   ]);
@@ -298,8 +304,16 @@ test("F72 held-active driver is explicit, durable, owner-bound, and cleanup-safe
   );
   assert.match(
     heldRuntimeRelease,
-    /writeFile\(control\.releasePath, `\$\{control\.ownerNonce\}\\n`, \{[\s\S]*flag: "wx"/u,
+    /const releasePendingPath = join\([\s\S]*control\.controlDirectory,[\s\S]*"held-runtime-release\.pending"[\s\S]*\)/u,
   );
+  assert.match(
+    heldRuntimeRelease,
+    /writeFile\(releasePendingPath, `\$\{control\.ownerNonce\}\\n`, \{[\s\S]*flag: "wx"/u,
+  );
+  assertOrdered(heldRuntimeRelease, [
+    "await writeFile(releasePendingPath,",
+    "await rename(releasePendingPath, control.releasePath);",
+  ]);
   assert.match(heldRuntimeSource, /const SELF_WATCHDOG_MILLISECONDS = \d+;/u);
   assert.match(
     heldRuntimeSource,
@@ -307,7 +321,7 @@ test("F72 held-active driver is explicit, durable, owner-bound, and cleanup-safe
   );
   assert.match(
     heldRuntimeSource,
-    /writeFileSync\([\s\S]*exitPath[\s\S]*schema: "f72-held-codex-runtime-exit-v1"[\s\S]*ownerNonce[\s\S]*flag: "wx"/u,
+    /publishControlFile\([\s\S]*exitPath[\s\S]*schema: "f72-held-codex-runtime-exit-v1"[\s\S]*ownerNonce/u,
   );
   assert.match(
     heldRuntimeSource,

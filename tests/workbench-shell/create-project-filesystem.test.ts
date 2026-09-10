@@ -29,9 +29,37 @@ test("production filesystem never recursively creates a missing parent", async (
   const target = join(missingParent, "New Project");
   const filesystem = createNodeWorkbenchCreateProjectFilesystem();
 
-  assert.equal(await filesystem.createIfAbsent(target), "parent-unavailable");
+  assert.equal(
+    await filesystem.createIfAbsent(target),
+    "parent-directory-missing",
+  );
   await assert.rejects(lstat(missingParent), { code: "ENOENT" });
   await assert.rejects(lstat(target), { code: "ENOENT" });
+});
+
+test("filesystem keeps each unavailable parent cause distinct without creating", async () => {
+  const target = "C:\\owned-test-root\\New Project";
+  const parent = dirname(target);
+  for (const [parentKind, expected] of [
+    ["absent", "parent-directory-missing"],
+    ["file", "parent-is-file"],
+    ["alias", "parent-is-alias"],
+    ["reparse", "parent-is-reparse"],
+    ["unavailable", "parent-unavailable"],
+  ] as const) {
+    let targetProbes = 0;
+    let mkdirCalls = 0;
+    const filesystem = createWorkbenchCreateProjectFilesystem({
+      async inspect(path) {
+        if (path === parent) return parentKind;
+        targetProbes += 1;
+        return "absent";
+      },
+      async mkdir() { mkdirCalls += 1; },
+    });
+    assert.equal(await filesystem.createIfAbsent(target), expected, parentKind);
+    assert.deepEqual({ targetProbes, mkdirCalls }, { targetProbes: 0, mkdirCalls: 0 });
+  }
 });
 
 test("filesystem classifies every preflight collision and atomic-create result with one mkdir maximum", async () => {

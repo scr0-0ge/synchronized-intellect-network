@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
+import { hostedProjectView } from "./w26-hosted-project-view.ts";
+
 import type {
   NormalizedRuntimeEvent,
   ResumableAgentRuntimeAdapter,
@@ -400,7 +402,7 @@ test("an empty registry opens one trusted fallback and same-directory registrati
   const first = await observation.waitFor((result) => result.ok);
   assert.equal(first.ok, true);
   if (!first.ok) assert.fail("Expected an opened fallback Project.");
-  assert.deepEqual(first.view.projectSelection.projects.map((project) => ({
+  assert.deepEqual(hostedProjectView(first).projectSelection.projects.map((project) => ({
     label: project.label,
     availability: project.availability,
     selected: project.selected,
@@ -412,7 +414,7 @@ test("an empty registry opens one trusted fallback and same-directory registrati
     fields: ["availability", "label", "selected", "selectionKey"],
   }]);
   assert.match(
-    first.view.projectSelection.projects[0]?.selectionKey ?? "",
+    hostedProjectView(first).projectSelection.projects[0]?.selectionKey ?? "",
     /^project-selection:/u,
   );
   assert.equal(localFactory.active, 1);
@@ -459,7 +461,7 @@ test("trusted registration and opaque selection serialize close-before-open and 
   });
   const observation = observeHost(host);
   const first = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   assert.equal(first.ok, true);
 
@@ -470,7 +472,7 @@ test("trusted registration and opaque selection serialize close-before-open and 
   });
   const publishedBeforeResolution = observation.results.at(-1);
   assert.equal(publishedBeforeResolution?.ok, true);
-  if (!publishedBeforeResolution?.ok) {
+  if (!publishedBeforeResolution?.ok || !("view" in publishedBeforeResolution)) {
     assert.fail("Expected the target Project view before registration resolved.");
   }
   assert.equal(
@@ -483,13 +485,12 @@ test("trusted registration and opaque selection serialize close-before-open and 
   );
   const second = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[1]?.selected === true,
   );
   if (!second.ok) assert.fail("Expected the second selected Project view.");
   assert.deepEqual(
-    second.view.projectSelection.projects.map((project) => ({
+    hostedProjectView(second).projectSelection.projects.map((project) => ({
       label: project.label,
       availability: project.availability,
       selected: project.selected,
@@ -499,8 +500,8 @@ test("trusted registration and opaque selection serialize close-before-open and 
       { label: "Shared Name", availability: "available", selected: true },
     ],
   );
-  const firstSelectionKey = second.view.projectSelection.projects[0]!.selectionKey;
-  const staleSecondSelectionKey = second.view.projectSelection.projects[1]!.selectionKey;
+  const firstSelectionKey = hostedProjectView(second).projectSelection.projects[0]!.selectionKey;
+  const staleSecondSelectionKey = hostedProjectView(second).projectSelection.projects[1]!.selectionKey;
   assert.notEqual(firstSelectionKey, staleSecondSelectionKey);
   assert.equal(factory.maximumActive, 1);
   assert.deepEqual(factory.events, [
@@ -517,13 +518,12 @@ test("trusted registration and opaque selection serialize close-before-open and 
   });
   const selectedFirstAgain = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[0]?.selected === true,
   );
   if (!selectedFirstAgain.ok) assert.fail("Expected the first Project again.");
   assert.notEqual(
-    selectedFirstAgain.view.projectSelection.projects[1]?.selectionKey,
+    hostedProjectView(selectedFirstAgain).projectSelection.projects[1]?.selectionKey,
     staleSecondSelectionKey,
   );
   const callsBeforeStale = {
@@ -565,7 +565,7 @@ test("trusted registration and opaque selection serialize close-before-open and 
   const restartedView = await observeFirst(restarted);
   if (!restartedView.ok) assert.fail("Expected the durable selected Project.");
   assert.deepEqual(
-    restartedView.view.projectSelection.projects.map((project) => ({
+    hostedProjectView(restartedView).projectSelection.projects.map((project) => ({
       label: project.label,
       selected: project.selected,
     })),
@@ -581,6 +581,112 @@ test("trusted registration and opaque selection serialize close-before-open and 
   );
   assert.equal(restartedFactory.maximumActive, 1);
   await restarted.close();
+});
+
+test("a stalled availability probe becomes unreadable without blocking Project operations", async (t) => {
+  const root = await createTestDirectory(t, join(tmpdir(), "workbench-project-availability-"));
+  const firstDirectory = join(root, "First Project");
+  const secondDirectory = join(root, "Second Project");
+  const thirdDirectory = join(root, "Third Project");
+  const dataDirectory = join(root, "private-data");
+  await mkdir(firstDirectory);
+  await mkdir(secondDirectory);
+  await mkdir(thirdDirectory);
+
+  const factory = new RecordingBackendFactory();
+  let stallFirstProject = false;
+  let releaseStalledProbes!: () => void;
+  const stalledProbes = new Promise<void>((resolve) => {
+    releaseStalledProbes = resolve;
+  });
+  registerTestCleanup(t, () => releaseStalledProbes());
+  const host = await createRegisteredWorkbenchProjectHost(t, {
+    dataDirectory,
+    fallbackProjectDirectory: firstDirectory,
+    availabilityProbeTimeoutMilliseconds: 25,
+    availabilityProbe: async (directory) => {
+      if (stallFirstProject && directory === firstDirectory) {
+        await stalledProbes;
+      }
+      return "available";
+    },
+    backendFactory: factory.create,
+  });
+  const observation = observeHost(host);
+  await observation.waitFor(
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
+  );
+
+  stallFirstProject = true;
+  const registration = host.registerTrustedProject(secondDirectory);
+  let testDeadline: ReturnType<typeof setTimeout> | undefined;
+  const firstOutcome = await Promise.race([
+    registration.finally(() => {
+      if (testDeadline !== undefined) clearTimeout(testDeadline);
+    }),
+    new Promise<"test-deadline">((resolve) => {
+      testDeadline = setTimeout(() => resolve("test-deadline"), 1_000);
+    }),
+  ]);
+  if (firstOutcome === "test-deadline") {
+    const blockedFollowUp = await host.registerTrustedProject(thirdDirectory);
+    assert.notEqual(
+      firstOutcome,
+      "test-deadline",
+      `the original open stayed pending and the follow-up returned ${JSON.stringify(blockedFollowUp)}`,
+    );
+  }
+  assert.deepEqual(firstOutcome, {
+    ok: true,
+    status: "selected",
+    message: "Project was opened.",
+  });
+
+  const secondView = await observation.waitFor(
+    (result) =>
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
+      result.view.projectSelection.projects[1]?.selected === true,
+  );
+  if (!secondView.ok) assert.fail("Expected the second Project view.");
+  assert.deepEqual(
+    hostedProjectView(secondView).projectSelection.projects.map((project) => ({
+      label: project.label,
+      availability: project.availability,
+      selected: project.selected,
+    })),
+    [
+      { label: "First Project", availability: "unreadable", selected: false },
+      { label: "Second Project", availability: "available", selected: true },
+    ],
+  );
+
+  const firstSelectionKey = hostedProjectView(secondView).projectSelection.projects[0]!.selectionKey;
+  assert.deepEqual(await host.selectProject({ selectionKey: firstSelectionKey }), {
+    ok: false,
+    error: {
+      category: "project-unavailable",
+      message:
+        "This Project is unavailable. Choose another Project or restore its directory.",
+    },
+  });
+
+  assert.deepEqual(await host.registerTrustedProject(thirdDirectory), {
+    ok: true,
+    status: "selected",
+    message: "Project was opened.",
+  });
+  const thirdView = await observation.waitFor(
+    (result) =>
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 3 &&
+      result.view.projectSelection.projects[2]?.selected === true,
+  );
+  if (!thirdView.ok) assert.fail("Expected the third Project view.");
+  assert.equal(
+    hostedProjectView(thirdView).projectSelection.projects[0]?.availability,
+    "unreadable",
+  );
+  assert.equal(factory.maximumActive, 1);
+  observation.dispose();
 });
 
 test("changed trusted registration waits for its first sanitized target projection", async (t) => {
@@ -633,7 +739,7 @@ test("changed trusted registration waits for its first sanitized target projecti
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
 
   let registrationSettled = false;
@@ -651,7 +757,7 @@ test("changed trusted registration waits for its first sanitized target projecti
   assert.equal(
     observation.results.some(
       (result) =>
-        result.ok && result.view.projectSelection.projects.length === 2,
+        result.ok && "view" in result && result.view.projectSelection.projects.length === 2,
     ),
     false,
   );
@@ -659,8 +765,7 @@ test("changed trusted registration waits for its first sanitized target projecti
   releaseTargetObservation();
   const target = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[1]?.selected === true,
   );
   publicationOrder.push("target-published");
@@ -720,7 +825,7 @@ test("a terminally failed first target projection cannot report successful regis
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
 
   assert.deepEqual(await host.registerTrustedProject(secondDirectory), {
@@ -745,8 +850,7 @@ test("a terminally failed first target projection cannot report successful regis
   assert.equal(targetOpenCalls, 2);
   await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects[1]?.selected === true,
+      result.ok && "view" in result && result.view.projectSelection.projects[1]?.selected === true,
   );
   assert.equal(factory.maximumActive, 1);
 
@@ -771,12 +875,12 @@ test("restart keeps an unavailable durable selection visible and never substitut
   });
   const initialObservation = observeHost(initial);
   await initialObservation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   assert.equal((await initial.registerTrustedProject(missingDirectory)).ok, true);
   await initialObservation.waitFor(
     (result) =>
-      result.ok && result.view.projectSelection.projects[1]?.selected === true,
+      result.ok && "view" in result && result.view.projectSelection.projects[1]?.selected === true,
   );
   initialObservation.dispose();
   await initial.close();
@@ -793,18 +897,18 @@ test("restart keeps an unavailable durable selection visible and never substitut
   const observation = observeHost(restarted);
   const unavailable = await observation.waitFor((result) => {
     if (!result.ok) return false;
-    const selected = result.view.projectSelection.projects.find(
+    const selected = hostedProjectView(result).projectSelection.projects.find(
       (project) => project.selected,
     );
     return selected?.availability === "missing";
   });
   if (!unavailable.ok) assert.fail("Expected the unavailable Project list.");
   assert.equal(restartedFactory.opened.length, 0);
-  assert.equal(unavailable.view.project.label, "Missing Project");
-  const availableOption = unavailable.view.projectSelection.projects[0]!;
-  const missingOption = unavailable.view.projectSelection.projects[1]!;
+  assert.equal(hostedProjectView(unavailable).project.label, "Missing Project");
+  const availableOption = hostedProjectView(unavailable).projectSelection.projects[0]!;
+  const missingOption = hostedProjectView(unavailable).projectSelection.projects[1]!;
   assert.deepEqual(
-    unavailable.view.projectSelection.projects.map((project) => ({
+    hostedProjectView(unavailable).projectSelection.projects.map((project) => ({
       label: project.label,
       availability: project.availability,
       selected: project.selected,
@@ -844,7 +948,7 @@ test("restart keeps an unavailable durable selection visible and never substitut
   );
   await observation.waitFor(
     (result) =>
-      result.ok && result.view.projectSelection.projects[0]?.selected === true,
+      result.ok && "view" in result && result.view.projectSelection.projects[0]?.selected === true,
   );
   assert.equal(restartedFactory.opened.length, 1);
   assert.equal(restartedFactory.maximumActive, 1);
@@ -873,11 +977,11 @@ test("a failed registry commit closes the candidate and restores the prior Proje
   });
   const observation = observeHost(host);
   const initial = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   if (!initial.ok) assert.fail("Expected the initial Project.");
   const initialSelectionKey =
-    initial.view.projectSelection.projects[0]!.selectionKey;
+    hostedProjectView(initial).projectSelection.projects[0]!.selectionKey;
   const registryPath = join(dataDirectory, "project-registry-v1.json");
   const committedBefore = await readFile(registryPath);
 
@@ -891,8 +995,7 @@ test("a failed registry commit closes the candidate and restores the prior Proje
   });
   const restored = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 1 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 1 &&
       result.view.projectSelection.projects[0]?.selectionKey !==
         initialSelectionKey,
   );
@@ -1031,30 +1134,29 @@ test("a pending Project action blocks switching and terminal close waits for the
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   assert.equal((await host.registerTrustedProject(secondDirectory)).ok, true);
   const selectedSecond = await observation.waitFor(
     (result) =>
-      result.ok && result.view.projectSelection.projects[1]?.selected === true,
+      result.ok && "view" in result && result.view.projectSelection.projects[1]?.selected === true,
   );
   if (!selectedSecond.ok) assert.fail("Expected the second Project.");
   assert.equal(
     (await host.selectProject({
       selectionKey:
-        selectedSecond.view.projectSelection.projects[0]!.selectionKey,
+        hostedProjectView(selectedSecond).projectSelection.projects[0]!.selectionKey,
     })).ok,
     true,
   );
   const selectedFirst = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[0]?.selected === true,
   );
   if (!selectedFirst.ok) assert.fail("Expected the first Project.");
   const secondSelectionKey =
-    selectedFirst.view.projectSelection.projects[1]!.selectionKey;
+    hostedProjectView(selectedFirst).projectSelection.projects[1]!.selectionKey;
   const registryPath = join(dataDirectory, "project-registry-v1.json");
   const committedBefore = await readFile(registryPath);
   const callsBefore = {
@@ -1130,7 +1232,7 @@ test("terminal close joins an in-progress open and rejects concurrent or post-cl
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   const registryPath = join(dataDirectory, "project-registry-v1.json");
   const committedBefore = await readFile(registryPath);
@@ -1208,11 +1310,11 @@ test("target open failure restores the prior Project and preserves the durable s
   });
   const observation = observeHost(host);
   const initial = await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   if (!initial.ok) assert.fail("Expected the initial Project.");
   const originalSelectionKey =
-    initial.view.projectSelection.projects[0]!.selectionKey;
+    hostedProjectView(initial).projectSelection.projects[0]!.selectionKey;
   const registryPath = join(dataDirectory, "project-registry-v1.json");
   const committedBefore = await readFile(registryPath);
   factory.failOpenDirectories.add(secondDirectory);
@@ -1227,8 +1329,7 @@ test("target open failure restores the prior Project and preserves the durable s
   });
   const restored = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 1 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 1 &&
       result.view.projectSelection.projects[0]?.selectionKey !==
         originalSelectionKey,
   );
@@ -1262,7 +1363,7 @@ test("a prior backend close failure fails fixed without opening a second Project
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   const registryPath = join(dataDirectory, "project-registry-v1.json");
   const committedBefore = await readFile(registryPath);
@@ -1331,12 +1432,12 @@ test("rename-then-throw is reconciled as committed and restart cleans bounded re
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   assert.equal((await host.registerTrustedProject(secondDirectory)).ok, true);
   const selectedSecond = await observation.waitFor(
     (result) =>
-      result.ok && result.view.projectSelection.projects[1]?.selected === true,
+      result.ok && "view" in result && result.view.projectSelection.projects[1]?.selected === true,
   );
   assert.equal(selectedSecond.ok, true);
   assert.equal(promotions, 2);
@@ -1360,7 +1461,7 @@ test("rename-then-throw is reconciled as committed and restart cleans bounded re
   });
   const reopened = await observeFirst(restarted);
   if (!reopened.ok) assert.fail("Expected the committed selected Project.");
-  assert.equal(reopened.view.project.label, "Second Project");
+  assert.equal(hostedProjectView(reopened).project.label, "Second Project");
   assert.deepEqual(await readFile(registryPath), committed);
   await assert.rejects(readFile(replacementPath), { code: "ENOENT" });
   await assert.rejects(readFile(backupPath), { code: "ENOENT" });
@@ -1417,7 +1518,7 @@ test("a failed explicit startup registration safely restores the previously sele
   });
   const reopened = await observeFirst(restarted);
   if (!reopened.ok) assert.fail("Expected the prior selected Project.");
-  assert.equal(reopened.view.project.label, "First Project");
+  assert.equal(hostedProjectView(reopened).project.label, "First Project");
   assert.equal(restartedFactory.active, 1);
   assert.equal(restartedFactory.maximumActive, 1);
   assert.deepEqual(restartedFactory.events, [
@@ -1455,7 +1556,7 @@ test("an explicit trusted startup directory registers once and becomes the durab
   const explicitView = await observeFirst(explicit);
   if (!explicitView.ok) assert.fail("Expected the explicit startup Project.");
   assert.deepEqual(
-    explicitView.view.projectSelection.projects.map((project) => ({
+    hostedProjectView(explicitView).projectSelection.projects.map((project) => ({
       label: project.label,
       selected: project.selected,
     })),
@@ -1480,7 +1581,7 @@ test("an explicit trusted startup directory registers once and becomes the durab
   const durableView = await observeFirst(durable);
   if (!durableView.ok) assert.fail("Expected the durable startup selection.");
   assert.equal(
-    durableView.view.projectSelection.projects[1]?.selected,
+    hostedProjectView(durableView).projectSelection.projects[1]?.selected,
     true,
   );
   assert.equal(durableFactory.opened[0]?.projectDirectory, secondDirectory);
@@ -1602,8 +1703,7 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   const observation = observeHost(host);
   const emptyFirst = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.project.label === "Shared Name" &&
+      result.ok && "view" in result && result.view.project.label === "Shared Name" &&
       result.view.projectSelection.projects.length === 1 &&
       result.view.commands.length === 0,
   );
@@ -1637,14 +1737,13 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   const firstCompleted = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands.length === 1 &&
+      result.ok && "view" in result && result.view.commands.length === 1 &&
       result.view.commands[0]?.status === "completed",
   );
   if (!firstCompleted.ok) assert.fail("Expected the first completed Session.");
-  assert.equal(firstCompleted.view.initialSelectionKey, "command-1");
+  assert.equal(hostedProjectView(firstCompleted).initialSelectionKey, "command-1");
   assert.deepEqual(
-    firstCompleted.view.commands[0]?.session?.timeline,
+    hostedProjectView(firstCompleted).commands[0]?.session?.timeline,
     firstTimeline,
   );
   const firstCapability = adapter.starts[0]!.capability;
@@ -1653,8 +1752,7 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   assert.equal((await host.registerTrustedProject(secondDirectory)).ok, true);
   const emptySecond = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[1]?.selected === true &&
       result.view.commands.length === 0,
   );
@@ -1688,27 +1786,26 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   const secondBarrier = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects[1]?.selected === true &&
+      result.ok && "view" in result && result.view.projectSelection.projects[1]?.selected === true &&
       result.view.commands[0]?.status === "recovery-required",
   );
   if (!secondBarrier.ok) assert.fail("Expected the isolated recovery barrier.");
-  assert.equal(secondBarrier.view.initialSelectionKey, "command-1");
-  assert.equal(secondBarrier.view.commands.length, 1);
+  assert.equal(hostedProjectView(secondBarrier).initialSelectionKey, "command-1");
+  assert.equal(hostedProjectView(secondBarrier).commands.length, 1);
   assert.deepEqual(
-    secondBarrier.view.commands[0]?.session?.timeline,
+    hostedProjectView(secondBarrier).commands[0]?.session?.timeline,
     secondRecoveryTimeline,
   );
   assert.deepEqual(
     await host.removeProject({
       selectionKey:
-        secondBarrier.view.projectSelection.projects[1]!.selectionKey,
+        hostedProjectView(secondBarrier).projectSelection.projects[1]!.selectionKey,
     }),
     { status: "blocked", activity: "unknown" },
     "a recovery-required real ledger must make Project removal fail closed",
   );
   const selectFirstKey =
-    secondBarrier.view.projectSelection.projects[0]!.selectionKey;
+    hostedProjectView(secondBarrier).projectSelection.projects[0]!.selectionKey;
 
   const beforeFirstReturn = runtimeCounts(adapter);
   assert.equal(
@@ -1717,21 +1814,20 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   const returnedFirst = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[0]?.selected === true &&
       result.view.commands[0]?.status === "completed",
   );
   if (!returnedFirst.ok) assert.fail("Expected the first Project ledger.");
   assert.deepEqual(runtimeCounts(adapter), beforeFirstReturn);
-  assert.equal(returnedFirst.view.commands.length, 1);
-  assert.equal(returnedFirst.view.initialSelectionKey, "command-1");
+  assert.equal(hostedProjectView(returnedFirst).commands.length, 1);
+  assert.equal(hostedProjectView(returnedFirst).initialSelectionKey, "command-1");
   assert.deepEqual(
-    returnedFirst.view.commands[0]?.session?.timeline,
+    hostedProjectView(returnedFirst).commands[0]?.session?.timeline,
     firstTimeline,
   );
   const firstContinuationKey =
-    returnedFirst.view.commands[0]?.session?.selectionKey;
+    hostedProjectView(returnedFirst).commands[0]?.session?.selectionKey;
   assert.match(firstContinuationKey ?? "", /^session-selection:/u);
   if (typeof firstContinuationKey !== "string") {
     assert.fail("Expected a resumable first Session.");
@@ -1763,25 +1859,22 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   const continuedFirst = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects[0]?.selected === true &&
+      result.ok && "view" in result && result.view.projectSelection.projects[0]?.selected === true &&
       result.view.commands[0]?.session?.timeline.length ===
         continuedFirstTimeline.length,
   );
   if (!continuedFirst.ok) assert.fail("Expected the continued first Session.");
   assert.deepEqual(
-    continuedFirst.view.commands[0]?.session?.timeline,
+    hostedProjectView(continuedFirst).commands[0]?.session?.timeline,
     continuedFirstTimeline,
   );
-  assert.equal(adapter.resumes.length, 1);
-  assert.equal(adapter.resumes[0]?.projectDirectory, firstDirectory);
-  assert.equal(adapter.resumes[0]?.opaqueSessionReference, firstCapability);
-  assert.equal(
-    adapter.resumes.some(
-      (resume) => resume.projectDirectory === secondDirectory,
-    ),
-    false,
-  );
+  assert.equal(adapter.resumes.length, 2);
+  assert.equal(adapter.resumes[0]?.projectDirectory, secondDirectory, "only the second Project's unknown turn needed a resume check");
+  assert.equal(adapter.resumes[0]?.opaqueSessionReference, adapter.starts[1]?.capability);
+  assert.equal(adapter.resumes[1]?.projectDirectory, firstDirectory);
+  assert.equal(adapter.resumes[1]?.opaqueSessionReference, firstCapability);
+  assert.deepEqual(adapter.inputs.filter(input => input.projectDirectory === secondDirectory).map(input => input.text), [secondRecoveryInstruction],
+    "checking the second Project must not send its input again");
 
   const firstDatabasePath = opened.find(
     (entry) => entry.projectDirectory === firstDirectory,
@@ -1804,20 +1897,19 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   const restartedObservation = observeHost(restarted);
   const restartedFirst = await restartedObservation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects[0]?.selected === true &&
+      result.ok && "view" in result && result.view.projectSelection.projects[0]?.selected === true &&
       result.view.commands[0]?.session?.timeline.length ===
         continuedFirstTimeline.length,
   );
   if (!restartedFirst.ok) assert.fail("Expected the durable first Project.");
   assert.deepEqual(
-    restartedFirst.view.commands[0]?.session?.timeline,
+    hostedProjectView(restartedFirst).commands[0]?.session?.timeline,
     continuedFirstTimeline,
   );
   assert.deepEqual(runtimeCounts(adapter), beforeClose);
   assert.equal(opened.at(-1)?.databasePath, firstDatabasePath);
   const selectSecondKey =
-    restartedFirst.view.projectSelection.projects[1]!.selectionKey;
+    hostedProjectView(restartedFirst).projectSelection.projects[1]!.selectionKey;
 
   const beforeSecondReturn = runtimeCounts(adapter);
   assert.equal(
@@ -1826,8 +1918,7 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   const restartedSecond = await restartedObservation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects[1]?.selected === true &&
+      result.ok && "view" in result && result.view.projectSelection.projects[1]?.selected === true &&
       result.view.commands[0]?.status === "recovery-required",
   );
   if (!restartedSecond.ok) assert.fail("Expected the durable second barrier.");
@@ -1842,17 +1933,17 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
     ...beforeSecondReturn,
     inspect: beforeSecondReturn.inspect + 1,
   });
-  assert.equal(restartedSecond.view.commands.length, 1);
+  assert.equal(hostedProjectView(restartedSecond).commands.length, 1);
   assert.deepEqual(
-    restartedSecond.view.commands[0]?.session?.timeline,
+    hostedProjectView(restartedSecond).commands[0]?.session?.timeline,
     secondRecoveryTimeline,
   );
 
   const secondRestartCounts = runtimeCounts(adapter);
   const staleFirstProjectSelectionKey =
-    restartedFirst.view.projectSelection.projects[0]!.selectionKey;
+    hostedProjectView(restartedFirst).projectSelection.projects[0]!.selectionKey;
   const selectFirstAgainKey =
-    restartedSecond.view.projectSelection.projects[0]!.selectionKey;
+    hostedProjectView(restartedSecond).projectSelection.projects[0]!.selectionKey;
   assert.equal(
     (
       await restarted.selectProject({
@@ -1863,8 +1954,7 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   const finalFirst = await restartedObservation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects[0]?.selected === true &&
+      result.ok && "view" in result && result.view.projectSelection.projects[0]?.selected === true &&
       result.view.projectSelection.projects[0]?.selectionKey !==
         staleFirstProjectSelectionKey &&
       result.view.commands[0]?.session?.timeline.length ===
@@ -1872,13 +1962,13 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   if (!finalFirst.ok) assert.fail("Expected the first Project after restart.");
   assert.deepEqual(
-    finalFirst.view.commands[0]?.session?.timeline,
+    hostedProjectView(finalFirst).commands[0]?.session?.timeline,
     continuedFirstTimeline,
   );
   assert.deepEqual(runtimeCounts(adapter), secondRestartCounts);
   assert.equal(opened.at(-1)?.databasePath, firstDatabasePath);
   const restartedContinuationKey =
-    finalFirst.view.commands[0]?.session?.selectionKey;
+    hostedProjectView(finalFirst).commands[0]?.session?.selectionKey;
   if (typeof restartedContinuationKey !== "string") {
     assert.fail("Expected a durable resumable first Session.");
   }
@@ -1910,23 +2000,22 @@ test("two same-basename Projects keep real ledgers, Sessions, timelines, capabil
   );
   const finalContinued = await restartedObservation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands[0]?.session?.timeline.length ===
+      result.ok && "view" in result && result.view.commands[0]?.session?.timeline.length ===
         finalFirstTimeline.length,
   );
   if (!finalContinued.ok) assert.fail("Expected durable continuation after restart.");
   assert.deepEqual(
-    finalContinued.view.commands[0]?.session?.timeline,
+    hostedProjectView(finalContinued).commands[0]?.session?.timeline,
     finalFirstTimeline,
   );
-  assert.equal(adapter.resumes.length, 2);
-  assert.equal(adapter.resumes[1]?.projectDirectory, firstDirectory);
-  assert.equal(adapter.resumes[1]?.opaqueSessionReference, firstCapability);
+  assert.equal(adapter.resumes.length, 3);
+  assert.equal(adapter.resumes[2]?.projectDirectory, firstDirectory);
+  assert.equal(adapter.resumes[2]?.opaqueSessionReference, firstCapability);
   assert.equal(maximumActiveBackends, 1);
   assert.deepEqual(runtimeCounts(adapter), {
     inspect: 7,
     start: 2,
-    resume: 2,
+    resume: 3,
     send: 4,
   });
 
@@ -1982,18 +2071,17 @@ test("removing a Project forgets only its registry reference and stays removed a
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.projectSelection.projects.length === 1,
+    (result) => result.ok && "view" in result && result.view.projectSelection.projects.length === 1,
   );
   assert.equal((await host.registerTrustedProject(secondDirectory)).ok, true);
   const selectedSecond = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 2 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 2 &&
       result.view.projectSelection.projects[1]?.selected === true,
   );
   if (!selectedSecond.ok) assert.fail("Expected the second Project selection.");
   const firstSelectionKey =
-    selectedSecond.view.projectSelection.projects[0]!.selectionKey;
+    hostedProjectView(selectedSecond).projectSelection.projects[0]!.selectionKey;
 
   assert.deepEqual(
     await host.removeProject({ selectionKey: firstSelectionKey }),
@@ -2001,8 +2089,7 @@ test("removing a Project forgets only its registry reference and stays removed a
   );
   const oneRemaining = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.projectSelection.projects.length === 1 &&
+      result.ok && "view" in result && result.view.projectSelection.projects.length === 1 &&
       result.view.projectSelection.projects[0]?.label === "Second Project",
   );
   assert.equal(oneRemaining.ok, true);
@@ -2019,7 +2106,7 @@ test("removing a Project forgets only its registry reference and stays removed a
   const restartedView = await observeFirst(restarted);
   if (!restartedView.ok) assert.fail("Expected the remaining Project after restart.");
   assert.deepEqual(
-    restartedView.view.projectSelection.projects.map((project) => project.label),
+    hostedProjectView(restartedView).projectSelection.projects.map((project) => project.label),
     ["Second Project"],
   );
   assert.equal((await stat(sourceSentinel)).isFile(), true);
@@ -2039,7 +2126,7 @@ test("a real Session hard delete refreshes the already-attached host observation
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.commands.length === 0,
+    (result) => result.ok && "view" in result && result.view.commands.length === 0,
   );
   const loaded = await host.loadDirectSessionProfile({ kind: "catalog-default" });
   if (!loaded.ok) assert.fail("Expected one direct Session profile.");
@@ -2063,26 +2150,24 @@ test("a real Session hard delete refreshes the already-attached host observation
   );
   const completed = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands.length === 1 &&
+      result.ok && "view" in result && result.view.commands.length === 1 &&
       result.view.commands[0]?.status === "completed",
   );
   if (!completed.ok) assert.fail("Expected one completed Session.");
-  const removalKey = completed.view.commands[0]?.session?.removalKey;
+  const removalKey = hostedProjectView(completed).commands[0]?.session?.removalKey;
   assert.ok(removalKey !== undefined);
-  const terminalCursor = completed.view.observation.cursor;
+  const terminalCursor = hostedProjectView(completed).observation.cursor;
 
   assert.deepEqual(await host.removeSession({ removalKey }), { status: "removed" });
   const refreshed = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands.length === 0 &&
+      result.ok && "view" in result && result.view.commands.length === 0 &&
       result.view.observation.cursor === terminalCursor,
   );
   assert.equal(refreshed.ok, true);
 
   const replayed = await observeFirst(host);
-  assert.equal(replayed.ok && replayed.view.commands.length === 0, true);
+  assert.equal(replayed.ok && "view" in replayed && replayed.view.commands.length === 0, true);
   observation.dispose();
   await host.close();
 });
@@ -2101,7 +2186,7 @@ test("real host rename, archive, restart, restore, and D16 delete use rotating o
   });
   const observation = observeHost(host);
   await observation.waitFor(
-    (result) => result.ok && result.view.commands.length === 0,
+    (result) => result.ok && "view" in result && result.view.commands.length === 0,
   );
   const loaded = await host.loadDirectSessionProfile({ kind: "catalog-default" });
   if (!loaded.ok) assert.fail("Expected one synthetic Session profile.");
@@ -2124,12 +2209,12 @@ test("real host rename, archive, restart, restore, and D16 delete use rotating o
   );
   const completed = await observation.waitFor(
     (result) =>
-      result.ok && result.view.commands[0]?.status === "completed",
+      result.ok && "view" in result && result.view.commands[0]?.status === "completed",
   );
   if (!completed.ok) assert.fail("Expected one completed synthetic Session.");
-  const initialCommand = completed.view.commands[0]!;
+  const initialCommand = hostedProjectView(completed).commands[0]!;
   assert.ok(initialCommand.session);
-  const terminalCursor = completed.view.observation.cursor;
+  const terminalCursor = hostedProjectView(completed).observation.cursor;
   const initialMetadataKey = initialCommand.session.metadataKey;
   const initialTimeline = structuredClone(initialCommand.session.timeline);
 
@@ -2142,12 +2227,11 @@ test("real host rename, archive, restart, restore, and D16 delete use rotating o
   );
   const renamed = await observation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.observation.cursor === terminalCursor &&
+      result.ok && "view" in result && result.view.observation.cursor === terminalCursor &&
       result.view.commands[0]?.label === "Café 工程",
   );
   if (!renamed.ok) assert.fail("Expected the renamed same-cursor projection.");
-  const renamedSession = renamed.view.commands[0]!.session!;
+  const renamedSession = hostedProjectView(renamed).commands[0]!.session!;
   assert.notEqual(renamedSession.metadataKey, initialMetadataKey);
   assert.deepEqual(
     await host.mutateSessionMetadata({
@@ -2167,11 +2251,11 @@ test("real host rename, archive, restart, restore, and D16 delete use rotating o
   );
   const archived = await observation.waitFor(
     (result) =>
-      result.ok && result.view.commands[0]?.session?.archived === true,
+      result.ok && "view" in result && result.view.commands[0]?.session?.archived === true,
   );
   if (!archived.ok) assert.fail("Expected one archived same-cursor projection.");
-  const archivedCommand = archived.view.commands[0]!;
-  assert.equal(archived.view.initialSelectionKey, archivedCommand.key);
+  const archivedCommand = hostedProjectView(archived).commands[0]!;
+  assert.equal(hostedProjectView(archived).initialSelectionKey, archivedCommand.key);
   assert.equal(archivedCommand.session?.resumable, false);
   assert.equal(archivedCommand.session?.selectionKey, null);
   assert.deepEqual(archivedCommand.session?.timeline, initialTimeline);
@@ -2186,10 +2270,10 @@ test("real host rename, archive, restart, restore, and D16 delete use rotating o
   const restartObservation = observeHost(restarted);
   const hydrated = await restartObservation.waitFor(
     (result) =>
-      result.ok && result.view.commands[0]?.session?.archived === true,
+      result.ok && "view" in result && result.view.commands[0]?.session?.archived === true,
   );
   if (!hydrated.ok) assert.fail("Expected durable archived hydration.");
-  const hydratedCommand = hydrated.view.commands[0]!;
+  const hydratedCommand = hostedProjectView(hydrated).commands[0]!;
   assert.equal(hydratedCommand.label, "Café 工程");
   assert.deepEqual(hydratedCommand.session?.timeline, initialTimeline);
 
@@ -2202,10 +2286,10 @@ test("real host rename, archive, restart, restore, and D16 delete use rotating o
   );
   const restored = await restartObservation.waitFor(
     (result) =>
-      result.ok && result.view.commands[0]?.session?.archived === false,
+      result.ok && "view" in result && result.view.commands[0]?.session?.archived === false,
   );
   if (!restored.ok) assert.fail("Expected the restored Session.");
-  const restoredCommand = restored.view.commands[0]!;
+  const restoredCommand = hostedProjectView(restored).commands[0]!;
   assert.equal(restoredCommand.label, "Café 工程");
   assert.equal(restoredCommand.session?.resumable, true);
   assert.deepEqual(restoredCommand.session?.timeline, initialTimeline);
@@ -2219,18 +2303,17 @@ test("real host rename, archive, restart, restore, and D16 delete use rotating o
   );
   const archivedAgain = await restartObservation.waitFor(
     (result) =>
-      result.ok &&
-      result.view.commands[0]?.session?.archived === true &&
+      result.ok && "view" in result && result.view.commands[0]?.session?.archived === true &&
       result.view.commands[0]?.session?.metadataKey !==
         hydratedCommand.session?.metadataKey,
   );
   if (!archivedAgain.ok) assert.fail("Expected the re-archived Session.");
-  const deleteKey = archivedAgain.view.commands[0]!.session!.removalKey;
+  const deleteKey = hostedProjectView(archivedAgain).commands[0]!.session!.removalKey;
   assert.deepEqual(await restarted.removeSession({ removalKey: deleteKey }), {
     status: "removed",
   });
   await restartObservation.waitFor(
-    (result) => result.ok && result.view.commands.length === 0,
+    (result) => result.ok && "view" in result && result.view.commands.length === 0,
   );
   restartObservation.dispose();
   await restarted.close();
@@ -2252,7 +2335,7 @@ test("removing the selected Project is blocked while its turn is active and an e
   });
   const initial = await observeFirst(host);
   if (!initial.ok) assert.fail("Expected the fallback Project.");
-  const selectionKey = initial.view.projectSelection.projects[0]!.selectionKey;
+  const selectionKey = hostedProjectView(initial).projectSelection.projects[0]!.selectionKey;
 
   factory.turnActivity = "in-flight";
   assert.deepEqual(await host.removeProject({ selectionKey }), {
@@ -2275,7 +2358,7 @@ test("removing the selected Project is blocked while its turn is active and an e
     backendFactory: restartedFactory.create,
   });
   assert.equal(restartedFactory.opened.length, 0);
-  assert.equal((await observeFirst(restarted)).ok, false);
+  assert.deepEqual(await observeFirst(restarted), { ok: true, empty: true });
   assert.equal((await stat(sourceSentinel)).isFile(), true);
   await restarted.close();
 });
@@ -2327,7 +2410,7 @@ test("removing the selected Project supersedes a stalled prior projection before
   });
   const initial = await observeFirst(host);
   if (!initial.ok) assert.fail("Expected the initial Project projection.");
-  const selectionKey = initial.view.projectSelection.projects[0]!.selectionKey;
+  const selectionKey = hostedProjectView(initial).projectSelection.projects[0]!.selectionKey;
 
   holdNextProbe = true;
   backendListener?.({
@@ -2349,7 +2432,7 @@ test("removing the selected Project supersedes a stalled prior projection before
     ),
   ]);
   assert.deepEqual(removalBeforeStaleProbeRelease, { status: "removed" });
-  assert.equal((await observeFirst(host)).ok, false);
+  assert.deepEqual(await observeFirst(host), { ok: true, empty: true });
 
   releaseHeldProbe();
   await host.close();
@@ -2367,7 +2450,7 @@ test("Project removal rejects stale, malformed, and widened selection requests",
   const initial = await observeFirst(host);
   if (!initial.ok) assert.fail("Expected the initial Project selection.");
   const validSelectionKey =
-    initial.view.projectSelection.projects[0]!.selectionKey;
+    hostedProjectView(initial).projectSelection.projects[0]!.selectionKey;
 
   for (const request of [
     {},

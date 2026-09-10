@@ -11,6 +11,9 @@ import {
 import {
   appearancePersistenceLabels,
   copyLocaleDictionaries as settingsCopyLocaleDictionaries,
+  deepseekEndpointKeyCopy,
+  glmEndpointKeyCopy,
+  kimiEndpointKeyCopy,
   settingsOtherProvidersCopy,
   settingsProviderStatusMeaningsData as settingsProviderStatusMeanings,
   settingsTopLevelSectionLabels,
@@ -58,6 +61,93 @@ test("Settings English copy exposes Providers, Claude permissions, and Appearanc
     serialized,
     /API key|--bare|OpenCode|Add provider|Connect provider/iu,
   );
+});
+
+test("credential promise is narrowed to the subscription path and the GLM key block states the full DPAPI truth (ADR 0022)", () => {
+  const englishSettings = settingsCopyLocaleDictionaries.en.settingsCopy;
+  assert.equal(
+    englishSettings.credentialHeading,
+    "Subscription credentials never pass through the Workbench",
+  );
+  assert.equal(
+    englishSettings.credentialSentence,
+    "Subscription sign-in happens in each provider's own app. This page never asks for a subscription password or token, never reads a subscription credential file, and never stores subscription credentials. The exceptions — the API keys of the API-key endpoints — are each disclosed in that provider's API key section below.",
+  );
+  assert.equal(
+    settingsCopyLocaleDictionaries["zh-CN"].settingsCopy.credentialHeading,
+    "订阅凭据绝不经过 Workbench",
+  );
+  assert.equal(
+    glmEndpointKeyCopy.heading,
+    "GLM Coding Plan API key",
+  );
+  // ADR 0022 §4: the disclosure must state what is stored, how it is
+  // protected, what that protection stops, and what it does not stop.
+  assert.match(
+    glmEndpointKeyCopy.storageSentence,
+    /encrypted with this OS user account \(DPAPI on Windows\)/u,
+  );
+  assert.match(
+    glmEndpointKeyCopy.protectionSentence,
+    /protects the key against offline disk inspection/u,
+  );
+  assert.match(
+    glmEndpointKeyCopy.protectionSentence,
+    /does not protect the key against processes already running as your user account/u,
+  );
+  // Degraded mode (isPersistent: false) names its consequence explicitly.
+  assert.match(
+    glmEndpointKeyCopy.sessionOnlyLabel,
+    /Valid for this session only/u,
+  );
+  assert.match(glmEndpointKeyCopy.sessionOnlyLabel, /gone after a restart/u);
+
+  // WO16 Part 1: every provider's key copy carries the same two-truth
+  // disclosure, its own env fallback sentence, and — only where the provider
+  // has such rules — its key-handling warning. Kimi: shown once × 5 keys.
+  // DeepSeek: no "plan" wording anywhere in its key copy (ticket 12).
+  assert.equal(kimiEndpointKeyCopy.heading, "Kimi Code API key");
+  const kimiWarning = kimiEndpointKeyCopy.keyHandlingWarning;
+  assert.equal(typeof kimiWarning, "string");
+  assert.match(kimiWarning!, /exactly once/u);
+  assert.match(kimiWarning!, /at most 5 keys/u);
+  assert.match(
+    kimiEndpointKeyCopy.environmentFallbackLabel,
+    /KIMI_CODE_ANTHROPIC_AUTH_TOKEN/u,
+  );
+  assert.match(
+    kimiEndpointKeyCopy.protectionSentence,
+    /does not protect the key against processes already running as your user account/u,
+  );
+  assert.equal(deepseekEndpointKeyCopy.heading, "DeepSeek API key");
+  assert.doesNotMatch(
+    JSON.stringify(deepseekEndpointKeyCopy),
+    /plan/iu,
+  );
+  assert.match(
+    deepseekEndpointKeyCopy.environmentFallbackLabel,
+    /DEEPSEEK_ANTHROPIC_AUTH_TOKEN/u,
+  );
+  assert.equal(
+    deepseekEndpointKeyCopy.keyHandlingWarning,
+    undefined,
+  );
+  // The zh-CN dictionary carries the same per-provider structure.
+  const zhGlm = settingsCopyLocaleDictionaries["zh-CN"].endpointKeyCopy
+    .providers["glm-coding-plan"];
+  assert.equal(zhGlm.heading, "GLM Coding Plan API 密钥");
+  const zhKimi = settingsCopyLocaleDictionaries["zh-CN"].endpointKeyCopy
+    .providers["kimi-code"];
+  assert.equal(typeof zhKimi.keyHandlingWarning, "string");
+  assert.match(zhKimi.keyHandlingWarning!, /仅.*显示一次/u);
+  assert.match(zhKimi.keyHandlingWarning!, /最多允许 5 把/u);
+
+  const serialized = JSON.stringify({
+    heading: glmEndpointKeyCopy.heading,
+    storage: glmEndpointKeyCopy.storageSentence,
+    protection: glmEndpointKeyCopy.protectionSentence,
+  });
+  assert.doesNotMatch(serialized, /never handles credentials/iu);
 });
 
 test("all exact endpoint categories keep not-inspected distinct from unavailable", () => {

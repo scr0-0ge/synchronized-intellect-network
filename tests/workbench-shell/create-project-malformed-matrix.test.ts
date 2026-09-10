@@ -250,7 +250,6 @@ function activeRecord(variant: string, operationNumber = 1): Mutable {
   const record: Mutable = {
     operationNumber,
     phase: response ? "response-ready" : variant,
-    targetPath: selected && !response ? activeTargetPath : null,
     targetToken: selected ? activeTargetToken : null,
     chooserResult: selected ? "selected" : null,
     createResult: null,

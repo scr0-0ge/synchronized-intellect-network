@@ -4,6 +4,7 @@ import {
   createEffect,
   createSignal,
   onCleanup,
+  untrack,
   type Component,
 } from "solid-js";
 
@@ -92,6 +93,8 @@ export const HistoryRecoverySettingsCard: Component<{
     createSignal<HistoryRecoveryBrowseResult | null>(null);
   const [actionResult, setActionResult] =
     createSignal<HistoryRecoveryActionResult | null>(null);
+  const [actionUnavailable, setActionUnavailable] = createSignal(false);
+  const [browseUnavailable, setBrowseUnavailable] = createSignal(false);
   const [pendingOperation, setPendingOperation] = createSignal<{
     readonly operationKey: string;
     readonly label: WorkbenchPresentationText;
@@ -121,6 +124,7 @@ export const HistoryRecoverySettingsCard: Component<{
       focusHistory.length = 0;
       setRoute({ kind: "overview" });
       setBrowseResult(null);
+      untrack(() => { void loadOverview(); });
       queueMicrotask(() => heading?.focus({ preventScroll: true }));
     }
     observedSnapshotKey = snapshotKey;
@@ -136,7 +140,9 @@ export const HistoryRecoverySettingsCard: Component<{
     if (trigger !== undefined) focusHistory.push(trigger);
     setRoute(next);
     setBrowseResult(null);
+    setBrowseUnavailable(false);
     setActionResult(null);
+    setActionUnavailable(false);
     if (next.kind === "overview") {
       void loadOverview();
     } else if (next.kind !== "home") {
@@ -149,9 +155,11 @@ export const HistoryRecoverySettingsCard: Component<{
     if (pendingOperation() !== null) return;
     const current = route();
     if (current.kind === "home") return;
+    setLoadGeneration((value) => value + 1);
+    setBrowseResult(null);
+    setBrowseUnavailable(false);
     if (current.kind === "overview") {
       setRoute({ kind: "home" });
-      setBrowseResult(null);
     } else if (current.kind === "projects") {
       setRoute({ kind: "overview" });
       void loadOverview();
@@ -234,13 +242,20 @@ export const HistoryRecoverySettingsCard: Component<{
     append = false,
   ): Promise<void> => {
     const browse = props.bridge.browse;
-    if (browse === undefined) return;
     const generation = loadGeneration() + 1;
     setLoadGeneration(generation);
+    setBrowseUnavailable(false);
+    if (browse === undefined) {
+      setBrowseUnavailable(true);
+      return;
+    }
     let result: HistoryRecoveryBrowseResult;
     try {
       result = await browse(request);
     } catch {
+      if (active && generation === loadGeneration()) {
+        setBrowseUnavailable(true);
+      }
       return;
     }
     if (!active || generation !== loadGeneration()) return;
@@ -324,6 +339,7 @@ export const HistoryRecoverySettingsCard: Component<{
     const operationKey = recoveryKey("operation");
     setPendingOperation({ operationKey, label });
     setActionResult(null);
+    setActionUnavailable(false);
     const common = {
       version: 1 as const,
       action,
@@ -370,6 +386,9 @@ export const HistoryRecoverySettingsCard: Component<{
         queueMicrotask(() => heading?.focus({ preventScroll: true }));
       }
     } catch {
+      if (active && pendingOperation()?.operationKey === operationKey) {
+        setActionUnavailable(true);
+      }
       props.onRefresh();
     } finally {
       if (active && pendingOperation()?.operationKey === operationKey) {
@@ -394,6 +413,14 @@ export const HistoryRecoverySettingsCard: Component<{
     return result?.status === "ready" ? result : null;
   };
   const items = () => readyBrowse()?.page.items ?? [];
+  const activeGenerationKey = (): string | null => {
+    const current = route();
+    return current.kind === "projects" ||
+        current.kind === "sessions" ||
+        current.kind === "turns"
+      ? current.generationKey
+      : null;
+  };
 
   return (
     <Show when={historyRecoveryCardVisible(props.result)}>
@@ -425,7 +452,12 @@ export const HistoryRecoverySettingsCard: Component<{
           </Show>
         </div>
 
-        <Show when={historyRecoveryNeedsAttention(props.result)}>
+        <Show
+          when={
+            props.result?.status !== "unavailable" &&
+            historyRecoveryNeedsAttention(props.result)
+          }
+        >
           <p class="history-recovery-attention" role="status">
             {historyRecoveryCopy.attention}
           </p>
@@ -469,13 +501,19 @@ export const HistoryRecoverySettingsCard: Component<{
                         )}
                       </strong>
                       <span>
-                        {source.counts === null
-                          ? historyRecoveryCopy.metadataUnavailable
-                          : countsLabel(source.counts)}
+                        {sourceMetadataLabel(source)}
                       </span>
+                      <Show when={source.state === "unavailable"}>
+                        <span role="alert">
+                          {historyRecoveryCopy.unavailableSourceGuidance}
+                        </span>
+                      </Show>
+                      <Show when={sourceInventoryUnreadable(source)}>
+                        <span>{historyRecoveryCopy.unreadableSourceGuidance}</span>
+                      </Show>
                     </div>
                     <span class={`badge ${source.state === "available" || source.state === "empty" ? "warn" : "off"}`}>
-                      {sourceStateLabel(source.state)}
+                      {sourceDisplayStateLabel(source)}
                     </span>
                     <Show when={source.action !== "none"}>
                       <button
@@ -626,6 +664,31 @@ export const HistoryRecoverySettingsCard: Component<{
             />
           </Show>
 
+          <Show when={activeGenerationKey()}>
+            {(generationKey) => (
+              <div class="history-recovery-pending">
+                <span>{historyRecoveryCopy.contentExportGuidance}</span>
+                <button
+                  type="button"
+                  class="btn ghost sm"
+                  disabled={pendingOperation() !== null}
+                  onClick={() =>
+                    perform(
+                      "export-copy",
+                      generationKey(),
+                      workbenchLocalizedText(
+                        "history.exporting-recovery-copy",
+                        () => historyRecoveryCopy.exportingExactCopy,
+                      ),
+                    )
+                  }
+                >
+                  {historyRecoveryCopy.exportExactCopy}
+                </button>
+              </div>
+            )}
+          </Show>
+
           <Show
             when={
               readyBrowse()?.page.nextAfter !== null &&
@@ -657,6 +720,16 @@ export const HistoryRecoverySettingsCard: Component<{
               {actionResultLabel(result())}
             </p>
           )}
+        </Show>
+        <Show when={actionUnavailable()}>
+          <p class="history-recovery-feedback" role="alert">
+            {historyRecoveryCopy.unavailableFallback}
+          </p>
+        </Show>
+        <Show when={browseUnavailable()}>
+          <p class="history-recovery-feedback" role="alert">
+            {historyRecoveryCopy.unavailableFallback}
+          </p>
         </Show>
       </section>
     </Show>
@@ -763,6 +836,27 @@ function sourceStateLabel(
   state: HistoryRecoverySourceSummary["state"],
 ): string {
   return dynamicCopy.historyState[state];
+}
+
+function sourceMetadataLabel(source: HistoryRecoverySourceSummary): string {
+  if (source.counts === null) return historyRecoveryCopy.metadataUnavailable;
+  return sourceInventoryUnreadable(source)
+    ? historyRecoveryCopy.unreadableSourceMetadata
+    : countsLabel(source.counts);
+}
+
+function sourceDisplayStateLabel(source: HistoryRecoverySourceSummary): string {
+  return sourceInventoryUnreadable(source)
+    ? historyRecoveryCopy.unreadableSourceState
+    : sourceStateLabel(source.state);
+}
+
+function sourceInventoryUnreadable(source: HistoryRecoverySourceSummary): boolean {
+  return source.state === "available" &&
+    source.counts.projects === 0 &&
+    source.counts.sessions === 0 &&
+    source.counts.commands === 0 &&
+    source.counts.updates === 0;
 }
 
 function itemDetail(item: HistoryRecoveryBrowseItem): string {

@@ -54,6 +54,14 @@ class NeverCalledAdapter implements ResumableAgentRuntimeAdapter {
   }
 }
 
+class ResumeRefusingAdapter extends NeverCalledAdapter {
+  resumeCalls = 0;
+  override async resume(_request: RuntimeResume): Promise<never> {
+    this.resumeCalls += 1;
+    throw new RuntimeAdapterError("runtime-unavailable");
+  }
+}
+
 class RecordingResumableAdapter implements ResumableAgentRuntimeAdapter {
   inspectCalls = 0;
   startCalls = 0;
@@ -1064,6 +1072,36 @@ test("one Agent Session records interrupt and subsequent continuation as indepen
   }
 });
 
+test("a recovery resume retains the profile it confirmed for the next continuation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw148-profile-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  class AppFailureAdapter extends ChangedProfileContinuationAdapter {
+    override async resume(request: RuntimeResume) {
+      const binding = await super.resume(request);
+      if (this.resumedProfiles.length === 1) binding.send = async () => { throw new Error("APP_SEND_FAILURE"); };
+      return binding;
+    }
+  }
+  const adapter = new AppFailureAdapter();
+  const channel = await createWorkbenchCoordinator({ databasePath: join(root, "ledger.sqlite"), adapter }).openProject(root);
+  try {
+    const first = await channel.act(startCommand("before-profile-change"));
+    await waitForTerminal(channel, first);
+    const sessionId = (await channel.snapshot()).commands[0]!.session!.sessionId;
+    const changed = { ...profile, model: "gpt-5.6-terra", effortLevel: "high" };
+    const unknown = await channel.act({ ...continueCommand("profile-change-unknown", sessionId, "change profile", changed),
+      profileProjection: { version: 1, requested: {
+        kind: "recorded", runtimeFamilyLabel: "Codex", endpointLabel: "Codex native", modelLabel: "GPT 5.6 Terra",
+        workIntensityControlLabel: { label: "Reasoning", provenance: "runtime-catalog" }, workIntensityLabel: "High", executionModeLabel: "Single agent", accessModeLabel: "Full access",
+      } } });
+    await waitForTerminal(channel, unknown);
+    const next = await channel.act(continueCommand("same-confirmed-profile", sessionId, "continue", changed));
+    await waitForTerminal(channel, next);
+    assert.deepEqual((await channel.snapshot()).commands.map(command => command.status), ["completed", "recovery-required", "completed"]);
+    assert.deepEqual(adapter.resumedProfiles, [changed, changed, changed]);
+  } finally { await channel.close(); }
+});
+
 test("one Session accepts a same-provider changed profile and preserves each command profile through reopen", async (t) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "continuation-profile-change-"));
   const projectDirectory = join(temporaryDirectory, "project");
@@ -1734,7 +1772,7 @@ test("restart distinguishes unclaimed and binding-ready work from claimed unknow
       continue;
     }
 
-    const adapter = new NeverCalledAdapter();
+    const adapter = new ResumeRefusingAdapter();
     const recovered = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(
       projectDirectory,
     );
@@ -1753,6 +1791,7 @@ test("restart distinguishes unclaimed and binding-ready work from claimed unknow
         phaseCase.phase,
       );
       assert.equal(adapter.calls, 0, phaseCase.phase);
+      assert.equal(adapter.resumeCalls, 1, "reopening checks resume without replaying an unknown input");
       assert.deepEqual(await recovered.act(continuation), continuationReceipt);
       const replayedSnapshot = await recovered.snapshot();
       assert.equal(
@@ -1885,7 +1924,7 @@ test("graceful close preserves resume-before-send and barriers a completed send 
   heldSend.release();
   await blockedClose;
 
-  const noCalls = new NeverCalledAdapter();
+  const noCalls = new ResumeRefusingAdapter();
   const blockedReopened = await createWorkbenchCoordinator({
     databasePath: blockedDatabase,
     adapter: noCalls,
@@ -1913,6 +1952,7 @@ test("graceful close preserves resume-before-send and barriers a completed send 
       "SECOND_FOLLOWUP",
     );
     assert.equal(noCalls.calls, 0);
+    assert.equal(noCalls.resumeCalls, 1, "resume is checked but the unknown turn is never sent again");
     assert.deepEqual(await blockedReopened.act(secondCommand), secondReceipt);
     await assert.rejects(
       blockedReopened.act(

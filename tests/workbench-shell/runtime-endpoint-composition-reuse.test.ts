@@ -20,6 +20,12 @@ test("continuations reuse and coalesce only the latest same-Project exact auth p
     authGeneration: {
       captureRuntimeEndpointAuthGenerationSnapshot: () => auth,
     },
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const load = readWorkbenchDirectRuntimeEndpoints(adapter);
   assert.ok(load);
@@ -58,6 +64,12 @@ test("continuations reuse and coalesce only the latest same-Project exact auth p
     authGeneration: {
       captureRuntimeEndpointAuthGenerationSnapshot: () => auth,
     },
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const loadAfterRestart = readWorkbenchDirectRuntimeEndpoints(restarted);
   assert.ok(loadAfterRestart);
@@ -75,6 +87,12 @@ test("concurrent cold continuations share one pending discovery round", async ()
     authGeneration: {
       captureRuntimeEndpointAuthGenerationSnapshot: () => exactAuthSnapshot(1, 1),
     },
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const load = readWorkbenchDirectRuntimeEndpoints(adapter);
   assert.ok(load);
@@ -97,6 +115,12 @@ test("concurrent non-continuation intents each discover fresh while continuation
     authGeneration: {
       captureRuntimeEndpointAuthGenerationSnapshot: () => exactAuthSnapshot(1, 1),
     },
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const load = readWorkbenchDirectRuntimeEndpoints(adapter);
   assert.ok(load);
@@ -130,6 +154,12 @@ test("failed refresh replaces prior success and continuation never falls back or
     authGeneration: {
       captureRuntimeEndpointAuthGenerationSnapshot: () => exactAuthSnapshot(1, 1),
     },
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const load = readWorkbenchDirectRuntimeEndpoints(adapter);
   assert.ok(load);
@@ -175,6 +205,12 @@ test("missing or malformed auth snapshots fail before discovery", async (t) => {
         authGeneration: {
           captureRuntimeEndpointAuthGenerationSnapshot: () => snapshot as never,
         },
+        glmEnvironment: {},
+        kimiEnvironment: {},
+        deepseekEnvironment: {},
+        kimiPlatformEnvironment: {},
+        claudeApiEnvironment: {},
+        codexApiEnvironment: {},
       });
       const load = readWorkbenchDirectRuntimeEndpoints(adapter);
       assert.ok(load);
@@ -198,6 +234,12 @@ test("a mid-flight generation change discards without retry or partial exposure"
     authGeneration: {
       captureRuntimeEndpointAuthGenerationSnapshot: () => auth,
     },
+    glmEnvironment: {},
+    kimiEnvironment: {},
+    deepseekEnvironment: {},
+    kimiPlatformEnvironment: {},
+    claudeApiEnvironment: {},
+    codexApiEnvironment: {},
   });
   const load = readWorkbenchDirectRuntimeEndpoints(adapter);
   assert.ok(load);

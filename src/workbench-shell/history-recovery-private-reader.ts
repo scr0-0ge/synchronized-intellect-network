@@ -5,11 +5,11 @@ import {
   open,
   readdir,
   readFile,
+  realpath,
   rm,
   unlink,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import {
@@ -146,8 +146,9 @@ export class HistoryRecoveryPrivateReaderError extends Error {
       | "unsupported-artifact"
       | "unsupported-schema"
       | "verification-failed",
+    options?: ErrorOptions,
   ) {
-    super(category);
+    super(category, options);
     this.category = category;
   }
 }
@@ -161,6 +162,7 @@ export async function readHistoricalRecoveryInventory(
   options: {
     readonly deadline?: number;
     readonly now?: () => number;
+    readonly disposableParent?: string;
   } = {},
 ): Promise<HistoryRecoveryPrivateInventory> {
   const checkDeadline = (): void => {
@@ -172,7 +174,12 @@ export async function readHistoricalRecoveryInventory(
     }
   };
   checkDeadline();
-  const disposable = await mkdtemp(join(tmpdir(), "uaw-history-reader-"));
+  // Production supplies the verified owner-only Intake root: Windows cp
+  // inherits destination ACLs, not source ACLs. Resolve spelling aliases before
+  // mkdtemp and retain the Windows namespace for long-path I/O and SQLite recovery.
+  // Standalone readers default to the capture's parent, never unrelated OS temp.
+  const disposableParent = await realpath(options.disposableParent ?? dirname(capturedRoot));
+  const disposable = await mkdtemp(toNamespacedPath(join(disposableParent, "reader-")));
   const disposableRoot = join(disposable, "copy");
   try {
     checkDeadline();
@@ -215,7 +222,13 @@ export async function readHistoricalRecoveryInventory(
       throw error;
     }
     if (error instanceof HistoryRecoveryPrivateReaderError) throw error;
-    throw new HistoryRecoveryPrivateReaderError("verification-failed");
+    // Native I/O and SQLite errors belong in main-process diagnostics, not the
+    // public recovery contract. Keep their cause distinct from rejected data.
+    console.warn(
+      "Historical recovery private reader encountered an operational failure, not an inventory validation failure.",
+      error,
+    );
+    throw new HistoryRecoveryPrivateReaderError("verification-failed", { cause: error });
   } finally {
     await rm(disposable, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -457,7 +470,7 @@ function readLedger(ledgerPath: string, checkDeadline: () => void): {
   readonly project: HistoryRecoveryPrivateProject;
 } {
   checkDeadline();
-  const database = new DatabaseSync(ledgerPath);
+  const database = new DatabaseSync(toNamespacedPath(ledgerPath));
   try {
     database.exec("PRAGMA foreign_keys = ON; PRAGMA trusted_schema = OFF;");
     const integrity = database.prepare("PRAGMA integrity_check").all() as unknown as Array<{
@@ -1194,10 +1207,23 @@ function isStoredRuntimeEvent(value: unknown): boolean {
       runtimeFailureCategories.has(event.category);
   }
   if (value.kind !== "turn-completed") return false;
-  const event = closedRecord(value, ["kind", "status"], ["context"]);
+  const event = closedRecord(
+    value,
+    ["kind", "status"],
+    ["context", "suggestions"],
+  );
   return event !== undefined &&
     event.status === "completed" &&
-    (event.context === undefined || isStoredRuntimeContext(event.context));
+    (event.context === undefined || isStoredRuntimeContext(event.context)) &&
+    (event.suggestions === undefined ||
+      isStoredPromptSuggestions(event.suggestions));
+}
+
+function isStoredPromptSuggestions(value: unknown): boolean {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.length <= 1_000 &&
+    value.every((entry) => isBoundedStoredText(entry, 8_000));
 }
 
 function isStoredRuntimeContext(value: unknown): boolean {

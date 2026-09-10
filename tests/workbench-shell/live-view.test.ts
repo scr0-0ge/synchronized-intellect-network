@@ -873,6 +873,7 @@ test("live view omits context before the first completed turn and projects the l
                 usedTokens: 144,
                 windowTokens: 258_400,
               },
+              suggestions: ["Review the tests", "Summarize the change"],
             },
           ],
         },
@@ -914,6 +915,7 @@ test("live view omits context before the first completed turn and projects the l
   assert.deepEqual(completed?.timeline.at(-1), {
     kind: "turn-completed",
     status: "completed",
+    suggestions: ["Review the tests", "Summarize the change"],
   });
   assert.equal(Object.isFrozen(completed?.context), true);
   dispose();
@@ -1251,6 +1253,12 @@ test("live view coalesces a durable burst while preserving ordinal command keys"
     results.map((result) => result.view?.observation.cursor),
     [1, 4],
   );
+  // Display order (issue #6 comment 3.1): recency first, and on a recency
+  // tie (these synthetic summaries carry no lastModelReplyCursor, so both are
+  // zero) the tie-break is first-seen order. Session-a was first seen at
+  // cursor 1, so command-1 leads regardless of the cursor-4 snapshot listing
+  // command-b first; the real channel orders by accepted_cursor and would
+  // list them the same way.
   assert.deepEqual(
     results[1]?.view?.commands.map((command) => ({
       key: command.key,
@@ -1258,12 +1266,12 @@ test("live view coalesces a durable burst while preserving ordinal command keys"
     })),
     [
       {
-        key: "command-2",
-        timeline: [{ kind: "user-message", text: "Queued exact input B" }],
-      },
-      {
         key: "command-1",
         timeline: [{ kind: "user-message", text: "Queued exact input A" }],
+      },
+      {
+        key: "command-2",
+        timeline: [{ kind: "user-message", text: "Queued exact input B" }],
       },
     ],
   );
@@ -1446,7 +1454,7 @@ test("live view groups follow-ups into one stable Session and rotates its saniti
   assert.deepEqual(firstTimeline, [
     { kind: "user-message", text: "First exact user input" },
     { kind: "agent-message", text: "First visible result" },
-    { kind: "failed" },
+    { kind: "failed", category: "authentication-required" },
   ]);
   assert.deepEqual(secondTimeline, [
     ...firstTimeline,
@@ -1506,7 +1514,7 @@ test("live view groups follow-ups into one stable Session and rotates its saniti
   );
   const serialized = JSON.stringify(results);
   assert.equal(serialized.includes(sessionId), false);
-  assert.equal(serialized.includes("authentication-required"), false);
+  assert.equal(serialized.includes("authentication-required"), true);
   assert.match(serialized, /"kind":"failed"/u);
   assert.equal(
     secondTimeline.length,
@@ -2083,4 +2091,603 @@ test("pre-snapshot disposal releases promptly without retaining the listener", a
   await close;
   await Promise.resolve();
   assert.deepEqual(results, []);
+});
+
+test("progress events project through to the public timeline and fail closed on a foreign activity (issue #6 case 4)", async () => {
+  const progressing: ProjectSnapshot = {
+    projectId: "progress-project",
+    cursor: 3,
+    commands: [
+      {
+        commandId: "progress-command",
+        runtime: "codex",
+        status: "completed",
+        input: "think then answer",
+        session: {
+          sessionId: "progress-session",
+          ...defaultSessionMetadata,
+          profile: { ...profile },
+          resumable: false,
+          events: [
+            { kind: "session-started" },
+            { kind: "turn-started" },
+            { kind: "progress", activity: "thinking" },
+            { kind: "progress", activity: "retrying" },
+            {
+              kind: "progress",
+              activity: "tool",
+              tool: {
+                type: "commandExecution",
+                name: "Bash",
+                parameter: {
+                  kind: "command",
+                  value: "pnpm test",
+                  truncated: false,
+                },
+              },
+            },
+            {
+              kind: "progress",
+              activity: "tool",
+              tool: {
+                type: "fileChange",
+                name: "Edit",
+                parameter: {
+                  kind: "path",
+                  value: "a.ts",
+                  truncated: false,
+                },
+                fileChanges: {
+                  files: [
+                    {
+                      path: "a.ts",
+                      truncated: false,
+                      lines: { additions: 12, deletions: 4 },
+                    },
+                  ],
+                  totalFiles: 1,
+                  truncated: false,
+                },
+              },
+            },
+          ],
+        },
+      },
+    ],
+  };
+  const channel = new ControlledProjectChannel([progressing]);
+  const liveView = createWorkbenchLiveView({
+    channel,
+    projectDirectory: join(tmpdir(), "Progress Project"),
+  });
+  const results: Array<{
+    readonly ok: boolean;
+    readonly view?: { readonly commands: readonly { readonly session?: { readonly timeline: readonly unknown[] } }[] };
+  }> = [];
+  let resolveFirst!: () => void;
+  const first = new Promise<void>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const dispose = liveView.observe((result) => {
+    results.push(result);
+    resolveFirst();
+  });
+  await first;
+  dispose();
+  await liveView.close();
+  assert.equal(results.length, 1);
+  assert.equal(results[0]!.ok, true);
+  assert.deepEqual(
+    results[0]!.view!.commands[0]!.session!.timeline,
+    [
+      { kind: "user-message", text: "think then answer" },
+      { kind: "session-started" },
+      { kind: "turn-started" },
+      { kind: "progress", activity: "thinking" },
+      { kind: "progress", activity: "retrying" },
+      {
+        kind: "progress",
+        activity: "tool",
+        tool: {
+          type: "commandExecution",
+          name: "Bash",
+          parameter: {
+            kind: "command",
+            value: "pnpm test",
+            truncated: false,
+          },
+        },
+      },
+      {
+        kind: "progress",
+        activity: "tool",
+        tool: {
+          type: "fileChange",
+          name: "Edit",
+          parameter: {
+            kind: "path",
+            value: "a.ts",
+            truncated: false,
+          },
+          fileChanges: {
+            files: [
+              {
+                path: "a.ts",
+                truncated: false,
+                lines: { additions: 12, deletions: 4 },
+              },
+            ],
+            totalFiles: 1,
+            truncated: false,
+          },
+        },
+      },
+    ],
+  );
+
+  // A progress event with an activity outside the closed vocabulary is an
+  // invalid event, not a passthrough.
+  const hostile: ProjectSnapshot = {
+    ...progressing,
+    commands: [
+      {
+        ...progressing.commands[0]!,
+        session: {
+          ...progressing.commands[0]!.session!,
+          events: [{ kind: "progress", activity: "exfiltrating" as never }],
+        },
+      },
+    ],
+  };
+  const hostileChannel = new ControlledProjectChannel([hostile]);
+  const hostileLiveView = createWorkbenchLiveView({
+    channel: hostileChannel,
+    projectDirectory: join(tmpdir(), "Progress Hostile Project"),
+  });
+  const hostileResults: unknown[] = [];
+  let resolveHostile!: () => void;
+  const firstHostile = new Promise<void>((resolve) => {
+    resolveHostile = resolve;
+  });
+  const hostileDispose = hostileLiveView.observe((result) => {
+    hostileResults.push(result);
+    resolveHostile();
+  });
+  await firstHostile;
+  hostileDispose();
+  await hostileLiveView.close();
+  assert.equal(hostileResults.length, 1);
+  assert.equal((hostileResults[0] as { ok: boolean }).ok, false);
+});
+
+test("sessions display most recent model reply first while command keys stay stable (issue #6 comment 3.1)", async () => {
+  const sessionSummary = (
+    sessionId: string,
+    lastModelReplyCursor: number | undefined,
+  ) => ({
+    sessionId,
+    ...defaultSessionMetadata,
+    profile: { ...profile },
+    resumable: false,
+    events: [],
+    ...(lastModelReplyCursor === undefined
+      ? {}
+      : { lastModelReplyCursor }),
+  });
+  const early: ProjectSnapshot = {
+    projectId: "recency-project",
+    cursor: 5,
+    commands: [
+      {
+        commandId: "recency-command-old",
+        runtime: "codex",
+        status: "completed",
+        input: "oldest session turns",
+        session: sessionSummary("recency-session-old", 2),
+      },
+      {
+        commandId: "recency-command-mid",
+        runtime: "codex",
+        status: "completed",
+        input: "middle session turns",
+        session: sessionSummary("recency-session-mid", 4),
+      },
+      {
+        commandId: "recency-command-new",
+        runtime: "codex",
+        status: "completed",
+        input: "newest session turns",
+        session: sessionSummary("recency-session-new", 3),
+      },
+    ],
+  };
+  // A later snapshot: the OLD session receives fresh activity (a reply
+  // finishing after the newer sessions' turns -- acceptance order alone
+  // cannot see this), and the old session also gains a second turn.
+  const later: ProjectSnapshot = {
+    projectId: "recency-project",
+    cursor: 9,
+    commands: [
+      {
+        commandId: "recency-command-old",
+        runtime: "codex",
+        status: "completed",
+        input: "oldest session turns",
+        session: sessionSummary("recency-session-old", 2),
+      },
+      {
+        commandId: "recency-command-mid",
+        runtime: "codex",
+        status: "completed",
+        input: "middle session turns",
+        session: sessionSummary("recency-session-mid", 4),
+      },
+      {
+        commandId: "recency-command-new",
+        runtime: "codex",
+        status: "completed",
+        input: "newest session turns",
+        session: sessionSummary("recency-session-new", 3),
+      },
+      {
+        commandId: "recency-command-old-followup",
+        runtime: "codex",
+        status: "completed",
+        input: "old session acts again",
+        session: sessionSummary("recency-session-old", 8),
+      },
+    ],
+  };
+  const channel = new ControlledProjectChannel([early, later]);
+  const liveView = createWorkbenchLiveView({
+    channel,
+    projectDirectory: join(tmpdir(), "Recency Project"),
+  });
+  const views: Array<{ readonly commands: readonly { readonly key: string }[] }> =
+    [];
+  const dispose = liveView.observe((result) => {
+    if (result.ok) views.push(result.view);
+  });
+  await channel.observationCaughtUp();
+  await liveView.refreshAfterSessionMutation();
+  dispose();
+  await liveView.close();
+
+  assert.equal(views.length, 2);
+  // First snapshot: mid (cursor 4) > new (3) > old (2); keys follow
+  // first-seen order, so display reorders while keys stay command-N stable.
+  assert.deepEqual(
+    views[0]!.commands.map((command) => command.key),
+    ["command-2", "command-3", "command-1"],
+  );
+  // Later snapshot: old (cursor 8) jumps to the front; its key is still
+  // command-1 -- reordering never renumbers.
+  assert.deepEqual(
+    views[1]!.commands.map((command) => command.key),
+    ["command-1", "command-2", "command-3"],
+  );
+
+  // Validation: a malformed model-reply cursor fails closed.
+  const malformed: ProjectSnapshot = {
+    projectId: "recency-project",
+    cursor: 10,
+    commands: [
+      {
+        commandId: "recency-command-bad",
+        runtime: "codex",
+        status: "completed",
+        session: sessionSummary("recency-session-bad", -1),
+      },
+    ],
+  };
+  const badChannel = new ControlledProjectChannel([malformed]);
+  const badLiveView = createWorkbenchLiveView({
+    channel: badChannel,
+    projectDirectory: join(tmpdir(), "Recency Bad Project"),
+  });
+  const badResults: unknown[] = [];
+  let resolveFirstBadResult!: () => void;
+  const firstBadResult = new Promise<void>((resolve) => {
+    resolveFirstBadResult = resolve;
+  });
+  const badDispose = badLiveView.observe((result) => {
+    badResults.push(result);
+    resolveFirstBadResult();
+  });
+  // Not observationCaughtUp(): the malformed snapshot fails the observation
+  // before it ever subscribes to updates, so only the first result settles.
+  await firstBadResult;
+  badDispose();
+  await badLiveView.close();
+  assert.equal(badResults.length, 1);
+  assert.equal(
+    (badResults[0] as { ok: boolean }).ok,
+    false,
+  );
+});
+
+test("Session recency follows the last model reply rather than later non-reply updates", async () => {
+  const sessionSummary = (
+    sessionId: string,
+    lastModelReplyCursor: number,
+  ) => ({
+    sessionId,
+    ...defaultSessionMetadata,
+    displayName: sessionId,
+    profile: { ...profile },
+    resumable: false,
+    events: [],
+    lastModelReplyCursor,
+  });
+  const snapshot: ProjectSnapshot = {
+    projectId: "reply-recency-project",
+    cursor: 12,
+    commands: [
+      {
+        commandId: "older-reply-later-terminal",
+        runtime: "codex",
+        status: "completed",
+        input: "older model reply",
+        session: sessionSummary("session-older-reply", 4),
+      },
+      {
+        commandId: "newer-reply-earlier-terminal",
+        runtime: "codex",
+        status: "completed",
+        input: "newer model reply",
+        session: sessionSummary("session-newer-reply", 9),
+      },
+    ],
+  };
+  const channel = new ControlledProjectChannel([snapshot]);
+  const liveView = createWorkbenchLiveView({
+    channel,
+    projectDirectory: join(tmpdir(), "Reply Recency Project"),
+  });
+  const results: Array<{
+    readonly ok: boolean;
+    readonly view?: { readonly commands: readonly { readonly label: string }[] };
+  }> = [];
+  const dispose = liveView.observe((result) => results.push(result));
+  await channel.observationCaughtUp();
+  dispose();
+  await liveView.close();
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.ok, true);
+  assert.deepEqual(
+    results[0]?.view?.commands.map((command) => command.label),
+    ["session-newer-reply", "session-older-reply"],
+  );
+});
+
+test("an active Session with prior replies leads newer completed history", async () => {
+  const sessionSummary = (
+    sessionId: string,
+    lastModelReplyCursor: number,
+    acceptedCommandCursor: number,
+  ) => ({
+    sessionId,
+    ...defaultSessionMetadata,
+    displayName: sessionId,
+    profile: { ...profile },
+    resumable: false,
+    events: [],
+    lastModelReplyCursor,
+    acceptedCommandCursor,
+  });
+
+  for (const status of ["in-flight", "accepted"] as const) {
+    const snapshot: ProjectSnapshot = {
+      projectId: `active-prior-reply-${status}`,
+      cursor: 12,
+      commands: [
+        {
+          commandId: "active-prior-reply",
+          runtime: "codex",
+          status,
+          input: "another turn is active",
+          session: sessionSummary("active-prior-reply", 4, 12),
+        },
+        {
+          commandId: "completed-newer-reply",
+          runtime: "codex",
+          status: "completed",
+          input: "newer completed reply",
+          session: sessionSummary("completed-newer-reply", 9, 5),
+        },
+        {
+          commandId: "failed-newer-reply",
+          runtime: "codex",
+          status: "failed",
+          input: "newer failed reply",
+          session: sessionSummary("failed-newer-reply", 10, 6),
+        },
+        {
+          commandId: "interrupted-newer-reply",
+          runtime: "codex",
+          status: "failed",
+          failureCategory: "interrupted",
+          input: "newer interrupted reply",
+          session: sessionSummary("interrupted-newer-reply", 11, 7),
+        },
+        {
+          commandId: "recovery-newer-reply",
+          runtime: "codex",
+          status: "recovery-required",
+          input: "newer recovery reply",
+          session: sessionSummary("recovery-newer-reply", 12, 8),
+        },
+      ],
+    };
+    const channel = new ControlledProjectChannel([snapshot]);
+    const liveView = createWorkbenchLiveView({
+      channel,
+      projectDirectory: join(tmpdir(), `Active Prior Reply ${status}`),
+    });
+    const results: Array<{
+      readonly ok: boolean;
+      readonly view?: {
+        readonly commands: readonly { readonly label: string }[];
+      };
+    }> = [];
+    const dispose = liveView.observe((result) => results.push(result));
+    await channel.observationCaughtUp();
+    dispose();
+    await liveView.close();
+
+    assert.equal(results[0]?.ok, true);
+    assert.deepEqual(
+      results[0]?.view?.commands.map((command) => command.label),
+      [
+        "active-prior-reply",
+        "recovery-newer-reply",
+        "interrupted-newer-reply",
+        "failed-newer-reply",
+        "completed-newer-reply",
+      ],
+      status,
+    );
+  }
+});
+
+test("a Session waiting for its first model reply leads completed history", async () => {
+  const sessionSummary = (
+    sessionId: string,
+    lastModelReplyCursor: number,
+    acceptedCommandCursor: number,
+  ) => ({
+    sessionId,
+    ...defaultSessionMetadata,
+    displayName: sessionId,
+    profile: { ...profile },
+    resumable: false,
+    events: [],
+    lastModelReplyCursor,
+    acceptedCommandCursor,
+  });
+  const waiting: ProjectSnapshot = {
+    projectId: "first-reply-project",
+    cursor: 12,
+    commands: [
+      {
+        commandId: "completed-old",
+        runtime: "codex",
+        status: "completed",
+        input: "older reply",
+        session: sessionSummary("completed-old", 4, 1),
+      },
+      {
+        commandId: "completed-new",
+        runtime: "codex",
+        status: "completed",
+        input: "newer reply",
+        session: sessionSummary("completed-new", 9, 5),
+      },
+      {
+        commandId: "waiting-first-reply",
+        runtime: "codex",
+        status: "in-flight",
+        input: "just sent",
+        session: sessionSummary("waiting-first-reply", 0, 12),
+      },
+    ],
+  };
+  const replied: ProjectSnapshot = {
+    ...waiting,
+    cursor: 13,
+    commands: waiting.commands.map((command) =>
+      command.commandId === "waiting-first-reply"
+        ? {
+            ...command,
+            session: sessionSummary("waiting-first-reply", 13, 12),
+          }
+        : command,
+    ),
+  };
+  const channel = new ControlledProjectChannel([waiting, replied]);
+  const liveView = createWorkbenchLiveView({
+    channel,
+    projectDirectory: join(tmpdir(), "First Reply Project"),
+  });
+  const orders: string[][] = [];
+  const dispose = liveView.observe((result) => {
+    if (result.ok) {
+      orders.push(result.view.commands.map((command) => command.label));
+    }
+  });
+  await channel.observationCaughtUp();
+  await liveView.refreshAfterSessionMutation();
+  dispose();
+  await liveView.close();
+
+  assert.deepEqual(orders, [
+    ["waiting-first-reply", "completed-new", "completed-old"],
+    ["waiting-first-reply", "completed-new", "completed-old"],
+  ]);
+});
+
+test("Sessions waiting for first replies use newest accepted command order", async () => {
+  const sessionSummary = (
+    sessionId: string,
+    lastModelReplyCursor: number,
+    acceptedCommandCursor: number,
+  ) => ({
+    sessionId,
+    ...defaultSessionMetadata,
+    displayName: sessionId,
+    profile: { ...profile },
+    resumable: false,
+    events: [],
+    lastModelReplyCursor,
+    acceptedCommandCursor,
+  });
+  const snapshot: ProjectSnapshot = {
+    projectId: "pending-order-project",
+    cursor: 14,
+    commands: [
+      {
+        commandId: "waiting-older",
+        runtime: "codex",
+        status: "in-flight",
+        input: "sent first",
+        session: sessionSummary("waiting-older", 0, 7),
+      },
+      {
+        commandId: "completed-history",
+        runtime: "codex",
+        status: "completed",
+        input: "already answered",
+        session: sessionSummary("completed-history", 5, 3),
+      },
+      {
+        commandId: "waiting-newer",
+        runtime: "codex",
+        status: "in-flight",
+        input: "sent second",
+        session: sessionSummary("waiting-newer", 0, 12),
+      },
+    ],
+  };
+  const channel = new ControlledProjectChannel([snapshot]);
+  const liveView = createWorkbenchLiveView({
+    channel,
+    projectDirectory: join(tmpdir(), "Pending Order Project"),
+  });
+  const results: Array<{
+    readonly ok: boolean;
+    readonly view?: {
+      readonly commands: readonly { readonly label: string }[];
+    };
+  }> = [];
+  const dispose = liveView.observe((result) => results.push(result));
+  await channel.observationCaughtUp();
+  dispose();
+  await liveView.close();
+
+  assert.equal(results[0]?.ok, true);
+  assert.deepEqual(
+    results[0]?.view?.commands.map((command) => command.label),
+    ["waiting-newer", "waiting-older", "completed-history"],
+  );
 });

@@ -373,7 +373,7 @@ export type Shortfall = Readonly<{
 }>;
 
 /**
- * Strings that measurably miss AA and that this cycle is not authorised to
+ * Strings that measurably miss AA and require an owner decision before they can
  * change. Each carries its measured number and why it is still here.
  *
  * This is a RATCHET, not an exemption list, and the guard enforces it in both
@@ -389,17 +389,6 @@ export type Shortfall = Readonly<{
  *
  * Nothing may be added here to make a failure go away (`F26`). An entry is
  * legitimate only when the repair is a decision this project has reserved to
- * the owner. The `--fg-3` entries are the raised-surface palette question, which
- * issue 97 explicitly reserves: measure it, propose numbers, leave the ruling to
- * the owner.
+ * the owner. The current measured surfaces have no such shortfall.
  */
-export const EXPECTED_SHORTFALLS: readonly Shortfall[] = Object.freeze([
-  {
-    surfaceId: "project-dark-crt-screen",
-    signature: "kbd#2",
-    measuredRatio: 3.84,
-    threshold: 4.5,
-    reason:
-      "--fg-3 on the Send button's own kbd chip. Clearing AA needs either a higher --fg-3 or a darker chip, and both are palette decisions with an effect on every screen. Measured and proposed to the owner; not taken unilaterally.",
-  },
-]);
+export const EXPECTED_SHORTFALLS: readonly Shortfall[] = Object.freeze([]);

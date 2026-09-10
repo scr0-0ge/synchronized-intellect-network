@@ -4,6 +4,7 @@ import test from "node:test";
 
 import type { WorkbenchCommandView } from "../../src/workbench-shell/contract.ts";
 import {
+  copyLocaleDictionaries as turnNotificationCopyDictionaries,
   fallbackTurnTitleLabel,
   turnNotificationCopy,
 } from "../../src/workbench-shell/renderer/copy/turn-notification-copy.ts";
@@ -156,6 +157,18 @@ test("notice text is clamped to the boundary limits and falls back for blank lab
   assert.equal(padded.notices[0]?.title, "tidy title");
 });
 
+test("a different-Project activation explains the blocked selection in both locales", () => {
+  assert.equal(
+    turnNotificationCopyDictionaries.en.notificationActivationCopy.differentProject,
+    "That Agent Session is in another Project, not the current Project.",
+  );
+  assert.equal(
+    turnNotificationCopyDictionaries["zh-CN"].notificationActivationCopy
+      .differentProject,
+    "该智能体会话位于另一个项目中，不在当前项目里。",
+  );
+});
+
 test("the mounted Workbench announces finished turns exactly once, only while the user cannot see the window", async () => {
   const source = await readFile(
     new URL("../../src/workbench-shell/renderer/mount.tsx", import.meta.url),
@@ -182,7 +195,7 @@ test("the mounted Workbench announces finished turns exactly once, only while th
   );
   assert.match(
     announceSource,
-    /Object\.freeze\(\{ title: notice\.title, body: notice\.body \}\)/u,
+    /Object\.freeze\(\{\s*title: notice\.title,\s*body: notice\.body,\s*commandKey: notice\.commandKey,\s*projectScopeEpoch: projectScopeEpoch\(\),\s*rendererInstanceKey,\s*\}\)/u,
   );
   assert.match(announceSource, /\.catch\(\(\) => undefined\)/u);
 
@@ -199,4 +212,22 @@ test("the mounted Workbench announces finished turns exactly once, only while th
     "a Project acquisition seeds the new public command-key scope instead of diffing reused ordinals",
   );
   assert.doesNotMatch(announceSource, /setInterval|setTimeout|while/u);
+});
+
+test("the mounted Workbench selects only a current target and explains a different Project", async () => {
+  const source = await readFile(
+    new URL("../../src/workbench-shell/renderer/mount.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    source,
+    /const rendererInstanceKey = `renderer-instance:\$\{crypto\.randomUUID\(\)\}`;/u,
+    "each renderer lifetime scopes its own Action Center callbacks",
+  );
+  assert.match(
+    source,
+    /const observeNotificationActivation =\s*props\.bridge\.observeNotificationActivation;[\s\S]*?activation\.rendererInstanceKey === rendererInstanceKey &&\s*activation\.projectScopeEpoch !== projectScopeEpoch\(\)[\s\S]*?setRemovalNotice\(differentProjectNotificationFeedback\);\s*return;[\s\S]*?const commandKey = notificationActivationCommandKey\(\s*activation,\s*\{\s*projectScopeEpoch: projectScopeEpoch\(\),\s*rendererInstanceKey,\s*commands: current\.result\.view\.commands,\s*\},\s*\);[\s\S]*?if \(commandKey !== undefined\) \{[\s\S]*?selectCommand\(commandKey\);\s*\}[\s\S]*?onCleanup\(dispose\);/u,
+    "the notification boundary explains a same-renderer Project mismatch, while exact current targets still pass the existing scope/existence/archive guard before selection",
+  );
 });

@@ -49,6 +49,492 @@ const completedEvents: readonly NormalizedRuntimeEvent[] = [
   { kind: "turn-completed", status: "completed" },
 ];
 const testSessionReference = "deterministic-session-reference";
+
+test("opening an existing ledger adds indexes for update reads without a schema bump", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-update-indexes-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const initial = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingAdapter(),
+  }).openProject(projectDirectory);
+  await initial.close();
+
+  const plans = (database: DatabaseSync) => ({
+    perCommandEventRead: database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT data_json
+           FROM updates
+          WHERE command_id = ? AND kind = 'runtime-event'
+          ORDER BY cursor`,
+      )
+      .all("command") as unknown as Array<{ readonly detail: string }>,
+    sessionModelReplyCursors: database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT session_id, MAX(cursor) AS cursor
+           FROM updates
+          WHERE project_id = ?
+            AND session_id IS NOT NULL
+            AND kind = 'runtime-event'
+            AND json_extract(data_json, '$.event.kind') = 'agent-message'
+          GROUP BY session_id`,
+      )
+      .all("project") as unknown as Array<{ readonly detail: string }>,
+  });
+
+  const before = new DatabaseSync(databasePath);
+  before.exec(`
+    DROP INDEX IF EXISTS updates_command_kind_cursor;
+    DROP INDEX IF EXISTS updates_project_session_kind;
+  `);
+  const schemaVersion = Number(
+    (before.prepare("PRAGMA user_version").get() as { user_version: number })
+      .user_version,
+  );
+  const scanPlans = plans(before);
+  before.close();
+  assert.ok(
+    [scanPlans.perCommandEventRead, scanPlans.sessionModelReplyCursors].every(
+      (queryPlan) =>
+        queryPlan.some(({ detail }) => detail.includes("SCAN updates")),
+    ),
+    JSON.stringify(scanPlans),
+  );
+
+  const reopened = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingAdapter(),
+  }).openProject(projectDirectory);
+  await reopened.close();
+
+  const after = new DatabaseSync(databasePath, { readOnly: true });
+  const searchPlans = plans(after);
+  const indexNames = after
+    .prepare(
+      `SELECT name
+         FROM sqlite_master
+        WHERE type = 'index' AND tbl_name = 'updates'
+        ORDER BY name`,
+    )
+    .all() as unknown as Array<{ readonly name: string }>;
+  const reopenedSchemaVersion = Number(
+    (after.prepare("PRAGMA user_version").get() as { user_version: number })
+      .user_version,
+  );
+  after.close();
+
+  assert.match(
+    searchPlans.perCommandEventRead.map(({ detail }) => detail).join("\n"),
+    /SEARCH updates USING INDEX updates_command_kind_cursor/u,
+  );
+  assert.match(
+    searchPlans.sessionModelReplyCursors
+      .map(({ detail }) => detail)
+      .join("\n"),
+    /SEARCH updates USING INDEX updates_project_session_kind/u,
+  );
+  assert.deepEqual(
+    indexNames.map(({ name }) => name),
+    ["updates_command_kind_cursor", "updates_project_session_kind"],
+  );
+  assert.equal(reopenedSchemaVersion, schemaVersion);
+});
+
+test("Session recency cursor stops at the last model reply", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-reply-recency-"));
+  const projectDirectory = join(root, "project");
+  await mkdir(projectDirectory);
+  const channel = await createWorkbenchCoordinator({
+    databasePath: join(root, "ledger.sqlite"),
+    adapter: new CompletingAdapter(),
+  }).openProject(projectDirectory);
+  t.after(async () => {
+    await channel.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const receipt = await channel.act(directCommand());
+  await waitForTerminalCommand(channel, receipt);
+  const snapshot = await channel.snapshot();
+  const updates = await collectUpdatesThrough(
+    channel.observe({ after: 0 }),
+    snapshot.cursor,
+  );
+  const reply = updates.find(
+    (update) =>
+      update.kind === "runtime-event" && update.event.kind === "agent-message",
+  );
+  const terminal = updates.find((update) => update.kind === "completed");
+  assert.ok(reply);
+  assert.ok(terminal);
+  assert.ok(terminal.cursor > reply.cursor);
+  assert.equal(
+    snapshot.commands[0]?.session?.lastModelReplyCursor,
+    reply.cursor,
+    "completion and other later updates do not replace model-reply recency",
+  );
+  assert.equal(
+    snapshot.commands[0]?.session?.acceptedCommandCursor,
+    receipt.acceptedCursor,
+    "the Session projection carries the command acceptance used while waiting for its first reply",
+  );
+});
+
+test("snapshot reuses hot event timelines while cold rehydration stays field-identical", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-snapshot-event-cache-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const adapter = new CompletingAdapter();
+  let channel = await createWorkbenchCoordinator({
+    databasePath,
+    adapter,
+  }).openProject(projectDirectory);
+  const resumeIdentity = {
+    schemaVersion: 1 as const,
+    endpointId: "codex-desktop" as const,
+    nativeProfile: desiredProfile,
+  };
+  const firstReceipt = await channel.act(
+    directCommand({ runtimeResumeIdentity: resumeIdentity }),
+    { endpointId: "codex-desktop" },
+  );
+  const first = await waitForTerminalCommand(channel, firstReceipt);
+  assert.ok(first.session !== undefined);
+
+  const secondReceipt = await channel.act(
+    {
+      kind: "direct",
+      commandKind: "continue",
+      idempotencyKey: "snapshot-cache-continue",
+      runtime: "codex",
+      targetSessionId: first.session.sessionId,
+      profile: desiredProfile,
+      runtimeResumeIdentity: resumeIdentity,
+      input: "fixed coordinator input",
+    },
+    { endpointId: "codex-desktop" },
+  );
+  await waitForTerminalCommand(channel, secondReceipt);
+  const hot = await channel.snapshot();
+  const hotAgain = await channel.snapshot();
+  assert.deepEqual(hotAgain, hot, "a hot cache preserves every projected field");
+  await channel.close();
+
+  channel = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingAdapter(),
+  }).openProject(projectDirectory);
+  const cold = await channel.snapshot();
+  await channel.close();
+  assert.deepEqual(
+    cold,
+    hot,
+    "incremental and full cold reads produce field-identical snapshots",
+  );
+  assert.strictEqual(
+    hot.commands[0]?.session?.events,
+    first.session.events,
+    "a later command does not rebuild an earlier event timeline",
+  );
+  assert.strictEqual(
+    hotAgain.commands[0]?.session?.events,
+    hot.commands[0]?.session?.events,
+    "unchanged event timelines are reused rather than read and parsed again",
+  );
+  assert.strictEqual(
+    hotAgain.commands[1]?.session?.events,
+    hot.commands[1]?.session?.events,
+    "the incrementally added timeline is also reused once caught up",
+  );
+});
+
+test("reasoning events survive terminal commit and both durable readback interfaces exactly once", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-w488-store-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  const reasoning: NormalizedRuntimeEvent = { kind: "reasoning", text: "Compare the alternatives before choosing." };
+  const events = [...completedEvents.slice(0, 2), reasoning, ...completedEvents.slice(2)];
+  const adapter = new ReferenceAdapter(catalog, events);
+  let channel = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(projectDirectory);
+  t.after(async () => { await channel.close(); await rm(root, { recursive: true, force: true }); });
+  const receipt = await channel.act(directCommand());
+  const completed = await waitForTerminalCommand(channel, receipt);
+  assert.equal(completed.status, "completed", "the store must admit the new reasoning event");
+  assert.deepEqual(completed.session?.events, events, "terminal commit must not duplicate already-persisted reasoning");
+  await channel.close();
+  channel = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(projectDirectory);
+  const snapshot = await channel.snapshot();
+  assert.deepEqual(snapshot.commands[0]?.session?.events, events, "snapshot hydration preserves reasoning after reopen");
+  const updates = await collectUpdatesThrough(channel.observe({ after: 0 }), snapshot.cursor);
+  assert.deepEqual(updates.filter((u) => u.kind === "runtime-event").map((u) => u.kind === "runtime-event" ? u.event : undefined), events,
+    "cursor replay preserves reasoning after reopen");
+});
+
+test("unknown runtime event fields degrade without ending the turn or entering durable readback", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-runtime-extra-fields-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  const warnings = t.mock.method(console, "warn", () => {});
+  // Equivalent to a newer CLI/binding adding metadata to its normalized wire.
+  const sourceEvents = JSON.parse(JSON.stringify([
+    ...completedEvents.slice(0, 2).map((event) => ({ ...event, nextCliMetadata: "UNADMITTED" })),
+    {
+      kind: "progress",
+      activity: "tool",
+      nextCliMetadata: { query: "UNADMITTED" },
+      tool: {
+        type: "commandExecution",
+        name: "Bash",
+        nextCliToolMetadata: "UNADMITTED",
+        parameter: {
+          kind: "command",
+          value: "pnpm test",
+          truncated: false,
+          nextCliParameterMetadata: "UNADMITTED",
+        },
+      },
+    },
+    {
+      kind: "progress",
+      activity: "tool",
+      tool: {
+        type: "fileChange",
+        name: "Edit",
+        fileChanges: {
+          files: [{
+            path: "a.ts",
+            truncated: false,
+            lines: { additions: 2, deletions: 1, nextCliLineMetadata: "UNADMITTED" },
+            nextCliFileMetadata: "UNADMITTED",
+          }],
+          totalFiles: 1,
+          truncated: false,
+          nextCliSummaryMetadata: "UNADMITTED",
+        },
+      },
+    },
+    { kind: "reasoning", text: "Check the search results.", nextCliMetadata: "UNADMITTED" },
+    ...completedEvents.slice(2, -1).map((event) => ({ ...event, nextCliMetadata: "UNADMITTED" })),
+    {
+      kind: "turn-completed", status: "completed", nextCliMetadata: "UNADMITTED",
+      context: { basis: "active-context", usedTokens: 144, windowTokens: 258_400, nextCliUsage: "UNADMITTED" },
+    },
+  ])) as NormalizedRuntimeEvent[];
+  const expected: NormalizedRuntimeEvent[] = [
+    ...completedEvents.slice(0, 2),
+    {
+      kind: "progress",
+      activity: "tool",
+      tool: {
+        type: "commandExecution",
+        name: "Bash",
+        parameter: { kind: "command", value: "pnpm test", truncated: false },
+      },
+    },
+    {
+      kind: "progress",
+      activity: "tool",
+      tool: {
+        type: "fileChange",
+        name: "Edit",
+        fileChanges: {
+          files: [{
+            path: "a.ts",
+            truncated: false,
+            lines: { additions: 2, deletions: 1 },
+          }],
+          totalFiles: 1,
+          truncated: false,
+        },
+      },
+    },
+    { kind: "reasoning", text: "Check the search results." },
+    ...completedEvents.slice(2, -1),
+    { kind: "turn-completed", status: "completed", context: { basis: "active-context", usedTokens: 144, windowTokens: 258_400 } },
+  ];
+  const adapter = new ReferenceAdapter(catalog, sourceEvents);
+  let channel = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(projectDirectory);
+  t.after(async () => { await channel.close(); await rm(root, { recursive: true, force: true }); });
+  const receipt = await channel.act(directCommand());
+  const completed = await waitForTerminalCommand(channel, receipt);
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.failureCategory, undefined);
+  assert.deepEqual(completed.session?.events, expected);
+  const diagnostics = warnings.mock.calls.map((call) => call.arguments);
+  assert.equal(diagnostics.length, 9, "one diagnostic per affected event, including nested fields");
+  assert.match(JSON.stringify(diagnostics), /nextCliMetadata/u);
+  assert.match(JSON.stringify(diagnostics), /context.nextCliUsage/u);
+  assert.match(JSON.stringify(diagnostics), /tool.nextCliToolMetadata/u);
+  assert.match(JSON.stringify(diagnostics), /tool\.parameter\.nextCliParameterMetadata/u);
+  assert.match(JSON.stringify(diagnostics), /tool\.fileChanges\.nextCliSummaryMetadata/u);
+  assert.match(JSON.stringify(diagnostics), /tool\.fileChanges\.files\[0\]\.nextCliFileMetadata/u);
+  assert.match(JSON.stringify(diagnostics), /tool\.fileChanges\.files\[0\]\.lines\.nextCliLineMetadata/u);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /UNADMITTED/u, "diagnostics name fields, not their values");
+  assert.match(JSON.stringify(sourceEvents), /UNADMITTED/u, "the input is not mutated");
+  await channel.close();
+  channel = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(projectDirectory);
+  const snapshot = await channel.snapshot();
+  assert.deepEqual(snapshot.commands[0]?.session?.events, expected);
+  const replay = await collectUpdatesThrough(channel.observe({ after: 0 }), snapshot.cursor);
+  assert.deepEqual(replay.filter((u) => u.kind === "runtime-event").map((u) => u.event), expected);
+  assert.equal(warnings.mock.calls.length, 9, "stored readback has no unknown fields to diagnose again");
+});
+
+test("unknown tool and parameter fields are diagnosed and stripped before durable readback", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-runtime-tool-extra-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const warnings = t.mock.method(console, "warn", () => {});
+  const cases = [
+    {
+      tool: { type: "webSearch", name: "Web Search", nextCliSearch: { query: "UNADMITTED" } },
+      expected: { type: "webSearch", name: "Web Search" },
+      field: "tool.nextCliSearch",
+    },
+    {
+      tool: { type: "commandExecution", name: "Run command", parameter: { kind: "command", value: "echo hello", truncated: false, nextCliParameter: "UNADMITTED" } },
+      expected: { type: "commandExecution", name: "Run command", parameter: { kind: "command", value: "echo hello", truncated: false } },
+      field: "tool.parameter.nextCliParameter",
+    },
+  ] as const;
+  for (const [index, row] of cases.entries()) {
+    await t.test(row.field, async () => {
+      const projectDirectory = join(root, String(index));
+      const databasePath = join(projectDirectory, "ledger.sqlite");
+      await mkdir(projectDirectory);
+      const sourceEvents = JSON.parse(JSON.stringify([
+        ...completedEvents.slice(0, 2),
+        { kind: "progress", activity: "tool", tool: row.tool },
+        ...completedEvents.slice(2),
+      ])) as NormalizedRuntimeEvent[];
+      const expected: NormalizedRuntimeEvent[] = [
+        ...completedEvents.slice(0, 2),
+        { kind: "progress", activity: "tool", tool: row.expected },
+        ...completedEvents.slice(2),
+      ];
+      const adapter = new ReferenceAdapter(catalog, sourceEvents);
+      let channel = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(projectDirectory);
+      try {
+        const receipt = await channel.act(directCommand());
+        const terminal = await waitForTerminalCommand(channel, receipt);
+        assert.equal(terminal.status, "completed");
+        assert.deepEqual(terminal.session?.events, expected);
+        assert.deepEqual(warnings.mock.calls.at(-1)?.arguments, [
+          "[coordinator] Ignored unknown runtime event fields",
+          { kind: "progress", fields: [row.field] },
+        ]);
+        assert.match(JSON.stringify(sourceEvents), /UNADMITTED/u, "input is not mutated");
+        await channel.close();
+        channel = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(projectDirectory);
+        const snapshot = await channel.snapshot();
+        assert.deepEqual(snapshot.commands[0]?.session?.events, expected);
+        const replay = await collectUpdatesThrough(channel.observe({ after: 0 }), snapshot.cursor);
+        assert.deepEqual(replay.filter((u) => u.kind === "runtime-event").map((u) => u.event), expected);
+      } finally {
+        await channel.close();
+      }
+    });
+  }
+  assert.equal(warnings.mock.calls.length, 2, "readback never re-emits ingress diagnostics");
+});
+
+for (const [label, malformed] of [
+  ["non-string text", { kind: "reasoning", text: 42 }],
+  ["unknown kind", { kind: "vendor-reasoning", text: "text" }],
+] as const) {
+  test(`reasoning store rejects ${label} before persistence`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "uaw-w488-shape-"));
+    const projectDirectory = join(root, "project");
+    await mkdir(projectDirectory);
+    const adapter = new ReferenceAdapter(catalog, [malformed as unknown as NormalizedRuntimeEvent, ...completedEvents]);
+    const channel = await createWorkbenchCoordinator({ databasePath: join(root, "ledger.sqlite"), adapter }).openProject(projectDirectory);
+    t.after(async () => { await channel.close(); await rm(root, { recursive: true, force: true }); });
+    const receipt = await channel.act(directCommand());
+    const completed = await waitForTerminalCommand(channel, receipt);
+    assert.equal(completed.status, "recovery-required", `the store rejects ${label}`);
+    assert.equal(completed.session?.events.length, 0, "no malformed event may be durably appended");
+  });
+}
+
+test("runtime ingress still rejects malformed known fields alongside unknown additions", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-runtime-known-fields-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const malformedTools = [
+    { type: "webSearch" },
+    { name: "Web Search" },
+    { type: 42, name: "Web Search" },
+    { type: "vendor-new-tool", name: "Web Search" },
+    { type: "webSearch", name: 42 },
+    { type: "webSearch", name: "Web Search", sourceType: "vendor" },
+    { type: "unknown", name: "Tool" },
+    { type: "unknown", name: "Tool", sourceType: 42 },
+    { type: "unknown", name: "Tool", sourceType: "x".repeat(100_000) },
+    ...[
+      null,
+      { value: "echo hello", truncated: false },
+      { kind: "command", truncated: false },
+      { kind: "command", value: "echo hello" },
+      { kind: "query", value: "echo hello", truncated: false },
+      { kind: "command", value: 42, truncated: false },
+      { kind: "command", value: "echo hello", truncated: "false" },
+    ].map((parameter) => ({
+      type: "commandExecution", name: "Run command",
+      parameter: parameter === null ? null : { ...parameter, nextCliParameter: "UNADMITTED" },
+    })),
+  ];
+  const malformedEvents = [
+    { itemType: "agent-message" },
+    { kind: "item-started" },
+    { kind: "item-completed", itemType: 42 },
+    { kind: "agent-message", text: null },
+    { kind: "reasoning" },
+    { kind: "reasoning", text: 42 },
+    { kind: "progress" },
+    { kind: "progress", activity: 42 },
+    { kind: "progress", activity: "web-search" },
+    { kind: "progress", activity: "tool", tool: null },
+    { kind: "progress", activity: "tool", tool: 42 },
+    ...malformedTools.map((tool) => ({
+      kind: "progress", activity: "tool", tool: { ...tool, nextCliTool: "UNADMITTED" },
+    })),
+    { kind: "turn-completed" },
+    { kind: "turn-completed", status: "failed" },
+    { kind: "turn-completed", status: "completed", context: null },
+    { kind: "turn-completed", status: "completed", context: { basis: "active-context", windowTokens: 258_400, nextCliUsage: true } },
+    { kind: "turn-completed", status: "completed", context: { basis: "active-context", usedTokens: "144", windowTokens: 258_400, nextCliUsage: true } },
+    { kind: "turn-interrupted", status: "completed" },
+    { kind: "failed" },
+    { kind: "failed", category: 42 },
+    { kind: "failed", category: "new-failure" },
+  ];
+  for (const [index, malformed] of malformedEvents.entries()) {
+    const projectDirectory = join(root, String(index));
+    await mkdir(projectDirectory);
+    const event = { ...malformed, nextCliMetadata: "UNADMITTED" } as unknown as NormalizedRuntimeEvent;
+    const channel = await createWorkbenchCoordinator({
+      databasePath: join(projectDirectory, "ledger.sqlite"),
+      adapter: new ReferenceAdapter(catalog, [event, ...completedEvents]),
+    }).openProject(projectDirectory);
+    try {
+      const receipt = await channel.act(directCommand());
+      const terminal = await waitForTerminalCommand(channel, receipt);
+      assert.equal(terminal.status, "recovery-required", JSON.stringify(malformed));
+      assert.deepEqual(terminal.session?.events, [], "no malformed event enters the store");
+    } finally {
+      await channel.close();
+    }
+  }
+});
+
 const requestedProfileProjection = Object.freeze({
   kind: "recorded" as const,
   runtimeFamilyLabel: "Codex",
@@ -1060,20 +1546,16 @@ test("background inspect, profile, start, send, event, and terminal failures sta
       false,
       failureCase.name,
     );
-    /* F218: a turn that reached no runtime must never be recorded `completed`, and
-       must never be left resumable. The finding claimed such a turn was badged
-       completed with `Resumable: Yes`; the record already tells the truth, and this
-       pins it closed across every failure path (inspect/profile/start/send/event/
-       terminal). `notEqual(…, true)` holds whether the session is non-resumable or
-       absent — the only forbidden state is an affirmative Resumable on a no-op. */
+    // An unknown/failed turn is never completed. Session usability is separate:
+    // these send/event/terminal fixtures still acknowledge a fresh resume.
     const settledCommand = snapshot.commands.find(
       (command) => command.status === failureCase.expectedStatus,
     );
     assert.notEqual(settledCommand?.status, "completed", `${failureCase.name}: not completed`);
-    assert.notEqual(
+    assert.equal(
       settledCommand?.session?.resumable,
-      true,
-      `${failureCase.name}: a turn that reached no runtime is not left resumable (F218)`,
+      ["send", "event", "terminal"].includes(failureCase.name),
+      `${failureCase.name}: usability follows the independent resume observation`,
     );
     await channel.close();
   }
@@ -1256,6 +1738,7 @@ test("an unexpected profile exception reaches the fixed durable profile failure"
         displayName: "fixed coordinator input",
         archived: false,
         profile: desiredProfile,
+        acceptedCommandCursor: receipt.acceptedCursor,
         resumable: false,
         events: [],
       },
@@ -1399,6 +1882,174 @@ test("a throwing runtime return accessor cannot escape or split close", async (t
   }
 });
 
+for (const outcome of ["completed", "interrupted", "failed"] as const) {
+  test(`a validated ${outcome} turn survives close at iterator exhaustion`, async (t) => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "project-channel-"));
+    const projectDirectory = join(temporaryDirectory, "project");
+    const databasePath = join(temporaryDirectory, "ledger.sqlite");
+    await mkdir(projectDirectory);
+    t.after(async () => rm(temporaryDirectory, { recursive: true, force: true }));
+
+    const terminalEvent: NormalizedRuntimeEvent = outcome === "completed"
+      ? { kind: "turn-completed", status: "completed" }
+      : outcome === "interrupted"
+        ? { kind: "turn-interrupted", status: "interrupted" }
+        : { kind: "failed", category: "turn-failed" };
+    const events = [...completedEvents.slice(0, -1), terminalEvent];
+    let closeResult: Promise<void> | undefined;
+    let channel: ProjectChannel;
+    let markClosing!: () => void;
+    const closing = new Promise<void>((resolve) => { markClosing = resolve; });
+    class ClosingAdapter extends CompletingAdapter {
+      override async start(request: RuntimeStart): Promise<RuntimeBinding> {
+        this.starts.push(structuredClone(request));
+        return {
+          profile: desiredProfile,
+          opaqueSessionReference: testSessionReference,
+          async send() {},
+          async *events() {
+            yield* events;
+            // The runtime has returned its complete, valid turn. Close races
+            // with the coordinator consuming done:true, while SQLite is open.
+            closeResult = channel.close();
+            markClosing();
+          },
+        };
+      }
+    }
+    const adapter = new ClosingAdapter();
+    channel = await createWorkbenchCoordinator({ databasePath, adapter }).openProject(
+      projectDirectory,
+    );
+    const receipt = await channel.act(directCommand());
+    await closing;
+    await closeResult;
+
+    const reopenedAdapter = new CompletingAdapter();
+    const reopened = await createWorkbenchCoordinator({
+      databasePath,
+      adapter: reopenedAdapter,
+    }).openProject(projectDirectory);
+    try {
+      const snapshot = await reopened.snapshot();
+      const command = snapshot.commands.find(row => row.commandId === receipt.commandId);
+      assert.ok(command?.session);
+      assert.equal(command.status, outcome === "completed" ? "completed" : "failed",
+        "validated terminal outcome must survive channel close");
+      assert.deepEqual(command.session.events, events, "terminal transcript survives reopen");
+      assert.equal(command.failureCategory,
+        outcome === "completed" ? undefined : outcome === "interrupted" ? "interrupted" : "runtime-failed");
+      assert.equal(command.session.resumable, outcome !== "failed");
+      const replay = await collectUpdatesThrough(reopened.observe({ after: 0 }), snapshot.cursor);
+      assert.equal(replay.filter(update => update.kind === "recovery-required").length, 0);
+      assert.equal(replay.filter(update => update.kind === "runtime-event").length, events.length);
+      assert.equal(replay.filter(update => update.kind === "completed" || update.kind === "failed").length, 1);
+      assert.equal(reopenedAdapter.starts.length + reopenedAdapter.resumes.length, 0,
+        "startup must not replay an already completed effect");
+      if (outcome !== "failed") {
+        const continued = await reopened.act({
+          kind: "direct",
+          commandKind: "continue",
+          idempotencyKey: "after-terminal-close",
+          runtime: "codex",
+          profile: desiredProfile,
+          input: "fixed coordinator input",
+          targetSessionId: command.session.sessionId,
+        });
+        assert.equal((await waitForTerminalCommand(reopened, continued)).status, "completed");
+        assert.equal(reopenedAdapter.starts.length, 0, "no replacement Session");
+        assert.equal(reopenedAdapter.resumes.length, 1);
+        assert.equal(reopenedAdapter.resumes[0]?.opaqueSessionReference, testSessionReference);
+      }
+    } finally {
+      await reopened.close();
+    }
+  });
+}
+
+for (const tail of ["exhausted", "synchronous-close", "conflicting", "cancelled-terminal"] as const) {
+  test(`close validates the runtime tail: ${tail}`, async (t) => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "project-channel-"));
+    const projectDirectory = join(temporaryDirectory, "project");
+    const databasePath = join(temporaryDirectory, "ledger.sqlite");
+    await mkdir(projectDirectory);
+    t.after(async () => rm(temporaryDirectory, { recursive: true, force: true }));
+    let reachTail!: () => void;
+    const tailReached = new Promise<void>(resolve => { reachTail = resolve; });
+    let releaseTail!: (result: IteratorResult<NormalizedRuntimeEvent>) => void;
+    const pendingTail = new Promise<IteratorResult<NormalizedRuntimeEvent>>(resolve => {
+      releaseTail = resolve;
+    });
+    let returnCalls = 0;
+    let closeResult: Promise<void> | undefined;
+    class TailAdapter extends CompletingAdapter {
+      override async start(): Promise<RuntimeBinding> {
+        let index = 0;
+        const prefix = tail === "cancelled-terminal" ? completedEvents.slice(0, -1) : completedEvents;
+        return {
+          profile: desiredProfile,
+          opaqueSessionReference: testSessionReference,
+          async send() {},
+          events(): AsyncIterableIterator<NormalizedRuntimeEvent> {
+            return {
+              [Symbol.asyncIterator]() { return this; },
+              async next(): Promise<IteratorResult<NormalizedRuntimeEvent>> {
+                if (index < prefix.length) return { done: false, value: prefix[index++]! };
+                if (index++ === prefix.length) {
+                  // Unlike a caller waiting on tailReached, this closes inside
+                  // next(), before the coordinator checks its closed flag.
+                  if (tail === "synchronous-close") closeResult = channel.close();
+                  reachTail();
+                  return pendingTail;
+                }
+                return { done: true, value: undefined };
+              },
+              async return(): Promise<IteratorResult<NormalizedRuntimeEvent>> {
+                returnCalls += 1;
+                releaseTail(tail === "cancelled-terminal"
+                  ? { done: false, value: { kind: "turn-completed", status: "completed" } }
+                  : { done: true, value: undefined });
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        };
+      }
+    }
+    const channel = await createWorkbenchCoordinator({ databasePath, adapter: new TailAdapter() })
+      .openProject(projectDirectory);
+    const receipt = await channel.act(directCommand());
+    await tailReached;
+    const closed = closeResult ?? channel.close();
+    try {
+      assert.equal(returnCalls, tail === "cancelled-terminal" ? 1 : 0,
+        "close must drain an observed terminal rather than cancel its validation tail");
+    } finally {
+      releaseTail(tail === "conflicting"
+        ? { done: false, value: { kind: "agent-message", text: "conflicting tail" } }
+        : { done: true, value: undefined });
+      await closed;
+    }
+    const reopened = await createWorkbenchCoordinator({ databasePath, adapter: new CompletingAdapter() })
+      .openProject(projectDirectory);
+    try {
+      const command = (await reopened.snapshot()).commands.find(row => row.commandId === receipt.commandId);
+      const completed = tail === "exhausted" || tail === "synchronous-close";
+      assert.equal(command?.status, completed ? "completed" : "recovery-required",
+        "only an uncancelled, non-conflicting terminal stream certifies completion");
+      // A turn whose terminal never certified still keeps what it streamed: runtime events
+      // are persisted as they arrive, not only at commitTerminal, so the recorded prefix survives.
+      // The certified terminal itself is the one event a non-certifying tail does not earn.
+      assert.deepEqual(
+        command?.session?.events,
+        completed ? completedEvents : completedEvents.slice(0, -1),
+      );
+    } finally {
+      await reopened.close();
+    }
+  });
+}
+
 test("close contains held inspect, start, and send calls at their lifecycle seams", async (t) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "project-channel-"));
   t.after(async () => rm(temporaryDirectory, { recursive: true, force: true }));
@@ -1482,7 +2133,7 @@ test("close contains held inspect, start, and send calls at their lifecycle seam
       );
       assert.equal(
         reopenedAdapter.resumes.length,
-        heldSeam === "start" ? 1 : 0,
+        heldSeam === "inspect" ? 0 : 1,
         heldSeam,
       );
     } finally {
@@ -1996,6 +2647,7 @@ test("a resolver rejection becomes one durable sanitized profile failure", async
       displayName: "fixed coordinator input",
       archived: false,
       profile: desiredProfile,
+      acceptedCommandCursor: receipt.acceptedCursor,
       resumable: false,
       events: [],
     },
@@ -2242,7 +2894,7 @@ test("normalized terminal failure events remain durable and finish the command a
   await channel.close();
 });
 
-test("completed-turn context survives cloning, SQLite replay, and reopen", async (t) => {
+test("completed-turn context and suggestions survive cloning, SQLite replay, and reopen", async (t) => {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "project-channel-context-"));
   const projectDirectory = join(temporaryDirectory, "project");
   const databasePath = join(temporaryDirectory, "ledger.sqlite");
@@ -2258,6 +2910,7 @@ test("completed-turn context survives cloning, SQLite replay, and reopen", async
         usedTokens: 144,
         windowTokens: 258_400,
       },
+      suggestions: ["Check the remaining tests", "Explain the trade-off"],
     },
   ];
   const channel = await createWorkbenchCoordinator({
@@ -2445,15 +3098,6 @@ test("the durable seam rejects every adversarial context row before persistence"
       },
     },
     {
-      name: "unrecognized context key",
-      context: {
-        basis: "active-context",
-        usedTokens: 144,
-        windowTokens: 258_400,
-        nativeExtra: true,
-      },
-    },
-    {
       name: "missing semantic basis",
       context: { usedTokens: 144, windowTokens: 258_400 },
     },
@@ -2545,7 +3189,8 @@ test("the durable seam rejects every adversarial context row before persistence"
     );
     const terminal = await waitForTerminalCommand(channel, receipt);
     assert.equal(terminal.status, "recovery-required", row.name);
-    assert.deepEqual(terminal.session?.events, [], row.name);
+    assert.deepEqual(terminal.session?.events, completedEvents.slice(0, -1),
+      `${row.name}: valid live output remains durable; the malformed terminal context does not`);
     await channel.close();
   }
 });

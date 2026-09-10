@@ -71,17 +71,30 @@ test("production owns one OS-user-scoped preference store, both fixed IPC bindin
     "\nif (!ownsSingleInstanceLock)",
     "production lifecycle composition",
   );
+  // Issue 172 moved both bodies out of the composition object and into named
+  // module functions: one teardown list shared with the window's "closed"
+  // handler, and one durable close that a failing listener shutdown cannot
+  // cancel. The assertions below are unchanged in what they require; only the
+  // slice they read has followed the code.
   const disposeProjectViewSource = sourceBetween(
-    lifecycleCompositionSource,
-    "  disposeProjectView() {",
-    "  async closeBackend() {",
-    "disposeProjectView lifecycle injection",
+    source,
+    "function disposeWindowScopedBindings(): void {",
+    "\nconst requestClaudeToolPermission",
+    "shared window-scoped binding teardown",
   );
   const closeBackendSource = sourceBetween(
+    source,
+    "async function closeWorkbenchDurableState(): Promise<void> {",
+    "\nif (!ownsSingleInstanceLock)",
+    "durable state close",
+  );
+  assert.match(
     lifecycleCompositionSource,
-    "  async closeBackend() {",
-    "  exit() {",
-    "closeBackend lifecycle injection",
+    /disposeProjectView\(\) \{\s+shutdownRequested = true;\s+disposeWindowScopedBindings\(\);\s+\}/u,
+  );
+  assert.match(
+    lifecycleCompositionSource,
+    /async closeBackend\(\) \{[\s\S]*?closeDurableStateAfterListenerShutdown\(\{[\s\S]*?closeDurableState: closeWorkbenchDurableState,/u,
   );
   const drainSource = sourceBetween(
     lifecycleSource,
@@ -89,17 +102,21 @@ test("production owns one OS-user-scoped preference store, both fixed IPC bindin
     "  const startQuitAttempt = (): void => {",
     "lifecycle shutdown drain",
   );
+  // Each binding is cleared BEFORE it is disposed, so a dispose that fails
+  // cannot leave the binding live for the "closed" handler to trip over a
+  // second time — which is how a teardown failure reached the owner as an
+  // uncaught main-process exception (issue 172).
   assert.match(
     disposeProjectViewSource,
-    /appearancePreferenceIpc\?\.dispose\(\);\s+appearancePreferenceIpc = null;/u,
+    /const closing = appearancePreferenceIpc;\s+appearancePreferenceIpc = null;\s+closing\?\.dispose\(\);/u,
   );
   assert.match(
     disposeProjectViewSource,
-    /claudePermissionHandlingIpc\?\.dispose\(\);\s+claudePermissionHandlingIpc = null;/u,
+    /const closing = claudePermissionHandlingIpc;\s+claudePermissionHandlingIpc = null;\s+closing\?\.dispose\(\);/u,
   );
   assert.match(
     closeBackendSource,
-    /await closeWorkbenchBackendAfterInitialization\(\s+backendInitialization,\s+\(\) => \{/u,
+    /await closeWorkbenchBackendAfterInitialization\(backendInitialization, \(\) => \{/u,
   );
   assert.match(
     closeBackendSource,
@@ -108,6 +125,18 @@ test("production owns one OS-user-scoped preference store, both fixed IPC bindin
   assert.match(
     closeBackendSource,
     /return \{\s+async close\(\) \{\s+try \{\s+await closingCreateProjectController\?\.close\(\);\s+\} finally \{\s+try \{\s+await closingBackend\?\.close\(\);\s+\} finally \{\s+await closingAppearancePreferenceStore\?\.close\(\);\s+\}\s+\}\s+\},\s+\};/u,
+  );
+  // The durable flush must not sit behind work that is allowed to fail. It used
+  // to: `closeBackend` awaited both listener-shutdown promises in sequence and
+  // outside its own try, so one rejecting `async dispose()` skipped the whole
+  // flush and the drain exited anyway (issue 172).
+  assert.match(
+    lifecycleCompositionSource,
+    /listenerShutdowns: \[\s+subscriptionAuthenticationShutdown,\s+historyRecoveryIpcShutdown,\s+\]/u,
+  );
+  assert.doesNotMatch(
+    lifecycleCompositionSource,
+    /async closeBackend\(\) \{\s+await subscriptionAuthenticationShutdown;/u,
   );
   const disposeProjectViewCall = drainSource.indexOf(
     "options.disposeProjectView();",

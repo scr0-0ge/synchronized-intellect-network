@@ -12,13 +12,15 @@ REM
 REM  Every argument you pass is handed to the app unchanged, so Electron's own
 REM  --user-data-dir keeps a throwaway profile away from your real one.
 REM
-REM  What it does, in order: find node on PATH, refuse a node older than 22.5,
-REM  find pnpm (or run the pinned pnpm through the corepack that ships with
-REM  node), install dependencies if they are missing, build the three bundles,
-REM  launch the app.
+REM  What it does, in order: use node on PATH when it is 22.5 or newer;
+REM  otherwise download the verified Node 24.20.0 LTS zip into this product's
+REM  private per-user runtime directory; find pnpm (or run the pinned pnpm
+REM  through node's corepack); install dependencies if they are missing, build
+REM  the three bundles, launch the app.
 REM
 REM  What it never does: install anything globally, change a system setting, or
-REM  touch anything outside this directory and the package managers' own caches.
+REM  touch anything outside this directory, this product's private runtime
+REM  directory under LOCALAPPDATA, and the package managers' own caches.
 REM
 REM  Every failure below says what was looked for, where it was looked for, and
 REM  where to get it, and then waits for a key so that a double-clicked window
@@ -44,6 +46,13 @@ set "NoDefaultCurrentDirectoryInExePath=1"
 
 set "PNPM_VERSION=11.20.0"
 set "NODE_MINIMUM=22.5"
+set "NODE_LTS_VERSION=24.20.0"
+set "NODE_PACKAGE=node-v%NODE_LTS_VERSION%-win-x64"
+set "NODE_ARCHIVE_NAME=%NODE_PACKAGE%.zip"
+set "NODE_DOWNLOAD_ROOT=https://nodejs.org/dist/v%NODE_LTS_VERSION%"
+set "NODE_ARCHIVE_URL=%NODE_DOWNLOAD_ROOT%/%NODE_ARCHIVE_NAME%"
+set "NODE_SHASUMS_URL=%NODE_DOWNLOAD_ROOT%/SHASUMS256.txt"
+set "NODE_CACHE_ROOT=%LOCALAPPDATA%\unified-agent-workbench\runtime\node"
 
 echo.
 echo   Synchronized Intellect Network
@@ -53,7 +62,7 @@ echo.
 REM ---- 1. node --------------------------------------------------------------
 set "NODEEXE="
 for %%N in (node.exe) do if not "%%~$PATH:N"=="" set "NODEEXE=%%~$PATH:N"
-if not defined NODEEXE goto nonode
+if not defined NODEEXE goto needprivatenode
 
 for %%N in ("%NODEEXE%") do set "NODEDIR=%%~dpN"
 if "%NODEDIR:~-1%"=="\" set "NODEDIR=%NODEDIR:~0,-1%"
@@ -62,7 +71,7 @@ set "PATH=%NODEDIR%;%PATH%"
 REM ---- 2. node is new enough ------------------------------------------------
 REM node:sqlite -- the durable local ledger and the tests that read it -- was
 REM added in node 22.5. Below that the app cannot open its own database, so
-REM this is a refusal rather than a warning.
+REM the launcher must use its private LTS runtime rather than merely warn.
 REM Captured straight out of the pipe. An earlier draft went through a file in
 REM %TEMP%, which turned an unwritable temp directory into "your node is broken"
 REM -- a message that sends the reader off to reinstall a perfectly good node.
@@ -73,10 +82,34 @@ for /f "delims=" %%V in ('node -p "process.versions.node" 2^>nul') do set "NODEV
 if not defined NODEVER goto nodenoversion
 
 "%NODEEXE%" -e "const v=process.versions.node.split('.').map(Number);process.exit((v[0]>22||(v[0]===22&&v[1]>=5))?0:1)"
-if errorlevel 1 goto nodetooold
+if errorlevel 1 goto nodeonpathtooold
 
 echo   node        %NODEVER%  (%NODEEXE%)
+goto nodeready
 
+:nodeonpathtooold
+set "PATHNODEVER=%NODEVER%"
+echo   node %PATHNODEVER% on PATH is too old; this project needs %NODE_MINIMUM% or newer.
+echo   node:sqlite, used for the local conversation store, first shipped in 22.5.
+echo   The installed node is left untouched; using private Node %NODE_LTS_VERSION% LTS instead.
+goto prepareprivatenode
+
+:needprivatenode
+echo   node was not found on PATH; preparing private Node %NODE_LTS_VERSION% LTS.
+
+:prepareprivatenode
+call :ensureprivatenode
+if errorlevel 1 goto nodeprovisionfailed
+set "NODEEXE=%NODE_CACHE_ROOT%\bin\node.exe"
+for %%N in ("%NODEEXE%") do set "NODEDIR=%%~dpN"
+if "%NODEDIR:~-1%"=="\" set "NODEDIR=%NODEDIR:~0,-1%"
+set "PATH=%NODEDIR%;%PATH%"
+set "NODEVER="
+for /f "delims=" %%V in ('node -p "process.versions.node" 2^>nul') do set "NODEVER=%%V"
+if not defined NODEVER goto privatenodeinvalid
+echo   node        %NODEVER%  (%NODEEXE%, %NODE_PRIVATE_SOURCE%)
+
+:nodeready
 REM ---- 3. pnpm --------------------------------------------------------------
 set "PNPM_RUN="
 set "PNPM_SOURCE="
@@ -205,20 +238,6 @@ echo.
 pause
 exit /b 1
 
-:nonode
-echo   [X] Could not find node.
-echo.
-echo       Looked for: node.exe
-echo       Where:      every directory on your PATH
-echo       Get it:     https://nodejs.org  -- version %NODE_MINIMUM% or newer,
-echo                   and let the installer add node to PATH.
-echo.
-echo       If you have just installed it, close this window and open a new one:
-echo       a program started before the install still has the old PATH.
-echo.
-pause
-exit /b 1
-
 :nodenoversion
 echo   [X] Found a node.exe, but it could not tell me its version.
 echo.
@@ -233,16 +252,22 @@ echo.
 pause
 exit /b 1
 
-:nodetooold
-echo   [X] node %NODEVER% is too old. This project needs %NODE_MINIMUM% or newer.
+:privatenodeinvalid
+set "NODE_SETUP_FAILURE=The cached private node.exe stopped working after it was prepared."
+goto nodeprovisionfailed
+
+:nodeprovisionfailed
 echo.
-echo       Found:      %NODEEXE%
-echo       Reason:     the app stores your conversations in a local SQLite
-echo                   database through node's built-in node:sqlite module,
-echo                   which first shipped in node 22.5. On an older node the
-echo                   app cannot open its own store, so this stops here
-echo                   rather than failing later with a confusing error.
-echo       Get it:     https://nodejs.org
+echo   [X] Could not prepare the private Node %NODE_LTS_VERSION% LTS runtime.
+echo.
+echo       Problem:    %NODE_SETUP_FAILURE%
+echo       Looked for: a working node.exe version %NODE_MINIMUM% or newer
+echo       On PATH:    every directory on PATH
+echo       In cache:   %NODE_CACHE_ROOT%\bin
+echo       Get it:     %NODE_ARCHIVE_URL%
+echo       Verify at:  %NODE_SHASUMS_URL%
+echo       Kept files: only inside the private cache above; nothing was
+echo                   installed globally and no system setting was changed.
 echo.
 pause
 exit /b 1
@@ -331,3 +356,148 @@ echo                   no window.
 echo.
 pause
 exit /b 1
+
+REM ===========================================================================
+REM  private Node provisioning
+REM ===========================================================================
+
+:ensureprivatenode
+set "NODE_PRIVATE_SOURCE="
+set "NODE_SETUP_FAILURE="
+call :validateprivatenode "%NODE_CACHE_ROOT%\bin\node.exe"
+if not errorlevel 1 goto privatecached
+
+if not defined LOCALAPPDATA (
+  set "NODE_SETUP_FAILURE=Windows did not provide LOCALAPPDATA, so there is no private cache location."
+  exit /b 2
+)
+
+set "POWERSHELLEXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%POWERSHELLEXE%" (
+  set "NODE_SETUP_FAILURE=Windows PowerShell was not found, so the Node zip cannot be verified and extracted."
+  exit /b 2
+)
+
+md "%NODE_CACHE_ROOT%" >nul 2>&1
+if not exist "%NODE_CACHE_ROOT%" (
+  set "NODE_SETUP_FAILURE=The private cache directory could not be created."
+  exit /b 2
+)
+
+:picknodestage
+set "NODE_STAGE=%NODE_CACHE_ROOT%\stage-%RANDOM%-%RANDOM%"
+if exist "%NODE_STAGE%" goto picknodestage
+md "%NODE_STAGE%" >nul 2>&1
+if not exist "%NODE_STAGE%" (
+  set "NODE_SETUP_FAILURE=A temporary directory could not be created inside the private cache."
+  exit /b 2
+)
+
+set "NODE_ARCHIVE=%NODE_STAGE%\%NODE_ARCHIVE_NAME%"
+set "NODE_SHASUMS=%NODE_STAGE%\SHASUMS256.txt"
+
+if defined SIN_NODE_ZIP_SOURCE goto copynodetestsource
+echo   downloading %NODE_ARCHIVE_URL%
+"%POWERSHELLEXE%" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri $env:NODE_ARCHIVE_URL -OutFile $env:NODE_ARCHIVE"
+if errorlevel 1 goto nodearchivedownloadfailed
+echo   downloading %NODE_SHASUMS_URL%
+"%POWERSHELLEXE%" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ProgressPreference='SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri $env:NODE_SHASUMS_URL -OutFile $env:NODE_SHASUMS"
+if errorlevel 1 goto nodesharedownloadfailed
+goto verifynodearchive
+
+:copynodetestsource
+REM Test seam: the suite supplies a local zip and the SHASUMS256.txt beside it.
+REM Normal launches never set this variable and always use the official HTTPS URLs.
+copy /y "%SIN_NODE_ZIP_SOURCE%" "%NODE_ARCHIVE%" >nul 2>&1
+if errorlevel 1 goto nodearchivedownloadfailed
+for %%Z in ("%SIN_NODE_ZIP_SOURCE%") do set "NODE_INJECTED_SHASUMS=%%~dpZSHASUMS256.txt"
+copy /y "%NODE_INJECTED_SHASUMS%" "%NODE_SHASUMS%" >nul 2>&1
+if errorlevel 1 goto nodesharedownloadfailed
+
+:verifynodearchive
+"%POWERSHELLEXE%" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$entry=Get-Content -LiteralPath $env:NODE_SHASUMS | Where-Object { $_ -match ('^([0-9A-Fa-f]{64})\s+\*?' + [regex]::Escape($env:NODE_ARCHIVE_NAME) + '$') } | Select-Object -First 1; if ($null -eq $entry) { exit 41 }; $expected=($entry -split '\s+')[0]; $stream=[IO.File]::OpenRead($env:NODE_ARCHIVE); try { $sha=[Security.Cryptography.SHA256]::Create(); try { $actual=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','') } finally { $sha.Dispose() } } finally { $stream.Dispose() }; if ($actual -ne $expected) { exit 42 }"
+set "NODE_VERIFY_EXIT=%ERRORLEVEL%"
+if "%NODE_VERIFY_EXIT%"=="41" goto nodesharemismatch
+if "%NODE_VERIFY_EXIT%"=="42" goto nodebadhash
+if not "%NODE_VERIFY_EXIT%"=="0" goto nodechecksumerror
+echo   SHA-256 checksum verified against %NODE_SHASUMS_URL%
+
+"%POWERSHELLEXE%" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($env:NODE_ARCHIVE, $env:NODE_STAGE)"
+if errorlevel 1 goto nodeextractfailed
+
+call :validateprivatenode "%NODE_STAGE%\%NODE_PACKAGE%\node.exe"
+if errorlevel 1 goto nodearchiveinvalid
+
+if exist "%NODE_CACHE_ROOT%\bin" rd /s /q "%NODE_CACHE_ROOT%\bin" >nul 2>&1
+if exist "%NODE_CACHE_ROOT%\bin" goto nodecachebusy
+move /y "%NODE_STAGE%\%NODE_PACKAGE%" "%NODE_CACHE_ROOT%\bin" >nul 2>&1
+if errorlevel 1 goto nodepublishfailed
+call :validateprivatenode "%NODE_CACHE_ROOT%\bin\node.exe"
+if errorlevel 1 goto nodepublishedinvalid
+
+rd /s /q "%NODE_STAGE%" >nul 2>&1
+set "NODE_PRIVATE_SOURCE=private Node %NODE_LTS_VERSION% LTS"
+exit /b 0
+
+:privatecached
+set "NODE_PRIVATE_SOURCE=cached private Node"
+echo   using cached private Node from %NODE_CACHE_ROOT%\bin
+exit /b 0
+
+:nodearchivedownloadfailed
+set "NODE_SETUP_FAILURE=The Node zip could not be downloaded or copied. Check the network and try again."
+goto nodepreparefailed
+
+:nodesharedownloadfailed
+set "NODE_SETUP_FAILURE=The official SHASUMS256.txt could not be downloaded or copied, so the zip was not trusted."
+goto nodepreparefailed
+
+:nodesharemismatch
+set "NODE_SETUP_FAILURE=The official SHASUMS256.txt has no entry for %NODE_ARCHIVE_NAME%."
+goto nodepreparefailed
+
+:nodebadhash
+set "NODE_SETUP_FAILURE=The downloaded Node zip SHA-256 checksum did not match the official SHASUMS256.txt; it was not executed."
+goto nodepreparefailed
+
+:nodechecksumerror
+set "NODE_SETUP_FAILURE=Windows could not calculate or compare the Node zip SHA-256 checksum; it was not executed."
+goto nodepreparefailed
+
+:nodeextractfailed
+set "NODE_SETUP_FAILURE=The verified Node zip could not be extracted into the private cache."
+goto nodepreparefailed
+
+:nodearchiveinvalid
+set "NODE_SETUP_FAILURE=The verified archive did not contain a working node.exe version %NODE_MINIMUM% or newer."
+goto nodepreparefailed
+
+:nodecachebusy
+set "NODE_SETUP_FAILURE=The old private cache could not be replaced; another process may be using it."
+goto nodepreparefailed
+
+:nodepublishfailed
+call :validateprivatenode "%NODE_CACHE_ROOT%\bin\node.exe"
+if not errorlevel 1 goto nodepublishwonrace
+set "NODE_SETUP_FAILURE=The verified Node runtime could not be moved into the private cache."
+goto nodepreparefailed
+
+:nodepublishwonrace
+rd /s /q "%NODE_STAGE%" >nul 2>&1
+set "NODE_PRIVATE_SOURCE=cached private Node"
+exit /b 0
+
+:nodepublishedinvalid
+if exist "%NODE_CACHE_ROOT%\bin" rd /s /q "%NODE_CACHE_ROOT%\bin" >nul 2>&1
+set "NODE_SETUP_FAILURE=The private node.exe did not run after it was moved into the cache."
+goto nodepreparefailed
+
+:nodepreparefailed
+if defined NODE_STAGE if exist "%NODE_STAGE%" rd /s /q "%NODE_STAGE%" >nul 2>&1
+exit /b 2
+
+:validateprivatenode
+if not exist "%~1" exit /b 2
+"%~1" -e "const v=process.versions.node.split('.').map(Number);process.exit((v[0]>22||(v[0]===22&&v[1]>=5))?0:1)" >nul 2>&1
+if errorlevel 1 exit /b 2
+exit /b 0

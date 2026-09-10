@@ -104,7 +104,7 @@ test("metadata feedback never presents failed persistence or blocked archive as 
   }
 });
 
-test("Archive presentation mirrors the terminal-only durable matrix and fails closed", () => {
+test("Archive presentation mirrors the acknowledgement-aware durable matrix and fails closed", () => {
   const expected = [
     [
       "accepted",
@@ -120,8 +120,8 @@ test("Archive presentation mirrors the terminal-only durable matrix and fails cl
     ["failed", false, "Archive Agent Session"],
     [
       "recovery-required",
-      true,
-      "This Session's last turn outcome was never established, so it cannot be archived. Delete it instead.",
+      false,
+      "Confirm that this Session's final turn outcome is unknown to archive it. Archiving keeps it in Recovery required.",
     ],
   ] as const;
   for (const [status, disabled, title] of expected) {
@@ -179,6 +179,18 @@ test("an already archived valid row keeps Restore available with its exact name"
     session: Object.freeze({ ...command.session!, archived: true }),
   });
   assert.deepEqual(sessionArchiveControlPresentation(archivedCommand, false), {
+    accessibleName: "Restore Agent Session 01",
+    disabled: false,
+    label: "Restore",
+    operation: { kind: "restore" },
+    title: "Restore Agent Session",
+  });
+
+  const archivedRecovery = Object.freeze({
+    ...archivedCommand,
+    status: "recovery-required" as const,
+  });
+  assert.deepEqual(sessionArchiveControlPresentation(archivedRecovery, false), {
     accessibleName: "Restore Agent Session 01",
     disabled: false,
     label: "Restore",

@@ -1591,3 +1591,230 @@ test("version-two Work Ledgers migrate exactly once and remain readable after re
   assert.equal((await reopened.snapshot()).commands.length, 0);
   await reopened.close();
 });
+
+const glmStaticContext = JSON.stringify({
+  schemaVersion: 1,
+  endpointId: "glm-coding-plan",
+  management: "api-key-static",
+});
+
+const glmRoster = Object.freeze([
+  "codex-desktop",
+  "claude-code-desktop",
+  "glm-coding-plan",
+] as const);
+
+test("an api-key endpoint carries a constant authentication context with generation-free eligibility (WO08-A)", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "auth-glm-static-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const auth = createWorkLedgerAuthGenerationModule({ dataDirectory });
+
+  // Capture is constant and never consults (or requires) the ledger state.
+  assert.deepEqual(auth.captureForAcceptedCommand("glm-coding-plan"), {
+    schemaVersion: 1,
+    endpointId: "glm-coding-plan",
+    management: "api-key-static",
+  });
+
+  // The arm parses only in its exact encoding and only for its endpoint.
+  const { parseDurableAuthenticationContext } = await import(
+    "../../src/coordinator/work-ledger-auth-generation.ts"
+  );
+  assert.deepEqual(
+    parseDurableAuthenticationContext(glmStaticContext),
+    {
+      schemaVersion: 1,
+      endpointId: "glm-coding-plan",
+      management: "api-key-static",
+    },
+  );
+  assert.equal(
+    parseDurableAuthenticationContext(
+      JSON.stringify({
+        schemaVersion: 1,
+        endpointId: "codex-desktop",
+        management: "api-key-static",
+      }),
+    ),
+    undefined,
+  );
+  assert.equal(
+    parseDurableAuthenticationContext(
+      JSON.stringify({
+        schemaVersion: 1,
+        endpointId: "glm-coding-plan",
+        management: "api-key-static",
+        generation: "auth-generation-v1-00000000-0000-4000-8000-000000000001",
+      }),
+    ),
+    undefined,
+  );
+
+  // Resumability and resume eligibility reduce to shape equality.
+  assert.equal(auth.isSessionNativeResumable(glmStaticContext), true);
+  assert.equal(
+    auth.isNativeResumeEligible({
+      endpointId: "glm-coding-plan",
+      sessionContext: glmStaticContext,
+      commandContext: glmStaticContext,
+    }),
+    true,
+  );
+  assert.equal(
+    auth.isNativeResumeEligible({
+      endpointId: "glm-coding-plan",
+      sessionContext: null,
+      commandContext: glmStaticContext,
+    }),
+    false,
+  );
+  // The static arm never substitutes for a subscription endpoint's context.
+  assert.equal(
+    auth.isNativeResumeEligible({
+      endpointId: "codex-desktop",
+      sessionContext: glmStaticContext,
+      commandContext: glmStaticContext,
+    }),
+    false,
+  );
+});
+
+test("the coordinator admits GLM runtime contexts only through an injected endpoint roster (WO08-A)", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "auth-glm-roster-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  await writeFile(
+    join(dataDirectory, "project-registry-v1.json"),
+    emptyRegistry,
+    "utf8",
+  );
+  const authGeneration = createWorkLedgerAuthGenerationModule({ dataDirectory });
+  const databasePath = join(dataDirectory, "glm-roster.sqlite");
+
+  // Default roster: the two subscription endpoints only, byte-compatible
+  // with every direct coordinator consumer before GLM existed.
+  const legacy = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingCoordinatorAdapter(),
+  }).openProject(join(dataDirectory, "project"));
+  await assert.rejects(
+    legacy.act(startCommand("glm-rejected-by-default-roster"), {
+      endpointId: "glm-coding-plan",
+    }),
+    { category: "invalid-command" },
+  );
+  await legacy.close();
+
+  // A malformed roster is refused at construction, not silently narrowed.
+  assert.throws(
+    () =>
+      createWorkbenchCoordinator({
+        databasePath: join(dataDirectory, "never-opened.sqlite"),
+        adapter: new CompletingCoordinatorAdapter(),
+        endpointIds: ["codex-desktop", "codex-desktop", "glm-coding-plan"],
+      }),
+    { category: "invalid-command" },
+  );
+  assert.throws(
+    () =>
+      createWorkbenchCoordinator({
+        databasePath: join(dataDirectory, "never-opened.sqlite"),
+        adapter: new CompletingCoordinatorAdapter(),
+        endpointIds: [
+          "codex-desktop",
+          "kimi-future" as unknown as (typeof glmRoster)[number],
+        ],
+      }),
+    { category: "invalid-command" },
+  );
+
+  // Injected roster: start, durable context, resumability, continuation.
+  const channel = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingCoordinatorAdapter(),
+    authGeneration,
+    endpointIds: [...glmRoster],
+  }).openProject(join(dataDirectory, "project"));
+  const receipt = await channel.act(startCommand("glm-admitted-start"), {
+    endpointId: "glm-coding-plan",
+  });
+  assert.equal(receipt.status, "accepted");
+  await waitForTerminal(channel);
+  const snapshot = await channel.snapshot();
+  const session = snapshot.commands[0]?.session;
+  assert.ok(session);
+  assert.equal(snapshot.commands[0]?.status, "completed");
+  assert.equal(session.resumable, true);
+
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  const storedContexts = (
+    database
+      .prepare(
+        "SELECT auth_context_json FROM commands WHERE command_kind = 'start'",
+      )
+      .all() as unknown as Array<{ auth_context_json: string | null }>
+  ).map((row) => row.auth_context_json);
+  database.close();
+  assert.deepEqual(storedContexts, [glmStaticContext]);
+
+  const continued = await channel.act(
+    continueCommand("glm-admitted-continue", session.sessionId),
+    { endpointId: "glm-coding-plan" },
+  );
+  assert.equal(continued.status, "accepted");
+  await channel.close();
+});
+
+test("a GLM session never blocks a subscription login or logout scan (WO08-A)", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "auth-glm-blockers-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const ledgerDirectory = join(dataDirectory, "project-ledgers");
+  await mkdir(ledgerDirectory, { recursive: true });
+  const record = {
+    recordKey: "project-record-v1-00000000-0000-4000-8000-000000000077",
+    canonicalDirectory: join(dataDirectory, "project"),
+    ledgerSlot: "project-ledger-v1-00000000-0000-4000-8000-000000000077",
+  } as const;
+  await writeFile(
+    join(dataDirectory, "project-registry-v1.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      revision: 1,
+      nextProjectOrdinal: 2,
+      selectedRecordKey: record.recordKey,
+      records: [record],
+    })}\n`,
+    "utf8",
+  );
+  createLedger(
+    join(ledgerDirectory, `${record.ledgerSlot}.sqlite`),
+    "project-1",
+    record.canonicalDirectory,
+    [
+      {
+        id: "glm-completed-session",
+        status: "completed",
+        authenticationContext: glmStaticContext,
+      },
+    ],
+  );
+
+  const auth = createWorkLedgerAuthGenerationModule({ dataDirectory });
+  for (const endpointId of ["codex-desktop", "claude-code-desktop"] as const) {
+    const preparation = auth.prepareAuthenticationMutation({
+      endpointId,
+      action: "logout",
+    });
+    // The GLM Session belongs to no subscription endpoint: no blockers, and
+    // it never inflates the sign-out consequences either.
+    assert.equal(preparation.kind, "ready");
+    if (preparation.kind !== "ready") {
+      throw new Error("synthetic logout blocked by the GLM session");
+    }
+    assert.equal(
+      auth.cancelAuthenticationMutation({
+        preparationKey: preparation.preparationKey,
+      }),
+      true,
+    );
+  }
+});

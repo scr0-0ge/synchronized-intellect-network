@@ -118,6 +118,43 @@ test("grouping semantics survive the move into the view-model layer", () => {
   assert.equal(mixedPrefix[1]?.userMessage?.text, "modern");
 });
 
+test("timeline group identities follow source turns and same-turn groups, not render positions", () => {
+  const initialTimeline = Object.freeze([
+    userMessage("direct command"),
+    Object.freeze({ kind: "turn-started" as const }),
+    agentMessage("direct result"),
+    userMessage("first guidance"),
+    agentMessage("first guidance result"),
+    userMessage("second guidance"),
+    agentMessage("second guidance result"),
+  ] satisfies readonly WorkbenchTimelineEvent[]);
+  const initial = groupTimelineEvents(initialTimeline, undefined, 7);
+  const appended = groupTimelineEvents(
+    Object.freeze([
+      ...initialTimeline,
+      Object.freeze({ kind: "progress" as const, activity: "thinking" as const }),
+    ]),
+    undefined,
+    7,
+  );
+
+  assert.deepEqual(
+    initial.map((group) => group.key),
+    ["turn:7:group:1", "turn:7:group:2", "turn:7:group:3"],
+  );
+  assert.deepEqual(
+    appended.map((group) => group.key),
+    initial.map((group) => group.key),
+    "appending runtime data must not change an existing group's identity",
+  );
+  assert.equal(new Set(initial.map((group) => group.key)).size, initial.length);
+  assert.equal(
+    filterTranscriptGroups(initial, "second guidance")[0]?.key,
+    "turn:7:group:3",
+    "filtering may move a group to render position zero without changing its identity",
+  );
+});
+
 test("the client-side filter matches user text, agent text, and normalized events case-insensitively", () => {
   assert.deepEqual(
     visibleTexts(filterTranscriptGroups(groupedFixture, "login")),

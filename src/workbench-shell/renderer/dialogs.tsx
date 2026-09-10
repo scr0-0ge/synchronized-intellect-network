@@ -133,6 +133,19 @@ export const ProjectHistoriesDialog: Component<{
   const titleId = createUniqueId();
   const descriptionId = createUniqueId();
   const rows = () => projectHistoryRows(props.result ?? { status: "unavailable" });
+  const description = (): string => {
+    const result = props.result;
+    if (result === null) return projectHistoryCopy.loadingNotice;
+    if (result.status === "invalid-selection") {
+      return projectHistoryCopy.invalidSelectionNotice;
+    }
+    if (result.status === "unavailable") {
+      return projectHistoryCopy.unavailableNotice;
+    }
+    if (rows().length === 0) return projectHistoryCopy.noHistoriesNotice;
+    if (rows().length === 1) return projectHistoryCopy.emptyNotice;
+    return projectHistoryCopy.intent;
+  };
   let closeButton!: HTMLButtonElement;
   let returnFocus: HTMLElement | null = null;
 
@@ -168,66 +181,58 @@ export const ProjectHistoriesDialog: Component<{
         >
           <p class="system-kicker">{props.projectLabel}</p>
           <h2 id={titleId}>{projectHistoryCopy.title}</h2>
-          <p id={descriptionId}>{projectHistoryCopy.intent}</p>
-          <p class="project-histories-safety">{projectHistoryCopy.safety}</p>
-          <Show
-            when={props.result !== null}
-            fallback={<p aria-live="polite">{projectHistoryCopy.loadingNotice}</p>}
-          >
-            <Show
-              when={rows().length > 1}
-              fallback={<p>{projectHistoryCopy.emptyNotice}</p>}
-            >
-              <ul class="project-histories-list">
-                <For each={rows()}>
-                  {(row) => (
-                    <li
-                      class="project-histories-row"
-                      classList={{ "is-current": row.current }}
-                    >
-                      <div class="project-histories-facts">
-                        <b>{row.ordinalLabel}</b>
-                        <Show when={row.current}>
-                          <span class="project-histories-badge">
-                            {projectHistoryCopy.currentBadge}
-                          </span>
-                        </Show>
-                        <span>{row.contentLabel}</span>
-                        <span>
-                          {row.sizeLabel} · {row.lastModifiedLabel}
+          <p id={descriptionId} aria-live="polite">{description()}</p>
+          <Show when={rows().length > 1}>
+            <p class="project-histories-safety">{projectHistoryCopy.safety}</p>
+            <ul class="project-histories-list">
+              <For each={rows()}>
+                {(row) => (
+                  <li
+                    class="project-histories-row"
+                    classList={{ "is-current": row.current }}
+                  >
+                    <div class="project-histories-facts">
+                      <b>{row.ordinalLabel}</b>
+                      <Show when={row.current}>
+                        <span class="project-histories-badge">
+                          {projectHistoryCopy.currentBadge}
                         </span>
-                      </div>
-                      <Show when={row.adoptable}>
-                        <div class="project-histories-actions">
+                      </Show>
+                      <span>{row.contentLabel}</span>
+                      <span>
+                        {row.sizeLabel} · {row.lastModifiedLabel}
+                      </span>
+                    </div>
+                    <Show when={row.adoptable}>
+                      <div class="project-histories-actions">
+                        <button
+                          type="button"
+                          class="btn project-histories-adopt"
+                          disabled={props.pending}
+                          onClick={() => props.onAdopt(row.historyKey)}
+                        >
+                          {props.pending
+                            ? projectHistoryCopy.adoptingLabel
+                            : projectHistoryCopy.adoptLabel}
+                        </button>
+                        <Show when={row.hideable && props.onHide !== undefined}>
                           <button
                             type="button"
-                            class="btn project-histories-adopt"
+                            class="btn project-histories-hide"
                             disabled={props.pending}
-                            onClick={() => props.onAdopt(row.historyKey)}
+                            onClick={() => props.onHide?.(row.historyKey)}
                           >
                             {props.pending
-                              ? projectHistoryCopy.adoptingLabel
-                              : projectHistoryCopy.adoptLabel}
+                              ? projectHistoryCopy.hidingLabel
+                              : projectHistoryCopy.hideLabel}
                           </button>
-                          <Show when={row.hideable && props.onHide !== undefined}>
-                            <button
-                              type="button"
-                              class="btn project-histories-hide"
-                              disabled={props.pending}
-                              onClick={() => props.onHide?.(row.historyKey)}
-                            >
-                              {props.pending
-                                ? projectHistoryCopy.hidingLabel
-                                : projectHistoryCopy.hideLabel}
-                            </button>
-                          </Show>
-                        </div>
-                      </Show>
-                    </li>
-                  )}
-                </For>
-              </ul>
-            </Show>
+                        </Show>
+                      </div>
+                    </Show>
+                  </li>
+                )}
+              </For>
+            </ul>
           </Show>
           <Show when={props.notice}>
             {(notice) => (

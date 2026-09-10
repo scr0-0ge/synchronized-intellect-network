@@ -25,9 +25,12 @@ import {
 } from "./result-sanitizer.ts";
 
 export const WORKBENCH_SUBSCRIPTION_AUTHENTICATION_COPY = Object.freeze({
-  credentialHeading: "The Workbench never handles credentials",
+  // Narrowed per ADR 0022 (§0 conflict two): the promise is scoped to the
+  // subscription path; the GLM Coding Plan API key section is the disclosed
+  // API-transport exception and describes its own storage boundary.
+  credentialHeading: "Subscription credentials never pass through the Workbench",
   credentialSentence:
-    "This page never asks for a password, API key or token, never reads a credential file, and never stores credentials. None of those controls may be added.",
+    "Subscription sign-in happens in each provider's own app. This page never asks for a subscription password or token, never reads a subscription credential file, and never stores subscription credentials. The one exception is disclosed in the GLM Coding Plan API key section below.",
   consequence:
     "Recorded conversations stay in the Workbench. Resumable Sessions for this provider will no longer be resumable when this authentication action begins.",
   logoutRequested: "The Workbench asked the provider CLI to log out.",
@@ -704,7 +707,7 @@ function renderCard(
       ? "Log out"
       : state.authentication === "sign-in-required"
         ? "Login"
-        : "Re-check";
+        : "Re-check sign-in";
   const confirmation = state.confirmation;
   return Object.freeze({
     label,

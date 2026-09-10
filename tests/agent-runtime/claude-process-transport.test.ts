@@ -36,6 +36,57 @@ import {
   nativeLaunch,
 } from "../../src/agent-runtime/claude/process-transport.ts";
 
+test("Claude start and resume request partial messages without unused input replay", () => {
+  for (const resumeSessionIdentity of [undefined, "resume-fixture"]) {
+    const args = createClaudeSessionArguments({
+      projectDirectory: "project", permissionMode: "bypassPermissions",
+      profile: { model: "model", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" },
+      ...(resumeSessionIdentity === undefined ? {} : { resumeSessionIdentity }),
+    });
+    assert.ok(args.includes("--include-partial-messages"), "session launch must request partial thinking frames");
+    assert.equal(args.includes("--replay-user-messages"), false, "input replay has no product consumer");
+  }
+});
+
+test("Claude Session transport leaves stdout readable after stream-json input ends", async () => {
+  const child = fakeChild();
+  const dependencies: ClaudeCatalogProcessDependencies = Object.freeze({
+    async discoverExecutable() {
+      return nativeLaunch("claude.exe");
+    },
+    async readAuthenticationStatus() {
+      return loggedInSubscriptionAuthentication();
+    },
+    spawnProcess() {
+      queueMicrotask(() => child.emit("spawn"));
+      return child as unknown as ChildProcessWithoutNullStreams;
+    },
+  });
+  const transport = await createOfficialClaudeSessionTransport(
+    {
+      projectDirectory: "project-directory",
+      profile: {
+        model: "sonnet",
+        effortLevel: "low",
+        executionMode: "single-agent",
+        accessMode: "full-access",
+      },
+      permissionMode: "bypassPermissions",
+    },
+    dependencies,
+  );
+
+  assert.equal(typeof transport.finishInput, "function");
+  transport.finishInput?.();
+  child.stdout.write('{"type":"prompt_suggestion"}\n');
+  assert.equal(
+    await transport.receive(),
+    '{"type":"prompt_suggestion"}',
+  );
+  child.stdout.end();
+  await transport.stop();
+});
+
 test("Claude catalog is unavailable when official subscription OAuth is logged out", async () => {
   const child = fakeChild();
   const dependencies = Object.freeze({
@@ -736,6 +787,7 @@ test("Claude session launch uses streaming input, explicit profile, OAuth-only e
     "--output-format",
     "stream-json",
     "--verbose",
+    "--include-partial-messages",
     "--input-format",
     "stream-json",
     "--model",
@@ -805,6 +857,7 @@ test("Claude Ask when needed launch uses manual stdio approval and omits the dan
     "--output-format",
     "stream-json",
     "--verbose",
+    "--include-partial-messages",
     "--input-format",
     "stream-json",
     "--model",
@@ -909,6 +962,7 @@ test("Claude ultracode launch couples the private flag to native xhigh and never
     "--output-format",
     "stream-json",
     "--verbose",
+    "--include-partial-messages",
     "--input-format",
     "stream-json",
     "--model",
@@ -1140,6 +1194,17 @@ test("a managed version directory this scan cannot parse is still driven, not di
     await realpath(join(managed, "2.1.0-rc.1", "claude.exe")),
   );
 });
+
+for (const version of ["999.0.0", "3.0", "garbage-version"]) {
+  test(`Claude CLI drift: managed discovery admits isolated fake version ${version}`, async (t) => {
+    if (process.platform !== "win32") return;
+    const managed = await managedFixture((teardown) => t.after(teardown), [version]);
+    assert.equal(
+      await discoverClaudeExecutable(),
+      await realpath(join(managed, version, "claude.exe")),
+    );
+  });
+}
 
 test("a managed root past the entry bound still yields its newest runtime", async (t) => {
   if (process.platform !== "win32") return;

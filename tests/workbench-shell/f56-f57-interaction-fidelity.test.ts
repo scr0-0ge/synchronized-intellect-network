@@ -617,6 +617,55 @@ test(
 );
 
 test(
+  "W136 an in-flight Session explains why it cannot be deleted before confirmation",
+  { timeout: 30_000 },
+  async () => {
+    const { application, page } = await openHarness(
+      1_280,
+      820,
+      "scenario=session-removal-active",
+    );
+    try {
+      const sessionTrigger = page.getByRole("button", {
+        name: "Delete Agent Session 01",
+        exact: true,
+      });
+      await sessionTrigger.waitFor({ state: "visible" });
+      await sessionTrigger.click();
+
+      const firstResponse = await page.waitForFunction(() => {
+        const dialogCount = document.querySelectorAll('[role="alertdialog"]').length;
+        const feedback = Array.from(document.querySelectorAll('[role="alert"]'))
+          .map((element) => element.textContent ?? "")
+          .find((text) => text.includes("turn is running"));
+        return dialogCount > 0 || feedback !== undefined
+          ? { dialogCount, feedback: feedback ?? null }
+          : undefined;
+      });
+      assert.deepEqual(await firstResponse.jsonValue(), {
+        dialogCount: 0,
+        feedback:
+          "Agent Session was not deleted because a turn is running. Let it finish, then try again.",
+      });
+      assert.equal(
+        await page.evaluate(() =>
+          Number(document.documentElement.dataset.qaSessionRemovalCalls ?? "0"),
+        ),
+        0,
+        "the preflight must not send a removal request",
+      );
+      assert.equal(
+        await sessionTrigger.count(),
+        1,
+        "the active Session remains in the rail",
+      );
+    } finally {
+      await application.close();
+    }
+  },
+);
+
+test(
   "F94 Session deletion and Project removal require an accessible confirmation and report blocked work honestly",
   { timeout: 30_000 },
   async () => {
@@ -739,7 +788,10 @@ test(
         .click({ timeout: 5_000 });
       await dialog.waitFor({ state: "hidden", timeout: 5_000 });
       await page
-        .getByRole("heading", { name: "Project view unavailable", exact: true })
+        .getByRole("heading", {
+          name: "No Projects in the Workbench",
+          exact: true,
+        })
         .waitFor({ state: "visible", timeout: 5_000 });
       const result = page.getByRole("status").filter({
         hasText: "folder and files remain on disk",
@@ -1147,10 +1199,133 @@ test(
   },
 );
 
+test(
+  "a current-turn prompt suggestion fills the composer without sending and disappears on a suggestion-less next turn",
+  { timeout: 30_000 },
+  async () => {
+    const { application, page } = await openHarness(
+      1_280,
+      820,
+      "scenario=prompt-suggestions",
+    );
+    try {
+      const suggestions = page.locator(".prompt-suggestion");
+      await suggestions.first().waitFor({ state: "visible" });
+      assert.deepEqual(await suggestions.allTextContents(), [
+        "Check the remaining tests",
+        "Explain the implementation trade-off",
+      ]);
+      assert.equal(await page.locator("#direct-input").inputValue(), "");
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.dataset.qaSubmissionCalls,
+        ),
+        "0",
+      );
+
+      await page.locator("#direct-input").fill("Keep this draft exactly as written.");
+      await suggestions.first().evaluate((button) => (button as HTMLButtonElement).click());
+      assert.equal(
+        await page.locator("#direct-input").inputValue(),
+        "Keep this draft exactly as written.",
+        "a suggestion must never replace a non-empty local draft",
+      );
+
+      await page.locator("#direct-input").fill("");
+      await suggestions.first().click();
+      assert.equal(
+        await page.locator("#direct-input").inputValue(),
+        "Check the remaining tests",
+      );
+      assert.equal(
+        await page.evaluate(
+          () => document.documentElement.dataset.qaSubmissionCalls,
+        ),
+        "0",
+        "choosing a suggestion must not submit on the user's behalf",
+      );
+
+      await page.evaluate(() =>
+        window.dispatchEvent(new Event("qa-prompt-suggestions-next-turn")),
+      );
+      await suggestions.first().waitFor({ state: "detached" });
+      assert.equal(await suggestions.count(), 0, "an older turn is never reused");
+    } finally {
+      await application.close();
+    }
+  },
+);
+
+test("non-empty drafts visibly disable every prompt suggestion with a localized reason until cleared", { timeout: 45_000 }, async () => {
+  for (const [locale, reason] of [
+    ["en", "Clear the current draft before choosing a suggested follow-up."],
+    ["zh-CN", "请先清空当前草稿，再选择追问建议。"],
+  ]) {
+    const { application, page } = await openHarness(1_280, 820, `scenario=prompt-suggestions&locale=${locale}`);
+    try {
+      const suggestions = page.locator(".prompt-suggestion");
+      const input = page.locator("#direct-input");
+      await suggestions.first().waitFor({ state: "visible" });
+      const labels = await suggestions.allTextContents();
+      assert.equal(labels.length, 2);
+
+      for (const draft of ["Keep this draft exactly as written.", "   "]) {
+        await input.fill(draft);
+        assert.deepEqual(
+          await suggestions.evaluateAll((buttons) => buttons.map((button) => ({
+            disabled: (button as HTMLButtonElement).disabled,
+            title: (button as HTMLButtonElement).title,
+          }))),
+          labels.map(() => ({ disabled: true, title: reason })),
+          `${locale}: a non-empty draft must visibly disable every suggestion and explain why`,
+        );
+        await suggestions.evaluateAll((buttons) => buttons.forEach((button) => (button as HTMLButtonElement).click()));
+        assert.equal(await input.inputValue(), draft, "disabled suggestions preserve the exact draft");
+      }
+
+      await input.fill("");
+      assert.deepEqual(
+        await suggestions.evaluateAll((buttons) => buttons.map((button) => ({
+          disabled: (button as HTMLButtonElement).disabled,
+          title: (button as HTMLButtonElement).title,
+        }))),
+        labels.map((label) => ({ disabled: false, title: label })),
+        "clearing the draft restores the suggestions and their original titles",
+      );
+      await suggestions.first().click();
+      assert.equal(await input.inputValue(), "Check the remaining tests");
+      assert.equal(await page.evaluate(() => document.documentElement.dataset.qaSubmissionCalls), "0");
+    } finally { await application.close(); }
+  }
+});
+
+test("automatic continuation stop reason stays inside the Stage header without covering the transcript", { timeout: 45_000 }, async () => {
+  for (const locale of ["en", "zh-CN"]) {
+    const { application, page } = await openHarness(1_024, 768, `scenario=continuation-stop&locale=${locale}`, {
+      APPDATA: join(isolatedUserDataRoot, "appdata"), LOCALAPPDATA: join(isolatedUserDataRoot, "local-appdata"),
+    });
+    try {
+      await page.locator(".continuation-stop-notice").waitFor({ state: "visible" });
+      const geometry = await page.evaluate(() => {
+        const notice = document.querySelector(".continuation-stop-notice")!.getBoundingClientRect();
+        const header = document.querySelector(".stage-head")!.getBoundingClientRect();
+        const transcript = document.querySelector(".transcript-shell")?.getBoundingClientRect();
+        return { noticeBottom: notice.bottom, headerBottom: header.bottom, transcriptTop: transcript?.top };
+      });
+      await page.screenshot({ path: join(tmpdir(), `uaw-w167-stop-${locale}.png`) });
+      assert.ok(geometry.noticeBottom <= geometry.headerBottom + 1, JSON.stringify(geometry));
+      assert.ok(geometry.transcriptTop !== undefined && geometry.transcriptTop >= geometry.noticeBottom,
+        "the stop reason must not cover the conversation");
+      assert.equal(await page.locator(".stage-head .turn-state").innerText(), locale === "en" ? "COMPLETED" : "已完成");
+    } finally { await application.close(); }
+  }
+});
+
 async function openHarness(
   width: number,
   height: number,
   query = "",
+  environment: Readonly<Record<string, string>> = {},
 ): Promise<Readonly<{ application: ElectronApplication; page: Page }>> {
   const userDataDirectory = resolve(
     await mkdtemp(join(isolatedUserDataRoot, "workbench-renderer-harness-")),
@@ -1172,6 +1347,7 @@ async function openHarness(
       args: [harnessMain, `--user-data-dir=${userDataDirectory}`],
       env: {
         ...process.env,
+        ...environment,
         UAW_QA_URL: targetUrl.href,
         UAW_QA_WIDTH: String(width),
         UAW_QA_HEIGHT: String(height),

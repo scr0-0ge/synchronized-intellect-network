@@ -389,7 +389,8 @@ export async function applyConversationStoreMerge(options: {
     "conversation-store-output-path-aliased",
   );
   let stagingDirectory: string | undefined = await mkdtemp(
-    join(outputParent, ".conversation-store-merge-staging-"),
+    // mkdtemp needs the physical, extended-length spelling on Windows too.
+    toNamespacedPath(join(await realpath(outputParent), ".conversation-store-merge-staging-")),
   );
   try {
     for (const version of refreshedPlan.uniqueFileVersions) {

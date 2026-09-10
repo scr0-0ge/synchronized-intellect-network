@@ -44,7 +44,7 @@ export function createWorkbenchCreateProjectFilesystem(
       let targetKind: WorkbenchCreateProjectPathKind;
       try {
         parentKind = await boundary.inspect(parentPath);
-        if (parentKind !== "directory") return "parent-unavailable";
+        if (parentKind !== "directory") return parentFailure(parentKind);
         targetKind = await boundary.inspect(targetPath);
       } catch {
         return "create-failed-known-no-commit";
@@ -71,6 +71,23 @@ export function createWorkbenchCreateProjectFilesystem(
       }
     },
   });
+}
+
+function parentFailure(
+  kind: Exclude<WorkbenchCreateProjectPathKind, "directory">,
+): WorkbenchCreateProjectCreateResult {
+  switch (kind) {
+    case "absent":
+      return "parent-directory-missing";
+    case "file":
+      return "parent-is-file";
+    case "alias":
+      return "parent-is-alias";
+    case "reparse":
+      return "parent-is-reparse";
+    case "unavailable":
+      return "parent-unavailable";
+  }
 }
 
 async function inspectNodePath(

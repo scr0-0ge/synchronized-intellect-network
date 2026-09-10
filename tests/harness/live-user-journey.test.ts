@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -84,9 +84,9 @@ test("temporary-root safety accepts an aliased parent that resolves to the same 
         const root = await createTemporaryRoot();
         try {
           const physicalRoot = await realpath(root);
-          assert.notEqual(
-            resolve(root).toLocaleLowerCase("en-US"),
-            physicalRoot.toLocaleLowerCase("en-US"),
+          assert.equal(
+            basename(dirname(resolve(root))).toLocaleLowerCase("en-US"),
+            "physical-temp",
           );
           assert.equal(
             dirname(physicalRoot).toLocaleLowerCase("en-US"),

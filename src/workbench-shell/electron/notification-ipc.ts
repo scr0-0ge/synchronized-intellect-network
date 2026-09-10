@@ -1,13 +1,16 @@
 import {
+  WORKBENCH_NOTIFICATION_ACTIVATED_CHANNEL,
   WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL,
-  publicTurnNotificationNotShown,
-  publicTurnNotificationShown,
   reconstructWorkbenchTurnNotificationRequest,
 } from "../notification-bridge.ts";
 
 type BoundaryListener = (...values: unknown[]) => unknown;
 
 export interface WorkbenchNotificationRendererSender {
+  send(
+    channel: typeof WORKBENCH_NOTIFICATION_ACTIVATED_CHANNEL,
+    value: unknown,
+  ): void;
   isDestroyed(): boolean;
   on(event: string, listener: BoundaryListener): void;
   removeListener(event: string, listener: BoundaryListener): void;
@@ -110,7 +113,7 @@ export function installWorkbenchNotificationIpc(options: {
 
   const notifyHandler: BoundaryListener = (...values) => {
     if (disposed || !actionOpen) {
-      return publicTurnNotificationNotShown("bridge-closed");
+      return;
     }
     const sender = owningSender(values[0], options.window);
     const request = reconstructWorkbenchTurnNotificationRequest(values[1]);
@@ -120,18 +123,18 @@ export function installWorkbenchNotificationIpc(options: {
       sender.isDestroyed() ||
       !request.ok
     ) {
-      return publicTurnNotificationNotShown("invalid-request");
+      return;
     }
     let toast: WorkbenchSystemNotificationInstance | undefined;
     try {
       if (options.window.isFocused()) {
-        return publicTurnNotificationNotShown("window-focused");
+        return;
       }
       if (
         typeof options.notification.isSupported !== "function" ||
         !options.notification.isSupported()
       ) {
-        return publicTurnNotificationNotShown("notifications-unavailable");
+        return;
       }
       toast = new options.notification({
         title: request.value.title,
@@ -141,6 +144,12 @@ export function installWorkbenchNotificationIpc(options: {
       const onClick: BoundaryListener = (): void => {
         releaseNotification(ownedToast, false);
         focusMainWindow(options.window);
+        requestSessionSelection(
+          sender,
+          request.value.commandKey,
+          request.value.projectScopeEpoch,
+          request.value.rendererInstanceKey,
+        );
       };
       const onClose: BoundaryListener = (): void => {
         if (options.platform === "win32") {
@@ -163,12 +172,10 @@ export function installWorkbenchNotificationIpc(options: {
       toast.on("close", onClose);
       toast.on("failed", onFailed);
       toast.show();
-      return publicTurnNotificationShown();
     } catch {
       if (toast !== undefined) {
         releaseNotification(toast, true);
       }
-      return publicTurnNotificationNotShown("notifications-unavailable");
     }
   };
 
@@ -180,11 +187,17 @@ export function installWorkbenchNotificationIpc(options: {
     WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL,
     notifyHandler,
   );
-  options.window.webContents.on(
+  // Captured while the window is still alive. Reading the `webContents`
+  // getter on a destroyed BrowserWindow throws `Object has been destroyed`,
+  // and dispose() runs from the window's own "closed" handler, where the
+  // window is destroyed by definition (issue 172). A reference taken here
+  // keeps answering removeListener afterwards, so nothing has to be caught.
+  const rendererSender = options.window.webContents;
+  rendererSender.on(
     "render-process-gone",
     terminalLifecycleListener,
   );
-  options.window.webContents.on("destroyed", terminalLifecycleListener);
+  rendererSender.on("destroyed", terminalLifecycleListener);
   options.window.on("closed", terminalLifecycleListener);
 
   return Object.freeze({
@@ -193,17 +206,34 @@ export function installWorkbenchNotificationIpc(options: {
       disposed = true;
       closeNotificationAuthority();
       options.ipcMain.removeHandler(WORKBENCH_NOTIFY_TURN_COMPLETED_CHANNEL);
-      options.window.webContents.removeListener(
+      rendererSender.removeListener(
         "render-process-gone",
         terminalLifecycleListener,
       );
-      options.window.webContents.removeListener(
+      rendererSender.removeListener(
         "destroyed",
         terminalLifecycleListener,
       );
       options.window.removeListener("closed", terminalLifecycleListener);
     },
   });
+}
+
+function requestSessionSelection(
+  sender: WorkbenchNotificationRendererSender,
+  commandKey: string,
+  projectScopeEpoch: number,
+  rendererInstanceKey: string,
+): void {
+  try {
+    if (sender.isDestroyed()) return;
+    sender.send(
+      WORKBENCH_NOTIFICATION_ACTIVATED_CHANNEL,
+      Object.freeze({ commandKey, projectScopeEpoch, rendererInstanceKey }),
+    );
+  } catch {
+    // The window is already foregrounded; keep its current selection.
+  }
 }
 
 function removeNotificationListener(

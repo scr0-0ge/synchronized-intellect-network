@@ -44,7 +44,6 @@ test("accepted authority persists ready/claimed/result phases before each ordere
     kind: "chooser-result",
     operationNumber: 1,
     result: "selected",
-    targetPath,
     targetToken,
   });
   apply({
@@ -63,7 +62,6 @@ test("accepted authority persists ready/claimed/result phases before each ordere
     operationNumber: 1,
     result: "committed",
   });
-  assert.equal(state.active?.targetPath, null);
   const delivered = apply({ kind: "deliver-result", operationNumber: 1 });
 
   assert.deepEqual(trace, [
@@ -244,7 +242,7 @@ test("a new controller lifecycle reopens a cleanly closed authority without effe
   assert.equal(malformed.state, state);
 });
 
-test("selected active state validates the exact target path/token relation", () => {
+test("selected active state retains only an opaque target token", () => {
   let state = createEmptyWorkbenchCreateProjectState();
   state = transitionWorkbenchCreateProject(state, {
     kind: "renderer-create-intent",
@@ -258,44 +256,18 @@ test("selected active state validates the exact target path/token relation", () 
     kind: "chooser-result",
     operationNumber: 1,
     result: "selected",
-    targetPath,
     targetToken,
   }).state;
   assert.equal(state.active?.phase, "create-ready");
   assert.equal(validateWorkbenchCreateProjectState(state), true);
 
-  const forged = structuredClone(state) as unknown as {
-    active: { targetToken: string };
-  };
-  forged.active.targetToken =
-    "candidate-ffffffffffffffffffffffffffffffff";
-  assert.equal(validateWorkbenchCreateProjectState(forged), false);
+  assert.equal("targetPath" in (state.active ?? {}), false);
 
-  const alternatePath = "C:\\owned-test-root\\.\\New Project";
-  const alternate = structuredClone(state) as unknown as {
-    active: { targetPath: string; targetToken: string };
+  const persistedPath = structuredClone(state) as unknown as {
+    active: { targetPath: string };
   };
-  alternate.active.targetPath = alternatePath;
-  alternate.active.targetToken =
-    createWorkbenchCreateProjectTargetToken(alternatePath);
-  assert.equal(validateWorkbenchCreateProjectState(alternate), false);
-  assert.equal(
-    createWorkbenchCreateProjectTargetToken(alternatePath),
-    targetToken,
-  );
-
-  for (const nonlocalPath of [
-    "\\\\server\\share\\New Project",
-    "\\\\?\\C:\\owned-test-root\\New Project",
-  ]) {
-    const nonlocal = structuredClone(state) as unknown as {
-      active: { targetPath: string; targetToken: string };
-    };
-    nonlocal.active.targetPath = nonlocalPath;
-    nonlocal.active.targetToken =
-      createWorkbenchCreateProjectTargetToken(nonlocalPath);
-    assert.equal(validateWorkbenchCreateProjectState(nonlocal), false);
-  }
+  persistedPath.active.targetPath = targetPath;
+  assert.equal(validateWorkbenchCreateProjectState(persistedPath), false);
 });
 
 test("revision and recovery-capacity boundaries are closed under transition", () => {
@@ -336,7 +308,6 @@ test("revision and recovery-capacity boundaries are closed under transition", ()
       kind: "chooser-result",
       operationNumber: 1,
       result: "selected",
-      targetPath,
       targetToken,
     },
     {
@@ -402,7 +373,6 @@ test("unreachable selected unavailable response state is rejected", () => {
       kind: "chooser-result",
       operationNumber: 1,
       result: "selected",
-      targetPath,
       targetToken,
     },
   ] as WorkbenchCreateProjectTransitionEvent[]) {
@@ -413,7 +383,6 @@ test("unreachable selected unavailable response state is rejected", () => {
   };
   Object.assign(forged.active, {
     phase: "response-ready",
-    targetPath: null,
     outcome: "unavailable",
   });
   assert.equal(validateWorkbenchCreateProjectState(forged), false);

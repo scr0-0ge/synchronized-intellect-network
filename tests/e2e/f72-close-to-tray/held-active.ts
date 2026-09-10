@@ -10,6 +10,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -691,6 +692,15 @@ function respond(message, result) {
   emit({ jsonrpc: "2.0", id: message.id, result });
 }
 
+function publishControlFile(targetPath, contents) {
+  const pendingPath = targetPath + ".pending";
+  fileSystem.writeFileSync(pendingPath, contents, {
+    encoding: "utf8",
+    flag: "wx",
+  });
+  fileSystem.renameSync(pendingPath, targetPath);
+}
+
 function finishOwnedRuntime(reason, exitCode) {
   if (exiting) return;
   exiting = true;
@@ -698,7 +708,7 @@ function finishOwnedRuntime(reason, exitCode) {
   if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
   if (!heldTurnOwned) process.exit(exitCode);
   try {
-    fileSystem.writeFileSync(
+    publishControlFile(
       exitPath,
       JSON.stringify({
         schema: "f72-held-codex-runtime-exit-v1",
@@ -709,7 +719,6 @@ function finishOwnedRuntime(reason, exitCode) {
         projectDirectory: fileSystem.realpathSync(process.cwd()),
         reason,
       }),
-      { encoding: "utf8", flag: "wx" },
     );
   } catch {
     process.exit(99);
@@ -836,7 +845,7 @@ reader.on("line", (line) => {
         item: { id: itemId, type: "agentMessage" },
       },
     });
-    fileSystem.writeFileSync(
+    publishControlFile(
       readyPath,
       JSON.stringify({
         schema: "f72-held-codex-runtime-v1",
@@ -845,7 +854,6 @@ reader.on("line", (line) => {
         executablePath: fileSystem.realpathSync(process.execPath),
         projectDirectory: fileSystem.realpathSync(process.cwd()),
       }),
-      { encoding: "utf8", flag: "wx" },
     );
     heldTurnOwned = true;
     waitForRelease();
@@ -928,10 +936,15 @@ async function releaseHeldRuntime(
     control,
     "held-runtime-release.txt",
   );
-  await writeFile(control.releasePath, `${control.ownerNonce}\n`, {
+  const releasePendingPath = join(
+    control.controlDirectory,
+    "held-runtime-release.pending",
+  );
+  await writeFile(releasePendingPath, `${control.ownerNonce}\n`, {
     encoding: "utf8",
     flag: "wx",
   });
+  await rename(releasePendingPath, control.releasePath);
 }
 
 async function waitForHeldRuntimeExitAcknowledgement(

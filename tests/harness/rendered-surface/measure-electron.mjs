@@ -91,6 +91,27 @@ async function runDriver() {
     });
 
     await waitForStage("surface navigation", 30_000, () => window.loadURL(job.url));
+
+    /* An OS-level media feature has no click path. It is emulated through the
+       renderer's own DevTools protocol, once the navigation has produced a
+       renderer for the protocol to reach, and before the in-page program runs
+       — so every step, settle and capture below happens in the requested
+       configuration. The collected root reports what `matchMedia` resolved, so
+       an emulation that failed to engage is visible in the reading rather than
+       assumed. */
+    const emulatedMediaFeatures = job.emulatedMediaFeatures ?? [];
+    if (emulatedMediaFeatures.length > 0) {
+      window.webContents.debugger.attach("1.3");
+      await waitForStage("emulated media features", 10_000, () =>
+        window.webContents.debugger.sendCommand("Emulation.setEmulatedMedia", {
+          features: emulatedMediaFeatures.map((feature) => ({
+            name: String(feature.name),
+            value: String(feature.value),
+          })),
+        }),
+      );
+      announceStage("emulated media features applied");
+    }
     await waitForStage("in-page program injection", 10_000, () => run(window, program));
     await waitForStage("motion freeze", 10_000, () =>
       evaluate(
@@ -157,6 +178,7 @@ async function runDriver() {
       devicePixelRatio: collected.devicePixelRatio,
       capture: { width: plain.width, height: plain.height },
       root: collected.root,
+      mediaEnvironment: collected.mediaEnvironment,
       fallbackGround: collected.fallbackGround,
       grids: collected.grids,
       texts: collected.texts.map((text) => ({
@@ -164,6 +186,7 @@ async function runDriver() {
         boxes: text.boxes.map((box) => sampleBox(box, collected.viewport, inked, plain)),
       })),
       extents: collected.extents,
+      clippedControls: collected.clippedControls,
       paintedEdges: collected.paintedEdges,
       grounds: collected.grounds.map((ground) => ({
         ...ground,

@@ -1,4 +1,6 @@
-import { join } from "node:path";
+import { installWorkbenchSubscriptionUsageIpc } from "./subscription-usage-ipc.ts";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
@@ -10,6 +12,7 @@ import {
   Menu,
   nativeImage,
   Notification,
+  safeStorage,
   screen,
   session,
   Tray,
@@ -29,12 +32,54 @@ import {
   type WorkbenchAppearancePreferenceStore,
 } from "../appearance-preference-store.ts";
 import {
+  createWorkbenchGlmEndpointKeySource,
+  endpointSecretEnvelopeStorePath,
+  GLM_ENDPOINT_KEY_SUBJECT,
+  type WorkbenchEndpointKeySource,
+} from "../glm-endpoint-key.ts";
+import {
+  createWorkbenchKimiEndpointKeySource,
+  KIMI_ENDPOINT_KEY_SUBJECT,
+} from "../kimi-endpoint-key.ts";
+import {
+  createWorkbenchDeepseekEndpointKeySource,
+  DEEPSEEK_ENDPOINT_KEY_SUBJECT,
+} from "../deepseek-endpoint-key.ts";
+import {
+  createWorkbenchKimiPlatformKeySource,
+  KIMI_PLATFORM_ENDPOINT_KEY_SUBJECT,
+} from "../kimi-platform-key.ts";
+import {
+  createWorkbenchClaudeApiEndpointKeySource,
+  CLAUDE_API_ENDPOINT_KEY_SUBJECT,
+} from "../claude-api-endpoint-key.ts";
+import {
+  createWorkbenchCodexApiEndpointKeySource,
+  CODEX_API_ENDPOINT_KEY_SUBJECT,
+} from "../codex-api-endpoint-key.ts";
+import {
+  createEndpointCatalogFreshnessService,
+  type EndpointCatalogFreshnessService,
+} from "../endpoint-catalog-freshness.ts";
+import {
+  createCliUpdateService,
+  type CliUpdateService,
+} from "../cli-update-check.ts";
+import {
+  installWorkbenchCliUpdateIpc,
+  type WorkbenchCliUpdateIpcBinding,
+} from "../cli-update-ipc.ts";
+import { GLM_ENDPOINT_ENV_CONTRACT } from "../../agent-runtime/claude/endpoint-env-factory.ts";
+import { DEEPSEEK_ENDPOINT_ENV_CONTRACT } from "../../agent-runtime/claude/deepseek-catalog.ts";
+import { EndpointSecretEnvelopeStore } from "../endpoint-secret-envelope-store.ts";
+import {
   createWorkbenchCreateProjectController,
   type WorkbenchCreateProjectController,
 } from "../create-project-controller.ts";
 import { createNodeWorkbenchCreateProjectFilesystem } from "../create-project-filesystem.ts";
 import { openWorkbenchCreateProjectStateStore } from "../create-project-store.ts";
 import { resolveConversationStoreRoot } from "../conversation-store-root.ts";
+import { migrateRenamedSettings, type RenameSettingsNotice } from "../rename-settings-migration.ts";
 import {
   createWorkbenchProjectHost,
   type WorkbenchProjectHost,
@@ -60,9 +105,21 @@ import {
   type WorkbenchAppearancePreferenceIpcBinding,
 } from "./appearance-preference-ipc.ts";
 import {
+  installWorkbenchEndpointKeyIpc,
+  type WorkbenchEndpointKeyIpcBinding,
+} from "./endpoint-key-ipc.ts";
+import {
+  installWorkbenchEndpointCatalogFreshnessIpc,
+  type WorkbenchEndpointCatalogFreshnessIpcBinding,
+} from "./endpoint-catalog-freshness-ipc.ts";
+import {
   installWorkbenchClaudePermissionHandlingIpc,
   type WorkbenchClaudePermissionHandlingIpcBinding,
 } from "./claude-permission-handling-ipc.ts";
+import {
+  installWorkbenchEndpointPreferenceIpc,
+  type WorkbenchEndpointPreferenceIpcBinding,
+} from "./endpoint-preference-ipc.ts";
 import {
   installWorkbenchRuntimeExecutableIpc,
   type WorkbenchRuntimeExecutableIpcBinding,
@@ -90,6 +147,11 @@ import {
   installWorkbenchSubscriptionAuthenticationActionIpc,
   type WorkbenchSubscriptionAuthenticationIpcBinding,
 } from "./subscription-authentication-ipc.ts";
+import {
+  closeDurableStateAfterListenerShutdown,
+  runWorkbenchTeardownSteps,
+  type WorkbenchTeardownFailure,
+} from "./binding-teardown.ts";
 import {
   closeWorkbenchBackendAfterInitialization,
   createWorkbenchLifecycleController,
@@ -129,7 +191,7 @@ import {
   type WorkbenchWindowControlIpcBinding,
 } from "../window-control-bridge.ts";
 
-app.setName("unified-agent-workbench");
+app.setName("synchronized-intellect-network");
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 
 /*
@@ -184,9 +246,29 @@ let historyRecovery: HistoricalRecoveryLibrary | null = null;
 let historyRecoveryIpc: HistoryRecoveryIpcBinding | null = null;
 let historyRecoveryIpcShutdown: Promise<void> = Promise.resolve();
 let windowControlIpc: WorkbenchWindowControlIpcBinding | null = null;
+let nativeFrameReassertion: NativeWindowFrameReassertionInstallation | null =
+  null;
 let appearancePreferenceIpc: WorkbenchAppearancePreferenceIpcBinding | null =
   null;
 let claudePermissionHandlingIpc: WorkbenchClaudePermissionHandlingIpcBinding | null =
+  null;
+let subscriptionUsageIpc: ReturnType<typeof installWorkbenchSubscriptionUsageIpc> | null = null;
+let endpointPreferenceIpc: WorkbenchEndpointPreferenceIpcBinding | null =
+  null;
+let endpointKeyIpc: WorkbenchEndpointKeyIpcBinding[] = [];
+let endpointCatalogFreshnessIpc: WorkbenchEndpointCatalogFreshnessIpcBinding | null =
+  null;
+let cliUpdateService: CliUpdateService | null = null;
+let cliUpdateIpc: WorkbenchCliUpdateIpcBinding | null = null;
+// One key source per static-key endpoint (GLM, Kimi, DeepSeek), each bound
+// to its own envelope subject over the one shared store file.
+let glmEndpointKeySource: WorkbenchEndpointKeySource | null = null;
+let kimiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
+let deepseekEndpointKeySource: WorkbenchEndpointKeySource | null = null;
+let kimiPlatformEndpointKeySource: WorkbenchEndpointKeySource | null = null;
+let claudeApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
+let codexApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
+let endpointCatalogFreshnessService: EndpointCatalogFreshnessService | null =
   null;
 let runtimeExecutableIpc: WorkbenchRuntimeExecutableIpcBinding | null = null;
 let subscriptionAuthenticationIpc: WorkbenchSubscriptionAuthenticationIpcBinding | null =
@@ -200,8 +282,156 @@ let shutdownRequested = false;
 let startupFailurePresented = false;
 
 function disposeNotificationIpcBinding(): void {
-  notificationIpc?.dispose();
+  // Cleared before it is disposed, so a dispose that fails cannot leave the
+  // binding live for a second attempt (issue 172).
+  const closing = notificationIpc;
   notificationIpc = null;
+  closing?.dispose();
+}
+
+function reportTeardownFailure(failure: WorkbenchTeardownFailure): void {
+  // Reaches `run-app.log` beside the launch diagnostics. A teardown failure
+  // that vanishes is how a visible race becomes a silent one.
+  console.error(`[teardown] step=${failure.name} failed`, failure.error);
+}
+
+/*
+ * The one list of bindings the main window owns, and the one place it runs.
+ *
+ * The lifecycle drain and the window's own "closed" handler both need this, in
+ * either order. They used to hold two hand-maintained copies of it that had
+ * drifted apart — the drain's omitted `nativeFrameReassertion` — and each ran
+ * its copy as a plain statement sequence, so one `dispose()` throwing abandoned
+ * every later binding. Every step here clears its slot before disposing, which
+ * makes a second run a no-op, and the steps are run independently, which stops
+ * one failure from cancelling nine unrelated ones.
+ */
+function disposeWindowScopedBindings(): void {
+  runWorkbenchTeardownSteps(
+    [
+      {
+        name: "historyRecoveryIpc",
+        run() {
+          const closing = historyRecoveryIpc;
+          historyRecoveryIpc = null;
+          historyRecoveryIpcShutdown =
+            closing?.dispose() ?? historyRecoveryIpcShutdown;
+        },
+      },
+      {
+        name: "subscriptionAuthenticationIpc",
+        run() {
+          const closing = subscriptionAuthenticationIpc;
+          subscriptionAuthenticationIpc = null;
+          subscriptionAuthenticationShutdown =
+            closing?.dispose() ?? subscriptionAuthenticationShutdown;
+        },
+      },
+      {
+        name: "appearancePreferenceIpc",
+        run() {
+          const closing = appearancePreferenceIpc;
+          appearancePreferenceIpc = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "claudePermissionHandlingIpc",
+        run() {
+          const closing = claudePermissionHandlingIpc;
+          claudePermissionHandlingIpc = null;
+          closing?.dispose();
+        },
+      },
+      // main-resync: the lane's window-scoped bindings ride the same one list
+      // (family endpoint preferences, the per-endpoint key bindings, catalog
+      // freshness, CLI update) so they gain the per-step isolation this module
+      // exists to provide instead of a second hand-maintained sequence.
+      {
+        name: "subscriptionUsageIpc",
+        run() {
+          const closing = subscriptionUsageIpc;
+          subscriptionUsageIpc = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "endpointPreferenceIpc",
+        run() {
+          const closing = endpointPreferenceIpc;
+          endpointPreferenceIpc = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "endpointKeyIpc",
+        run() {
+          const closing = endpointKeyIpc;
+          endpointKeyIpc = [];
+          for (const binding of closing) binding.dispose();
+        },
+      },
+      {
+        name: "endpointCatalogFreshnessIpc",
+        run() {
+          const closing = endpointCatalogFreshnessIpc;
+          endpointCatalogFreshnessIpc = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "cliUpdateIpc",
+        run() {
+          const closing = cliUpdateIpc;
+          cliUpdateIpc = null;
+          closing?.dispose();
+          cliUpdateService = null;
+        },
+      },
+      {
+        name: "runtimeExecutableIpc",
+        run() {
+          const closing = runtimeExecutableIpc;
+          runtimeExecutableIpc = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "windowControlIpc",
+        run() {
+          const closing = windowControlIpc;
+          windowControlIpc = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "nativeFrameReassertion",
+        run() {
+          const closing = nativeFrameReassertion;
+          nativeFrameReassertion = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "clipboardIpc",
+        run() {
+          const closing = clipboardIpc;
+          clipboardIpc = null;
+          closing?.dispose();
+        },
+      },
+      { name: "notificationIpc", run: disposeNotificationIpcBinding },
+      {
+        name: "projectViewIpc",
+        run() {
+          const closing = projectViewIpc;
+          projectViewIpc = null;
+          closing?.dispose();
+        },
+      },
+    ],
+    reportTeardownFailure,
+  );
 }
 
 const startupFailureHeading =
@@ -291,74 +521,63 @@ const lifecycle = createWorkbenchLifecycleController({
   },
   disposeProjectView() {
     shutdownRequested = true;
-    const closingHistoryRecoveryIpc = historyRecoveryIpc;
-    historyRecoveryIpc = null;
-    historyRecoveryIpcShutdown =
-      closingHistoryRecoveryIpc?.dispose() ?? historyRecoveryIpcShutdown;
-    const closingSubscriptionAuthenticationIpc = subscriptionAuthenticationIpc;
-    subscriptionAuthenticationIpc = null;
-    subscriptionAuthenticationShutdown =
-      closingSubscriptionAuthenticationIpc?.dispose() ??
-      subscriptionAuthenticationShutdown;
-    appearancePreferenceIpc?.dispose();
-    appearancePreferenceIpc = null;
-    claudePermissionHandlingIpc?.dispose();
-    claudePermissionHandlingIpc = null;
-    runtimeExecutableIpc?.dispose();
-    runtimeExecutableIpc = null;
-    windowControlIpc?.dispose();
-    windowControlIpc = null;
-    clipboardIpc?.dispose();
-    clipboardIpc = null;
-    disposeNotificationIpcBinding();
-    projectViewIpc?.dispose();
-    projectViewIpc = null;
+    disposeWindowScopedBindings();
   },
   async closeBackend() {
-    await subscriptionAuthenticationShutdown;
-    await historyRecoveryIpcShutdown;
-    try {
-      await closeWorkbenchBackendAfterInitialization(
-        backendInitialization,
-        () => {
-          const closingBackend = backend;
-          const closingCreateProjectController = createProjectController;
-          const closingAppearancePreferenceStore = appearancePreferenceStore;
-          backend = null;
-          createProjectController = undefined;
-          appearancePreferenceStore = null;
-          if (
-            closingBackend === null &&
-            closingCreateProjectController === undefined &&
-            closingAppearancePreferenceStore === null
-          ) {
-            return null;
-          }
-          return {
-            async close() {
-              try {
-                await closingCreateProjectController?.close();
-              } finally {
-                try {
-                  await closingBackend?.close();
-                } finally {
-                  await closingAppearancePreferenceStore?.close();
-                }
-              }
-            },
-          };
-        },
-      );
-    } finally {
-      const closingHistoryRecovery = historyRecovery;
-      historyRecovery = null;
-      await closingHistoryRecovery?.close();
-    }
+    await closeDurableStateAfterListenerShutdown({
+      // Best-effort listener teardown. These used to be awaited here, in
+      // sequence and outside the try below, so one rejecting `async dispose()`
+      // skipped the whole flush and the drain exited anyway (issue 172).
+      listenerShutdowns: [
+        subscriptionAuthenticationShutdown,
+        historyRecoveryIpcShutdown,
+      ],
+      report: reportTeardownFailure,
+      closeDurableState: closeWorkbenchDurableState,
+    });
   },
   exit() {
     app.exit(0);
   },
 });
+
+/** The mandatory half of the drain: everything that owes the user a flush. */
+async function closeWorkbenchDurableState(): Promise<void> {
+  try {
+    await closeWorkbenchBackendAfterInitialization(backendInitialization, () => {
+      const closingBackend = backend;
+      const closingCreateProjectController = createProjectController;
+      const closingAppearancePreferenceStore = appearancePreferenceStore;
+      backend = null;
+      createProjectController = undefined;
+      appearancePreferenceStore = null;
+      if (
+        closingBackend === null &&
+        closingCreateProjectController === undefined &&
+        closingAppearancePreferenceStore === null
+      ) {
+        return null;
+      }
+      return {
+        async close() {
+          try {
+            await closingCreateProjectController?.close();
+          } finally {
+            try {
+              await closingBackend?.close();
+            } finally {
+              await closingAppearancePreferenceStore?.close();
+            }
+          }
+        },
+      };
+    });
+  } finally {
+    const closingHistoryRecovery = historyRecovery;
+    historyRecovery = null;
+    await closingHistoryRecovery?.close();
+  }
+}
 
 if (!ownsSingleInstanceLock) {
   app.quit();
@@ -398,11 +617,29 @@ function startPrimaryWorkbench(): void {
       ? {}
       : { explicitUserDataDirectory }),
   });
+  const renameSettingsNotice = await migrateRenamedSettings({
+    userDataDirectory: electronUserDataDirectory,
+    safeStorage,
+    // CLI homes follow APPDATA, unlike preferences. An isolated profile must
+    // not import the owner's CLI files when its environment was not isolated.
+    ...(explicitUserDataDirectory === undefined
+      ? { cliHomeBaseDirectory: process.env.APPDATA ?? tmpdir() }
+      : process.env.APPDATA !== undefined &&
+          resolve(process.env.APPDATA).toLowerCase() === dirname(electronUserDataDirectory).toLowerCase()
+        ? { cliHomeBaseDirectory: dirname(electronUserDataDirectory) }
+        : {}),
+  });
+  // Ordinary Windows launches anchor conversations to physical Roaming even
+  // when Electron's Known Folders are redirected. Discover the same siblings.
+  const recoveryUserDataDirectory = dirname(projectHostDataDirectory);
   const recovery = createHistoricalRecoveryLibrary({
     dataDirectory: join(electronUserDataDirectory, "history-recovery-v1"),
     sourceDiscovery: createDeferredProductionHistoryRecoverySourceDiscovery({
-      readAppDataDirectory: () => app.getPath("appData"),
-      currentUserDataDirectory: electronUserDataDirectory,
+      readAppDataDirectory: () =>
+        process.platform === "win32" && explicitUserDataDirectory === undefined
+          ? dirname(recoveryUserDataDirectory)
+          : app.getPath("appData"),
+      currentUserDataDirectory: recoveryUserDataDirectory,
     }),
     exportChooser: Object.freeze({
       async choose(options: {
@@ -420,6 +657,119 @@ function startPrimaryWorkbench(): void {
     }),
   });
   historyRecovery = recovery;
+
+  session.defaultSession.setPermissionRequestHandler(
+    (_webContents, _permission, callback) => callback(false),
+  );
+  Menu.setApplicationMenu(null);
+  const windowOptions = {
+    width: 1440,
+    height: 900,
+    minWidth: 360,
+    minHeight: 640,
+    frame: false,
+    show: false,
+    // {} for every launch the owner starts himself; an origin no monitor
+    // covers for the isolated agent and test launches that asked for one.
+    ...windowPlacementOptions(),
+    title: "Synchronized Intellect Network",
+    webPreferences: {
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      devTools: false,
+    },
+  };
+  const acrylicWindowOptions = supportsAcrylicBackgroundMaterial()
+    ? {
+        backgroundColor: "#00000000",
+        backgroundMaterial: "acrylic" as const,
+      }
+    : null;
+  let createdWindow: BrowserWindow;
+  let nativeMaterialState: NativeWindowMaterialState =
+    acrylicWindowOptions === null ? "unavailable" : "undetermined";
+  // Kept so the frame-suppression HRESULTs reach run-app.log. Taking .state
+  // alone is what made F204 invisible for eight days.
+  let nativeMaterialVerification: NativeWindowMaterialVerification | null =
+    null;
+  try {
+    createdWindow = new BrowserWindow({
+      ...windowOptions,
+      ...(acrylicWindowOptions ?? {
+        backgroundColor: designedWindowGround,
+      }),
+    });
+    if (acrylicWindowOptions !== null) {
+      nativeMaterialVerification =
+        await configureWindowsAcrylicWindow(createdWindow);
+      nativeMaterialState = nativeMaterialVerification.state;
+    }
+  } catch (error) {
+    if (acrylicWindowOptions === null) throw error;
+    nativeMaterialState = "unavailable";
+    createdWindow = new BrowserWindow({
+      ...windowOptions,
+      backgroundColor: designedWindowGround,
+    });
+  }
+  mainWindow = createdWindow;
+  // F204. The launch-time suppression above is a one-shot; Windows repaints
+  // the caption every time it recomputes the accent, which on a wallpaper
+  // slideshow with AutoColorization is every ten minutes. Gated on the same
+  // capability check as the launch-time probe (F79) and on nothing else, so
+  // there is exactly one answer in this file to "does this build touch DWM".
+  // Hooked immediately after window creation, before any further await, so a
+  // colour change during startup is not missed.
+  if (acrylicWindowOptions !== null) {
+    nativeFrameReassertion = installNativeWindowFrameReassertion({
+      window: createdWindow,
+      report: (line) => console.info(line),
+    });
+  }
+  restorableWindow = createdWindow;
+  windowRestorer.windowAvailable();
+  // A quit requested while no window could host its confirmation is resumed
+  // here, now that one can. Not wired to the startup-failure window: that one
+  // is never `mainWindow`, so the question would still have nowhere to go.
+  lifecycle.handleWindowAvailable();
+  const rendererUrl = pathToFileURL(rendererPath);
+  rendererUrl.searchParams.set("material-state", nativeMaterialState);
+  const presentWindowsAcrylic =
+    shouldPresentWindowsAcrylic(nativeMaterialState);
+  if (presentWindowsAcrylic) {
+    rendererUrl.searchParams.set("material", "on");
+  }
+  const rendererHref = rendererUrl.toString();
+  createdWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  createdWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== rendererHref) event.preventDefault();
+  });
+  createdWindow.once("ready-to-show", () => {
+    if (windowPlacement.kind === "offscreen") createdWindow.showInactive();
+    else createdWindow.show();
+  });
+  createdWindow.on("close", lifecycle.handleWindowClose);
+  createdWindow.on("query-session-end", lifecycle.handleQuerySessionEnd);
+  createdWindow.on("session-end", lifecycle.handleSessionEnd);
+  createdWindow.once("closed", () => {
+    disposeWindowScopedBindings();
+    mainWindow = null;
+    restorableWindow = null;
+  });
+  const rendererLoad = createdWindow
+    .loadURL(rendererHref)
+    .catch(() => undefined);
+  // The window is created and shown here, before the recovery barrier below,
+  // because nothing it needs is behind that barrier. Owner-only ACL
+  // establishment is ~7 s of a launch on this machine; waiting for it left the
+  // owner looking at no window at all for that long. Anything that genuinely
+  // needs the capture to have happened first still waits: the Project host and
+  // its ledgers are opened after the barrier, exactly as before.
+  if (windowPlacement.kind === "offscreen") createdWindow.showInactive();
+  else createdWindow.show();
 
   backendInitialization = (async () => {
     const startup = await startProjectHostAfterRecoveryPreparation({
@@ -441,6 +791,115 @@ function startPrimaryWorkbench(): void {
             "workbench-appearance-preferences-v1.json",
           ),
         });
+        // One shared secret-envelope store FILE for every API-transport
+        // endpoint key (ADR 0022 multi-subject shape), platform-encrypted via
+        // Electron safeStorage, beside the other userData stores. Each
+        // endpoint gets its own store INSTANCE so every envelope is bound to
+        // its endpoint's subject; the store re-reads the whole file per
+        // operation and rewrites it atomically, so single-threaded
+        // read-modify-write keeps the subjects from clobbering each other.
+        const endpointSecretStorePath = endpointSecretEnvelopeStorePath(
+          app.getPath("userData"),
+        );
+        const glmEndpointSecretEnvelopeStore = new EndpointSecretEnvelopeStore({
+          subject: GLM_ENDPOINT_KEY_SUBJECT,
+          safeStorage,
+          storePath: endpointSecretStorePath,
+        });
+        const kimiEndpointSecretEnvelopeStore = new EndpointSecretEnvelopeStore({
+          subject: KIMI_ENDPOINT_KEY_SUBJECT,
+          safeStorage,
+          storePath: endpointSecretStorePath,
+        });
+        const deepseekEndpointSecretEnvelopeStore =
+          new EndpointSecretEnvelopeStore({
+            subject: DEEPSEEK_ENDPOINT_KEY_SUBJECT,
+            safeStorage,
+            storePath: endpointSecretStorePath,
+          });
+        const kimiPlatformEndpointSecretEnvelopeStore =
+          new EndpointSecretEnvelopeStore({
+            subject: KIMI_PLATFORM_ENDPOINT_KEY_SUBJECT,
+            safeStorage,
+            storePath: endpointSecretStorePath,
+          });
+        const claudeApiEndpointSecretEnvelopeStore =
+          new EndpointSecretEnvelopeStore({
+            subject: CLAUDE_API_ENDPOINT_KEY_SUBJECT,
+            safeStorage,
+            storePath: endpointSecretStorePath,
+          });
+        const codexApiEndpointSecretEnvelopeStore =
+          new EndpointSecretEnvelopeStore({
+            subject: CODEX_API_ENDPOINT_KEY_SUBJECT,
+            safeStorage,
+            storePath: endpointSecretStorePath,
+          });
+        glmEndpointKeySource = createWorkbenchGlmEndpointKeySource({
+          store: glmEndpointSecretEnvelopeStore,
+          environment: process.env,
+        });
+        kimiEndpointKeySource = createWorkbenchKimiEndpointKeySource({
+          store: kimiEndpointSecretEnvelopeStore,
+          environment: process.env,
+        });
+        deepseekEndpointKeySource = createWorkbenchDeepseekEndpointKeySource({
+          store: deepseekEndpointSecretEnvelopeStore,
+          environment: process.env,
+        });
+        kimiPlatformEndpointKeySource = createWorkbenchKimiPlatformKeySource({
+          store: kimiPlatformEndpointSecretEnvelopeStore,
+          environment: process.env,
+        });
+        claudeApiEndpointKeySource = createWorkbenchClaudeApiEndpointKeySource({
+          store: claudeApiEndpointSecretEnvelopeStore,
+          environment: process.env,
+        });
+        codexApiEndpointKeySource = createWorkbenchCodexApiEndpointKeySource({
+          store: codexApiEndpointSecretEnvelopeStore,
+          environment: process.env,
+        });
+        // Catalog freshness (ticket 14 / WO16 Part 3): zero-inference
+        // /models pulls over the same key sources; enrollment persists
+        // beside the other userData stores; every failure stays silent.
+        // Kimi Code is intentionally absent: its subscription face has no
+        // verified zero-inference models-list route. The two Moonshot
+        // Platform faces in endpoint-models-list.ts accept Platform keys,
+        // never Kimi Code subscription tokens.
+        const initializedGlmKeySource = glmEndpointKeySource;
+        const initializedDeepseekKeySource = deepseekEndpointKeySource;
+        endpointCatalogFreshnessService = createEndpointCatalogFreshnessService({
+          storeDirectory: app.getPath("userData"),
+          environment: process.env,
+          endpoints: Object.freeze([
+            Object.freeze({
+              endpointId: "glm-coding-plan" as const,
+              face: "glm-anthropic" as const,
+              resolveBaseUrl: (environment: NodeJS.ProcessEnv) =>
+                resolveContractBaseUrl(environment, GLM_ENDPOINT_ENV_CONTRACT),
+              staticCatalogModelIds: [],
+              resolveToken: () => initializedGlmKeySource?.resolve(),
+            }),
+            Object.freeze({
+              endpointId: "deepseek-api" as const,
+              face: "deepseek" as const,
+              // The pull lives on the platform face; strip the anthropic
+              // face suffix the sessions use (same rule as the probe).
+              resolveBaseUrl: (environment: NodeJS.ProcessEnv) =>
+                resolveContractBaseUrl(
+                  environment,
+                  DEEPSEEK_ENDPOINT_ENV_CONTRACT,
+                ).replace(/\/anthropic\/?$/u, ""),
+              staticCatalogModelIds: [],
+              resolveToken: () => initializedDeepseekKeySource?.resolve(),
+            }),
+          ]),
+        });
+        // Startup background pull: silent by design — the promise is
+        // intentionally never awaited and never surfaces a rejection.
+        void endpointCatalogFreshnessService
+          .refresh()
+          .then(() => undefined, () => undefined);
         const initializedPreferenceStore = appearancePreferenceStore;
         let host: WorkbenchProjectHost | null = null;
         try {
@@ -457,6 +916,28 @@ function startPrimaryWorkbench(): void {
                 authGeneration,
                 providerRequestBudget,
                 claudeSessionCapabilityStore,
+                async observeClaudeSubscriptionUsage(observation) {
+                  try {
+                    const stored = await appearancePreferenceStore!.saveClaudeSubscriptionUsage(observation);
+                    subscriptionUsageIpc?.publish({ ok: true, observation: stored });
+                  } catch {
+                    subscriptionUsageIpc?.publish({ ok: false });
+                  }
+                },
+                resolveGlmAuthToken: () => glmEndpointKeySource?.resolve(),
+                resolveKimiAuthToken: () => kimiEndpointKeySource?.resolve(),
+                resolveDeepseekAuthToken: () =>
+                  deepseekEndpointKeySource?.resolve(),
+                resolveKimiPlatformApiKey: () =>
+                  kimiPlatformEndpointKeySource?.resolve(),
+                resolveClaudeApiKey: () => claudeApiEndpointKeySource?.resolve(),
+                resolveCodexApiKey: () => codexApiEndpointKeySource?.resolve(),
+                catalogAugmentation: (endpointId) =>
+                  endpointId === "kimi-code"
+                    ? []
+                    : endpointCatalogFreshnessService?.augmentedModels(
+                        endpointId as "glm-coding-plan" | "deepseek-api",
+                      ) ?? [],
                 claudePermissionHandling: {
                   async readPermissionMode() {
                     return (await initializedPreferenceStore.readClaudePermissionHandling()) ===
@@ -485,7 +966,22 @@ function startPrimaryWorkbench(): void {
               });
             },
           });
-        } catch {
+        } catch (error) {
+          // The conversation store did not open. The application carries on
+          // with `backend === null`, which turns every project operation into
+          // `status: "unavailable"` — and this catch used to drop the reason,
+          // so nothing anywhere said which storage failure it was. Recorded
+          // here beside the launch diagnostics so `run-app.log` names it.
+          //
+          // Only half of worker 478's Tier-1: the user is still told nothing
+          // beyond a generic unavailability. Carrying a cause and a next step
+          // to the renderer means widening the project-view contract, and
+          // whether a storage failure should be fatal at all is an owner
+          // decision (it sits beside `D16.2`). Not taken here.
+          console.error(
+            "[startup] the conversation store could not be opened; project operations will report unavailable",
+            error,
+          );
           host = null;
         }
         return Object.freeze({ host, authGeneration });
@@ -495,85 +991,6 @@ function startPrimaryWorkbench(): void {
     backend = startup.host;
     const authGeneration = startup.authGeneration;
 
-    session.defaultSession.setPermissionRequestHandler(
-      (_webContents, _permission, callback) => callback(false),
-    );
-    Menu.setApplicationMenu(null);
-    const windowOptions = {
-      width: 1440,
-      height: 900,
-      minWidth: 360,
-      minHeight: 640,
-      frame: false,
-      show: false,
-      // {} for every launch the owner starts himself; an origin no monitor
-      // covers for the isolated agent and test launches that asked for one.
-      ...windowPlacementOptions(),
-      title: "Synchronized Intellect Network",
-      webPreferences: {
-        preload: preloadPath,
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        webviewTag: false,
-        devTools: false,
-      },
-    };
-    const acrylicWindowOptions = supportsAcrylicBackgroundMaterial()
-      ? {
-          backgroundColor: "#00000000",
-          backgroundMaterial: "acrylic" as const,
-        }
-      : null;
-    let createdWindow: BrowserWindow;
-    let nativeMaterialState: NativeWindowMaterialState =
-      acrylicWindowOptions === null ? "unavailable" : "undetermined";
-    // Kept so the frame-suppression HRESULTs reach run-app.log. Taking .state
-    // alone is what made F204 invisible for eight days.
-    let nativeMaterialVerification: NativeWindowMaterialVerification | null =
-      null;
-    let nativeFrameReassertion: NativeWindowFrameReassertionInstallation | null =
-      null;
-    try {
-      createdWindow = new BrowserWindow({
-        ...windowOptions,
-        ...(acrylicWindowOptions ?? {
-          backgroundColor: designedWindowGround,
-        }),
-      });
-      if (acrylicWindowOptions !== null) {
-        nativeMaterialVerification =
-          await configureWindowsAcrylicWindow(createdWindow);
-        nativeMaterialState = nativeMaterialVerification.state;
-      }
-    } catch (error) {
-      if (acrylicWindowOptions === null) throw error;
-      nativeMaterialState = "unavailable";
-      createdWindow = new BrowserWindow({
-        ...windowOptions,
-        backgroundColor: designedWindowGround,
-      });
-    }
-    mainWindow = createdWindow;
-    // F204. The launch-time suppression above is a one-shot; Windows repaints
-    // the caption every time it recomputes the accent, which on a wallpaper
-    // slideshow with AutoColorization is every ten minutes. Gated on the same
-    // capability check as the launch-time probe (F79) and on nothing else, so
-    // there is exactly one answer in this file to "does this build touch DWM".
-    // Hooked immediately after window creation, before any further await, so a
-    // colour change during startup is not missed.
-    if (acrylicWindowOptions !== null) {
-      nativeFrameReassertion = installNativeWindowFrameReassertion({
-        window: createdWindow,
-        report: (line) => console.info(line),
-      });
-    }
-    restorableWindow = createdWindow;
-    windowRestorer.windowAvailable();
-    // A quit requested while no window could host its confirmation is resumed
-    // here, now that one can. Not wired to the startup-failure window: that one
-    // is never `mainWindow`, so the question would still have nowhere to go.
-    lifecycle.handleWindowAvailable();
     const initializedBackend = backend;
     if (initializedBackend !== null) {
       const stateStore = await openWorkbenchCreateProjectStateStore({
@@ -646,10 +1063,100 @@ function startPrimaryWorkbench(): void {
       window: createdWindow,
       source: initializedAppearancePreferenceStore,
     });
+    subscriptionUsageIpc = installWorkbenchSubscriptionUsageIpc({
+      ipcMain,
+      window: createdWindow,
+      source: initializedAppearancePreferenceStore,
+    });
+    endpointPreferenceIpc = installWorkbenchEndpointPreferenceIpc({
+      ipcMain,
+      window: createdWindow,
+      source: initializedAppearancePreferenceStore,
+    });
     runtimeExecutableIpc = installWorkbenchRuntimeExecutableIpc({
       ipcMain,
       window: createdWindow,
       source: initializedAppearancePreferenceStore,
+    });
+    // One parameterized key-IPC binding per static-key endpoint; each binding
+    // owns its endpoint-scoped channels and dies with the window.
+    endpointKeyIpc = [
+      glmEndpointKeySource === null
+        ? null
+        : installWorkbenchEndpointKeyIpc({
+            ipcMain,
+            window: createdWindow,
+            endpointId: "glm-coding-plan",
+            source: glmEndpointKeySource,
+          }),
+      kimiEndpointKeySource === null
+        ? null
+        : installWorkbenchEndpointKeyIpc({
+            ipcMain,
+            window: createdWindow,
+            endpointId: "kimi-code",
+            source: kimiEndpointKeySource,
+          }),
+      deepseekEndpointKeySource === null
+        ? null
+        : installWorkbenchEndpointKeyIpc({
+            ipcMain,
+            window: createdWindow,
+            endpointId: "deepseek-api",
+            source: deepseekEndpointKeySource,
+          }),
+      kimiPlatformEndpointKeySource === null
+        ? null
+        : installWorkbenchEndpointKeyIpc({
+            ipcMain,
+            window: createdWindow,
+            endpointId: "kimi-platform",
+            source: kimiPlatformEndpointKeySource,
+          }),
+      claudeApiEndpointKeySource === null
+        ? null
+        : installWorkbenchEndpointKeyIpc({
+            ipcMain,
+            window: createdWindow,
+            endpointId: "claude-api",
+            source: claudeApiEndpointKeySource,
+          }),
+      codexApiEndpointKeySource === null
+        ? null
+        : installWorkbenchEndpointKeyIpc({
+            ipcMain,
+            window: createdWindow,
+            endpointId: "codex-api",
+            source: codexApiEndpointKeySource,
+          }),
+    ].filter((binding): binding is WorkbenchEndpointKeyIpcBinding => {
+      return binding !== null;
+    });
+    if (endpointCatalogFreshnessService !== null) {
+      endpointCatalogFreshnessIpc = installWorkbenchEndpointCatalogFreshnessIpc({
+        ipcMain,
+        window: createdWindow,
+        service: endpointCatalogFreshnessService,
+      });
+    }
+    // CLI updates (ticket 18): the zero-side-effect check runs once in the
+    // background at startup (memoized; failures stay silent — the winget
+    // query is read-only), and the run channel exists only for the
+    // Settings button. Updates are never spawned automatically.
+    cliUpdateService = createCliUpdateService();
+    void cliUpdateService
+      .check()
+      .then(() => undefined, () => undefined);
+    cliUpdateIpc = installWorkbenchCliUpdateIpc({
+      ipcMain,
+      window: createdWindow,
+      service: cliUpdateService,
+      // The "restart now" action (ticket 21 cleanup) registers a successor,
+      // then uses before-quit's durable drain. Direct app.exit() would skip it.
+      requestRelaunch: () => {
+        app.relaunch();
+        app.quit();
+      },
     });
     const subscriptionAuthenticationActionService =
       createSubscriptionAuthenticationService({
@@ -704,14 +1211,6 @@ function startPrimaryWorkbench(): void {
         source: subscriptionAuthenticationService,
       });
 
-    const rendererUrl = pathToFileURL(rendererPath);
-    rendererUrl.searchParams.set("material-state", nativeMaterialState);
-    const presentWindowsAcrylic =
-      shouldPresentWindowsAcrylic(nativeMaterialState);
-    if (presentWindowsAcrylic) {
-      rendererUrl.searchParams.set("material", "on");
-    }
-    const rendererHref = rendererUrl.toString();
     const openWorkbench = (): void => windowRestorer.requestRestore();
     try {
       tray = new Tray(createWorkbenchTrayIcon(nativeImage));
@@ -736,51 +1235,11 @@ function startPrimaryWorkbench(): void {
       tray?.destroy();
       tray = null;
     }
-    createdWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    createdWindow.webContents.on("will-navigate", (event, url) => {
-      if (url !== rendererHref) event.preventDefault();
-    });
     reportWindowPlacement("main-window");
-    createdWindow.once("ready-to-show", () => {
-      // showInactive() never changes the foreground window. It is what an
-      // offscreen launch must use; a launch the owner started still wants the
-      // window in front of him.
-      if (windowPlacement.kind === "offscreen") createdWindow.showInactive();
-      else createdWindow.show();
-    });
-    createdWindow.on("close", lifecycle.handleWindowClose);
-    createdWindow.on("query-session-end", lifecycle.handleQuerySessionEnd);
-    createdWindow.on("session-end", lifecycle.handleSessionEnd);
-    createdWindow.once("closed", () => {
-      const closingHistoryRecoveryIpc = historyRecoveryIpc;
-      historyRecoveryIpc = null;
-      historyRecoveryIpcShutdown =
-        closingHistoryRecoveryIpc?.dispose() ?? historyRecoveryIpcShutdown;
-      const closingSubscriptionAuthenticationIpc =
-        subscriptionAuthenticationIpc;
-      subscriptionAuthenticationIpc = null;
-      subscriptionAuthenticationShutdown =
-        closingSubscriptionAuthenticationIpc?.dispose() ??
-        subscriptionAuthenticationShutdown;
-      appearancePreferenceIpc?.dispose();
-      appearancePreferenceIpc = null;
-      claudePermissionHandlingIpc?.dispose();
-      claudePermissionHandlingIpc = null;
-      runtimeExecutableIpc?.dispose();
-      runtimeExecutableIpc = null;
-      windowControlIpc?.dispose();
-      windowControlIpc = null;
-      nativeFrameReassertion?.dispose();
-      nativeFrameReassertion = null;
-      clipboardIpc?.dispose();
-      clipboardIpc = null;
-      disposeNotificationIpcBinding();
-      projectViewIpc?.dispose();
-      projectViewIpc = null;
-      mainWindow = null;
-      restorableWindow = null;
-    });
-    await createdWindow.loadURL(rendererHref).catch(() => undefined);
+    await rendererLoad;
+    if (renameSettingsNotice !== null && !shutdownRequested) {
+      await presentRenameSettingsNotice(createdWindow, renameSettingsNotice);
+    }
     console.info(formatNativeWindowMaterialDiagnostic(nativeMaterialState));
     console.info(
       formatNativeWindowFrameDiagnostic(nativeMaterialVerification),
@@ -802,6 +1261,45 @@ function startPrimaryWorkbench(): void {
     if (shutdownRequested) return;
     presentStartupFailure(error);
   });
+}
+
+/** A real, one-time surface; offscreen QA obeys the same placement as the app. */
+async function presentRenameSettingsNotice(parent: BrowserWindow, notice: RenameSettingsNotice): Promise<void> {
+  const window = new BrowserWindow({
+    parent,
+    modal: true,
+    width: 780,
+    height: 640,
+    show: false,
+    ...windowPlacementOptions(),
+    title: "Your settings after the rename",
+    autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, devTools: false },
+  });
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event, url) => {
+    event.preventDefault();
+    if (url === "https://workbench.invalid/acknowledge-rename") {
+      void notice.acknowledge().then(() => window.close()).catch(error => {
+        console.error("[rename-settings] Could not remember acknowledgement", error);
+        window.close(); // The pending record will show the explanation next launch.
+      });
+    }
+  });
+  window.once("ready-to-show", () => {
+    if (windowPlacement.kind === "offscreen") window.showInactive();
+    else window.show();
+  });
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <title>Your settings after the rename</title><style>
+    html,body{height:100%;margin:0}body{box-sizing:border-box;display:flex;flex-direction:column;padding:24px;font:15px/1.5 'Segoe UI',sans-serif;color:#1e2630;background:#fff}
+    h1{font-size:22px;margin:0 0 14px}main{overflow:auto;flex:1}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;margin:0}footer{padding-top:16px}
+    a{display:inline-block;font:inherit;padding:8px 24px;border:1px solid #555;border-radius:4px;color:inherit;text-decoration:none}
+    </style></head><body><h1>${notice.warning ? "Some previous settings need attention" : "Your settings after the rename"}</h1>
+    <main><pre>${escapeStartupFailureText(notice.detail)}</pre></main>
+    <footer><a role="button" href="https://workbench.invalid/acknowledge-rename">Continue</a></footer></body></html>`;
+  await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
 }
 
 /**
@@ -832,9 +1330,15 @@ function presentStartupFailure(error: unknown): void {
   if (existingWindow !== null && !existingWindow.isDestroyed()) {
     // A window already exists, so the ordinary window lifecycle already owns its
     // close and quit path. All that is missing is for the user to be able to see
-    // it: a window that never reached "ready-to-show" was never shown.
+    // it: a window that never reached "ready-to-show" was never shown. The
+    // renderer may already show its loading state, but an initialization
+    // rejection means that state can never resolve, so replace it with the
+    // failure reason instead of leaving the user waiting forever.
     try {
       existingWindow.show();
+      void existingWindow
+        .loadURL(startupFailurePage(reason))
+        .catch(() => undefined);
       return;
     } catch {
       // Fall through to the dedicated failure surface.
@@ -930,8 +1434,18 @@ function escapeStartupFailureText(value: string): string {
     .replaceAll('"', "&quot;");
 }
 
-function readSwitch(name: string): string | undefined {
-  const value = app.commandLine.getSwitchValue(name).trim();
+/** Env override > contract default, for the freshness pull's base URL. */
+function resolveContractBaseUrl(
+  environment: NodeJS.ProcessEnv,
+  contract: { readonly baseUrlEnvVar: string; readonly defaultBaseUrl: string },
+): string {
+  const explicit = environment[contract.baseUrlEnvVar];
+  return typeof explicit === "string" && explicit.trim().length > 0
+    ? explicit
+    : contract.defaultBaseUrl;
+}
+
+function readSwitch(name: string): string | undefined {  const value = app.commandLine.getSwitchValue(name).trim();
   return value.length === 0 ? undefined : value;
 }
 

@@ -14,6 +14,14 @@ import {
 } from "../../src/workbench-shell/contract.ts";
 import { dissimilarNeutralEndpointFixtures } from "./fixtures/neutral-public-contract-fixtures.ts";
 
+/*
+ * These fixtures model the pre-GLM two-endpoint regression subset; the
+ * canonical production roster now carries a third endpoint (glm-coding-plan,
+ * issue 05), so two-endpoint snapshots opt into their explicit roster.
+ */
+const FIXTURE_ENDPOINT_IDS: readonly WorkbenchRuntimeEndpointId[] =
+  Object.freeze(["codex-desktop", "claude-code-desktop"]);
+
 test("two dissimilar fake endpoints keep a shared model label as two exact private relations", () => {
   const snapshot = fixtureSnapshot();
   const publicProfile = snapshot.publicResult.profile;
@@ -174,6 +182,7 @@ test("replacement prefill rejects duplicate complete relations even when labels 
   const snapshot = createDirectSessionProfileSnapshot({
     endpoints: Object.freeze([endpoints[0]!, duplicateEndpoint]),
     endpointDiscovery: endpointDiscoveryReady(),
+    endpointIds: FIXTURE_ENDPOINT_IDS,
   });
   const recorded = snapshot.resolveSelection(
     selectionAt(snapshot.publicResult.profile, 0, 0, 0),
@@ -219,6 +228,7 @@ test("replacement prefill ignores shared labels and array order while returning 
   const currentSnapshot = createDirectSessionProfileSnapshot({
     endpoints: Object.freeze([reorderedQuartz, endpoints[1]!]),
     endpointDiscovery: endpointDiscoveryReady(),
+    endpointIds: FIXTURE_ENDPOINT_IDS,
   });
   const currentSelection = selectionAt(
     currentSnapshot.publicResult.profile,
@@ -292,6 +302,7 @@ test("snapshot construction rejects a shape-correct endpoint Proxy before privat
       createDirectSessionProfileSnapshot({
         endpoints: Object.freeze([mutableEndpoint, endpoints[1]!]),
         endpointDiscovery: endpointDiscoveryReady(),
+        endpointIds: FIXTURE_ENDPOINT_IDS,
       }),
     /invalid-endpoints/u,
   );
@@ -528,10 +539,11 @@ test("resolved identities deduplicate stably, suppress duplicate provenance, and
         accessModeLabels: ["Full access"],
       },
     ],
-    endpointDiscovery: publicRuntimeEndpointDiscovery(
-      "catalog-ready",
-      "not-inspected",
-    ),
+    endpointDiscovery: publicRuntimeEndpointDiscovery([
+      { endpointId: "codex-desktop", category: "catalog-ready" },
+      { endpointId: "claude-code-desktop", category: "not-inspected" },
+    ]),
+    endpointIds: FIXTURE_ENDPOINT_IDS,
   });
   const profile = snapshot.publicResult.profile;
 
@@ -593,10 +605,11 @@ test("Claude presentation maps only approved resolved identities and retains an 
         accessModeLabels: ["Full access"],
       },
     ],
-    endpointDiscovery: publicRuntimeEndpointDiscovery(
-      "not-inspected",
-      "catalog-ready",
-    ),
+    endpointDiscovery: publicRuntimeEndpointDiscovery([
+      { endpointId: "codex-desktop", category: "not-inspected" },
+      { endpointId: "claude-code-desktop", category: "catalog-ready" },
+    ]),
+    endpointIds: FIXTURE_ENDPOINT_IDS,
   });
 
   assert.deepEqual(
@@ -670,10 +683,11 @@ test("Codex presentation maps only approved resolved identities and retains an u
         accessModeLabels: ["Full access"],
       },
     ],
-    endpointDiscovery: publicRuntimeEndpointDiscovery(
-      "catalog-ready",
-      "not-inspected",
-    ),
+    endpointDiscovery: publicRuntimeEndpointDiscovery([
+      { endpointId: "codex-desktop", category: "catalog-ready" },
+      { endpointId: "claude-code-desktop", category: "not-inspected" },
+    ]),
+    endpointIds: FIXTURE_ENDPOINT_IDS,
   });
 
   assert.deepEqual(
@@ -925,10 +939,10 @@ test("snapshot construction rejects every endpoint discovery contradiction as on
     {
       name: "ready set omits one catalog",
       endpoints,
-      endpointDiscovery: publicRuntimeEndpointDiscovery(
-        "catalog-ready",
-        "not-inspected",
-      ),
+      endpointDiscovery: publicRuntimeEndpointDiscovery([
+        { endpointId: "codex-desktop", category: "catalog-ready" },
+        { endpointId: "claude-code-desktop", category: "not-inspected" },
+      ]),
     },
     {
       name: "catalog order contradicts the fixed endpoint tuple",
@@ -1043,6 +1057,7 @@ function fixtureSnapshot() {
   return createDirectSessionProfileSnapshot({
     endpoints: fixtureEndpoints(),
     endpointDiscovery: endpointDiscoveryReady(),
+    endpointIds: FIXTURE_ENDPOINT_IDS,
   });
 }
 
@@ -1103,7 +1118,10 @@ function endpointCatalog(
 }
 
 function endpointDiscoveryReady(): WorkbenchRuntimeEndpointDiscovery {
-  return publicRuntimeEndpointDiscovery("catalog-ready", "catalog-ready");
+  return publicRuntimeEndpointDiscovery([
+    { endpointId: "codex-desktop", category: "catalog-ready" },
+    { endpointId: "claude-code-desktop", category: "catalog-ready" },
+  ]);
 }
 
 function selectionAt(

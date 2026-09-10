@@ -988,9 +988,21 @@ test("production owns one tray-backed instance and exposes no close or Quit conf
     lifecycleSource,
     /if \(choice === "unanswerable"\) \{[\s\S]*?quitDeferredForPrompt = true;/u,
   );
+  /*
+   * `F117` on the close path. This used to assert `if (!isTrayReady()) return;`
+   * — the defect itself, written down as a requirement. Production wires none
+   * of the three dialogs (asserted above), so with no tray that branch left a
+   * prevented close, no tray to reopen from and no menu: a window that will not
+   * close. Issue 172. The branch must now take the user somewhere, and the old
+   * shape is forbidden rather than merely unasserted.
+   */
   assert.match(
     lifecycleSource,
-    /if \(guardedCloseDialogs === null\) \{[\s\S]*?if \(!isTrayReady\(\)\) return;[\s\S]*?options\.hideWindow\(\);/u,
+    /if \(guardedCloseDialogs === null\) \{[\s\S]*?if \(!isTrayReady\(\)\) \{\s+startQuitAttempt\(\);\s+return;\s+\}[\s\S]*?options\.hideWindow\(\);/u,
+  );
+  assert.doesNotMatch(
+    lifecycleSource,
+    /if \(guardedCloseDialogs === null\) \{[\s\S]*?if \(!isTrayReady\(\)\) return;/u,
   );
   assert.match(
     lifecycleSource,
@@ -1013,7 +1025,7 @@ test("production fixes the Workbench application identity before acquiring insta
     "utf8",
   );
   const setNameIndex = source.indexOf(
-    'app.setName("unified-agent-workbench");',
+    'app.setName("synchronized-intellect-network");',
   );
   const lockIndex = source.indexOf("app.requestSingleInstanceLock()");
   const userDataIndex = source.indexOf('app.getPath("userData")');
@@ -1162,7 +1174,13 @@ test("production preserves the designed fallback while a probe never inversely d
   );
   assert.match(
     rendererLoadSource,
-    /await createdWindow\.loadURL\(rendererHref\)/u,
+    /const rendererLoad = createdWindow\s+\.loadURL\(rendererHref\)/u,
+  );
+  assert.match(rendererLoadSource, /await rendererLoad;/u);
+  assert.ok(
+    mainSource.indexOf("const rendererLoad = createdWindow") <
+      mainSource.indexOf("projectViewIpc = installWorkbenchProjectViewIpc"),
+    "the real renderer must begin loading before Project IPC is installed",
   );
   assert.equal(rendererLoadSource.match(/rendererHref/gu)?.length, 3);
   assert.doesNotMatch(rendererLoadSource, /loadFile/u);
@@ -1205,7 +1223,7 @@ test("production Electron wiring resolves packaged startup before composing the 
   assert.doesNotMatch(source, /CodexAdapter|ClaudeAdapter/u);
   assert.match(
     compositionSource,
-    /import \{\r?\n  ClaudeAdapter,\r?\n  type ClaudePermissionHandlingOptions,\r?\n  type ClaudeSessionCapabilityStore,\r?\n\} from "\.\.\/agent-runtime\/claude\/adapter\.ts";/u,
+    /import \{\r?\n  ClaudeAdapter,\r?\n  mergeStaticCatalogAugmentation,\r?\n  type ClaudePermissionHandlingOptions,\r?\n  type ClaudeSessionCapabilityStore,\r?\n\} from "\.\.\/agent-runtime\/claude\/adapter\.ts";/u,
   );
   assert.match(
     compositionSource,

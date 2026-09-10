@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, toNamespacedPath } from "node:path";
+import { dirname, join, toNamespacedPath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -329,6 +329,37 @@ test("diverged descendants of one merged copy receive distinct inventory identit
     await ledgerSeed(join(outputStore, forkConflict.preservedRelativePath)),
     "fork-b-preserved",
   );
+});
+
+test("merged conflict ledgers remain readable beyond the Windows legacy path limit", async (t) => {
+  const root = await createTestDirectory(t, join(tmpdir(), "w75-merge-"));
+  const first = join(root, "first");
+  const second = join(root, "second");
+  await seedStore(first, "first", [{ slot: baseSlots[0], seed: "active" }]);
+  await seedStore(second, "second", [{ slot: baseSlots[0], seed: "preserved" }]);
+  const plan = await planConversationStoreMerge({ copyDirectories: [first, second] });
+  const conflict = plan.conflicts[0]!;
+  const before = await readFile(join(second, conflict.relativePath));
+  for (const length of [260, 1024]) {
+    let output = join(root, `length-${length}`);
+    const outputLength = length - conflict.preservedRelativePath.length - 1;
+    while (output.length < outputLength) {
+      const remaining = outputLength - output.length;
+      output = remaining === 1 ? `${output}p` : join(output, "p".repeat(Math.min(100, remaining - 1)));
+    }
+    await mkdir(dirname(output), { recursive: true });
+    await applyConversationStoreMerge({
+      plan,
+      outputDirectory: output,
+      authorization: stagingAuthorization(plan, output),
+    });
+    const preserved = join(output, conflict.preservedRelativePath);
+    assert.equal(preserved.length, length);
+    assert.equal(await ledgerSeed(preserved), "preserved");
+    assert.equal(await ledgerSeed(join(output, "project-ledgers", `${baseSlots[0]}.sqlite`)), "active");
+    assert.deepEqual(await readFile(preserved), before);
+    assert.deepEqual(await readFile(join(second, conflict.relativePath)), before);
+  }
 });
 
 test("merged input refuses incomplete or loss-reporting provenance", async (t) => {
@@ -813,7 +844,7 @@ function stagingAuthorization(
 }
 
 async function ledgerSeed(databasePath: string): Promise<string> {
-  const database = new DatabaseSync(databasePath, { readOnly: true });
+  const database = new DatabaseSync(toNamespacedPath(databasePath), { readOnly: true });
   try {
     const row = database
       .prepare("SELECT value FROM fixture_seed")

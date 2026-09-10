@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createWorkbenchProjectTransferDecoder } from "../../src/workbench-shell/result-sanitizer.ts";
+
+import { hostedProjectView } from "./w26-hosted-project-view.ts";
 
 import {
   WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL,
@@ -10,6 +13,8 @@ import {
   WORKBENCH_LOAD_PROFILE_CHANNEL,
   WORKBENCH_INTERRUPT_CHANNEL,
   WORKBENCH_STEER_CHANNEL,
+  WORKBENCH_READ_USER_INPUT_CHANNEL,
+  WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
   WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
   WORKBENCH_OBSERVE_CHANNEL,
   WORKBENCH_OPEN_PROJECT_CHANNEL,
@@ -101,10 +106,13 @@ class FakeIpcMain implements IpcMainBoundary {
 
 class FakeSender implements RendererSender {
   readonly messages: Array<{ channel: string; value: unknown }> = [];
+  readonly packets: unknown[] = [];
+  readonly decode = createWorkbenchProjectTransferDecoder();
   readonly listeners = new Map<string, Set<Listener>>();
   destroyed = false;
 
   send(channel: string, value: unknown): void {
+    if (channel === WORKBENCH_PROJECT_VIEW_CHANNEL) { this.packets.push(value); value = this.decode(value); }
     this.messages.push({ channel, value });
   }
 
@@ -188,7 +196,7 @@ class FakeProjectViewSource {
   defaultSaveResult: unknown = {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
   };
   defaultSaveThrows = false;
   projectSelectionResult: unknown = {
@@ -406,6 +414,32 @@ test("IPC exposes one owning-sender zero-argument Create Project outcome and str
   assert.equal(controller.calls, 2);
   binding.dispose();
   assert.equal(ipcMain.handlers.has(WORKBENCH_CREATE_PROJECT_CHANNEL), false);
+});
+
+test("IPC keeps an in-memory Create diagnostic out of the current public contract", async () => {
+  const ipcMain = new FakeIpcMain();
+  const owner = new FakeSender();
+  const controller = new FakeCreateProjectController();
+  const privateResult = { outcome: "unavailable" as const };
+  Object.defineProperty(privateResult, "diagnostic", {
+    value: Object.freeze({
+      reason: "parent-directory-missing",
+      targetPath: "C:\\private\\Missing Parent\\New Project",
+    }),
+    enumerable: false,
+  });
+  controller.result = Object.freeze(privateResult);
+  const binding = installWorkbenchProjectViewIpc({
+    ipcMain,
+    window: new FakeWindow(owner),
+    source: new FakeProjectViewSource(),
+    createProjectController: controller,
+  });
+
+  const result = await ipcMain.invoke(WORKBENCH_CREATE_PROJECT_CHANNEL, owner);
+  assert.deepEqual(result, { outcome: "unavailable" });
+  assert.equal(JSON.stringify(result).includes("Missing Parent"), false);
+  binding.dispose();
 });
 
 test("Create and Open Project mutually serialize and gate every ordinary Project action", async () => {
@@ -840,6 +874,12 @@ test("IPC loads one sanitized profile only for the owning window through one fix
         endpointId: "claude-code-desktop",
         category: "inspection-failed",
       },
+      { endpointId: "glm-coding-plan", category: "not-inspected" },
+      { endpointId: "kimi-code", category: "not-inspected" },
+      { endpointId: "deepseek-api", category: "not-inspected" },
+      { endpointId: "kimi-platform", category: "not-inspected" },
+      { endpointId: "claude-api", category: "not-inspected" },
+      { endpointId: "codex-api", category: "not-inspected" },
     ],
   });
   assert.equal(source.profileLoads, 1);
@@ -854,6 +894,8 @@ test("IPC loads one sanitized profile only for the owning window through one fix
     WORKBENCH_HIDE_PROJECT_HISTORY_CHANNEL,
     WORKBENCH_INTERRUPT_CHANNEL,
     WORKBENCH_STEER_CHANNEL,
+    WORKBENCH_READ_USER_INPUT_CHANNEL,
+    WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
@@ -1453,7 +1495,7 @@ test("IPC saves one sanitized default only for the owning window through one fix
   source.defaultSaveResult = {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
     storedValue: "PRIVATE_STORED_VALUE",
   };
   const binding = installWorkbenchProjectViewIpc({
@@ -1478,7 +1520,7 @@ test("IPC saves one sanitized default only for the owning window through one fix
   assert.deepEqual(saved, {
     ok: true,
     status: "saved",
-    message: "Codex Session Profile default was durably saved.",
+    message: "Session Profile default was durably saved.",
   });
   assert.equal(Object.isFrozen(saved), true);
   assert.equal(JSON.stringify(saved).includes("PRIVATE_"), false);
@@ -1492,6 +1534,8 @@ test("IPC saves one sanitized default only for the owning window through one fix
     WORKBENCH_HIDE_PROJECT_HISTORY_CHANNEL,
     WORKBENCH_INTERRUPT_CHANNEL,
     WORKBENCH_STEER_CHANNEL,
+    WORKBENCH_READ_USER_INPUT_CHANNEL,
+    WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
@@ -1632,6 +1676,8 @@ test("IPC invokes one sanitized submission only for the owning window and remove
     WORKBENCH_HIDE_PROJECT_HISTORY_CHANNEL,
     WORKBENCH_INTERRUPT_CHANNEL,
     WORKBENCH_STEER_CHANNEL,
+    WORKBENCH_READ_USER_INPUT_CHANNEL,
+    WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
@@ -2063,6 +2109,8 @@ test("IPC observation preserves exact user text and rejects an extra event key o
     WORKBENCH_HIDE_PROJECT_HISTORY_CHANNEL,
     WORKBENCH_INTERRUPT_CHANNEL,
     WORKBENCH_STEER_CHANNEL,
+    WORKBENCH_READ_USER_INPUT_CHANNEL,
+    WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
@@ -2085,7 +2133,9 @@ test("IPC observation preserves exact user text and rejects an extra event key o
   assert.equal(owner.messages[0]?.channel, WORKBENCH_PROJECT_VIEW_CHANNEL);
   const exact = owner.messages[0]?.value as WorkbenchHostedProjectResult;
   assert.equal(exact.ok, true);
-  if (!exact.ok) assert.fail("Expected the exact public user event.");
+  if (!exact.ok || "empty" in exact) {
+    assert.fail("Expected the exact public user event.");
+  }
   const event = exact.view.commands[0]?.session?.timeline[0];
   assert.deepEqual(event, { kind: "user-message", text });
   assert.equal(event?.kind === "user-message" ? event.text : undefined, text);
@@ -2173,6 +2223,34 @@ test("IPC sends only fixed failure copy and releases the failed observation", ()
   ]);
   assert.equal(source.disposeCalls, 1);
   binding.dispose();
+});
+
+test("IPC sends an empty Project registry without treating it as a view or failure", () => {
+  const ipcMain = new FakeIpcMain();
+  const owner = new FakeSender();
+  const source = new FakeProjectViewSource();
+  const binding = installWorkbenchProjectViewIpc({
+    ipcMain,
+    window: new FakeWindow(owner),
+    source,
+  });
+
+  ipcMain.emit(WORKBENCH_OBSERVE_CHANNEL, owner);
+  source.emit(0, { ok: true, empty: true });
+
+  assert.deepEqual(owner.messages, [
+    {
+      channel: WORKBENCH_PROJECT_VIEW_CHANNEL,
+      value: { ok: true, empty: true },
+    },
+  ]);
+  assert.equal(source.disposeCalls, 0);
+
+  source.emit(0, validResult(1));
+  assert.equal(owner.messages.length, 2);
+  assert.equal(source.disposeCalls, 0);
+  binding.dispose();
+  assert.equal(source.disposeCalls, 1);
 });
 
 test("an acquisition-time failed projection keeps observation for the later valid target view", async () => {
@@ -2627,6 +2705,12 @@ function profileLoadResult(): WorkbenchCatalogDefaultPublicProfileResult {
           endpointId: "claude-code-desktop",
           category: "inspection-failed",
         },
+        { endpointId: "glm-coding-plan", category: "not-inspected" },
+        { endpointId: "kimi-code", category: "not-inspected" },
+        { endpointId: "deepseek-api", category: "not-inspected" },
+        { endpointId: "kimi-platform", category: "not-inspected" },
+        { endpointId: "claude-api", category: "not-inspected" },
+        { endpointId: "codex-api", category: "not-inspected" },
       ],
     },
     profile: {
@@ -2688,6 +2772,12 @@ function profileUnavailable(): WorkbenchPublicDirectSessionProfileResult {
       statuses: [
         { endpointId: "codex-desktop", category: "not-inspected" },
         { endpointId: "claude-code-desktop", category: "not-inspected" },
+        { endpointId: "glm-coding-plan", category: "not-inspected" },
+        { endpointId: "kimi-code", category: "not-inspected" },
+        { endpointId: "deepseek-api", category: "not-inspected" },
+        { endpointId: "kimi-platform", category: "not-inspected" },
+        { endpointId: "claude-api", category: "not-inspected" },
+        { endpointId: "codex-api", category: "not-inspected" },
       ],
     },
     error: {
@@ -2708,6 +2798,12 @@ function runtimeNotLocated(): WorkbenchPublicDirectSessionProfileResult {
           endpointId: "claude-code-desktop",
           category: "runtime-not-located",
         },
+        { endpointId: "glm-coding-plan", category: "runtime-not-located" },
+        { endpointId: "kimi-code", category: "runtime-not-located" },
+        { endpointId: "deepseek-api", category: "runtime-not-located" },
+        { endpointId: "kimi-platform", category: "runtime-not-located" },
+        { endpointId: "claude-api", category: "runtime-not-located" },
+        { endpointId: "codex-api", category: "runtime-not-located" },
       ],
     },
     error: {
@@ -2717,3 +2813,16 @@ function runtimeNotLocated(): WorkbenchPublicDirectSessionProfileResult {
     },
   };
 }
+
+// W141: first transfer establishes the base for subsequent history deltas.
+test("Project IPC establishes an explicit snapshot base", () => {
+  const ipcMain = new FakeIpcMain();
+  const owner = new FakeSender();
+  const source = new FakeProjectViewSource();
+  const binding = installWorkbenchProjectViewIpc({ ipcMain, window: new FakeWindow(owner), source });
+  try {
+    ipcMain.emit(WORKBENCH_OBSERVE_CHANNEL, owner);
+    source.emit(0, validResult(1));
+    assert.equal((owner.packets[0] as { kind?: string }).kind, "snapshot");
+  } finally { binding.dispose(); }
+});

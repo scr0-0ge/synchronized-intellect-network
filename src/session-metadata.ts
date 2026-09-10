@@ -13,6 +13,12 @@ export type SessionMetadataOperation =
 export interface SessionMetadataMutationRequest {
   readonly sessionId: string;
   readonly operation: SessionMetadataOperation;
+  /**
+   * Mirrors Session deletion's one acknowledgement spelling. It releases only
+   * the terminal `recovery-required` archive barrier; accepted and in-flight
+   * work remain blocked.
+   */
+  readonly acknowledgedUnknownOutcome?: true;
 }
 
 export type SessionMetadataMutationResult =
@@ -171,7 +177,13 @@ export function createSessionMetadataModule(
             exact.sessionId,
             row.lifecycle_status,
           );
-          if (activity !== undefined) {
+          if (
+            activity !== undefined &&
+            !(
+              activity === "unknown" &&
+              exact.acknowledgedUnknownOutcome === true
+            )
+          ) {
             result = Object.freeze({
               status: "blocked" as const,
               activity,
@@ -280,7 +292,8 @@ function assertProjectionRow(row: SessionMetadataProjectionRow): void {
     ].includes(row.lifecycle_status) ||
     (row.archived === 1 &&
       row.lifecycle_status !== "completed" &&
-      row.lifecycle_status !== "failed")
+      row.lifecycle_status !== "failed" &&
+      row.lifecycle_status !== "recovery-required")
   ) {
     throw new Error("invalid-session-metadata-row");
   }
@@ -368,12 +381,26 @@ function reconstructMutationRequest(
   value: unknown,
 ): SessionMetadataMutationRequest | undefined {
   try {
-    if (!isExactRecord(value, ["operation", "sessionId"])) return undefined;
+    const acknowledged = isExactRecord(value, [
+      "acknowledgedUnknownOutcome",
+      "operation",
+      "sessionId",
+    ]);
+    if (!acknowledged && !isExactRecord(value, ["operation", "sessionId"])) {
+      return undefined;
+    }
     if (typeof value.sessionId !== "string" || value.sessionId.trim().length === 0) {
       return undefined;
     }
     const operation = value.operation;
     if (!isRecord(operation) || typeof operation.kind !== "string") {
+      return undefined;
+    }
+    if (
+      acknowledged &&
+      (operation.kind !== "archive" ||
+        value.acknowledgedUnknownOutcome !== true)
+    ) {
       return undefined;
     }
     if (operation.kind === "rename") {
@@ -400,6 +427,9 @@ function reconstructMutationRequest(
     return Object.freeze({
       sessionId: value.sessionId,
       operation: Object.freeze({ kind: operation.kind }),
+      ...(acknowledged
+        ? { acknowledgedUnknownOutcome: true as const }
+        : {}),
     });
   } catch {
     return undefined;

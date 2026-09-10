@@ -20,14 +20,17 @@ import type {
 } from "../../src/workbench-shell/contract.ts";
 import { createWorkbenchLiveView } from "../../src/workbench-shell/live-view.ts";
 import { runtimeProfileCopy } from "../../src/workbench-shell/renderer/copy/runtime-profile-copy.ts";
+import { steerCopy } from "../../src/workbench-shell/renderer/copy/composer-copy.ts";
 import {
   eventTitleCopy,
   statusCopy,
 } from "../../src/workbench-shell/renderer/copy/session-status-copy.ts";
 import {
+  copyLocaleDictionaries,
   transcriptCopy,
   turnStateCopy,
 } from "../../src/workbench-shell/renderer/copy/transcript-copy.ts";
+import { copyLocaleDictionaries as inspectorCopyLocaleDictionaries } from "../../src/workbench-shell/renderer/copy/inspector-copy.ts";
 import { eventTitle } from "../../src/workbench-shell/renderer/view-model.ts";
 import { visualFixture } from "./visual-harness/fixture.ts";
 
@@ -124,7 +127,7 @@ test("exact persisted user input renders as one literal You turn outside agent M
       ),
     );
     const userBody = userTurn.match(
-      /<div class="turn-body user-message-text">([\s\S]*?)<\/div>/u,
+      /<div class="turn-body user-message-text(?: is-clamped)?"[^>]*>([\s\S]*?)<\/div>/u,
     )?.[1];
     assert.ok(userBody, "the user text has its own literal text container");
     assert.equal(decodeText(userBody), literal);
@@ -299,6 +302,63 @@ test("multi-turn rendering orders each You turn before its runtime turn and pres
   });
 });
 
+test("same-turn guidance keeps the durable command's turn number", async () => {
+  assert.match(steerCopy.availableFoot, /current turn/u);
+  await withUserMessageRendererModule(async ({ SessionInspector, SessionTranscript }) => {
+    const timeline = Object.freeze([
+      Object.freeze({ kind: "user-message" as const, text: "initial request" }),
+      Object.freeze({ kind: "session-started" as const }),
+      Object.freeze({ kind: "turn-started" as const }),
+      Object.freeze({ kind: "agent-message" as const, text: "waiting for guidance" }),
+      Object.freeze({ kind: "user-message" as const, text: "same-turn guidance" }),
+      Object.freeze({ kind: "agent-message" as const, text: "guidance accepted" }),
+      Object.freeze({
+        kind: "turn-completed" as const,
+        status: "completed" as const,
+      }),
+    ] satisfies readonly WorkbenchTimelineEvent[]);
+    const seed = commandWith({ status: "completed", timeline });
+    assert.ok(seed.session);
+    const command: WorkbenchCommandView = Object.freeze({
+      ...seed,
+      session: Object.freeze({
+        ...seed.session,
+        turns: Object.freeze([
+          Object.freeze({ profile: seed.session.profile, timeline }),
+        ]),
+      }),
+    });
+    const html = withoutSolidMarkers(
+      renderToString(() => SessionTranscript({ command })),
+    );
+
+    assertOrdered(html, [
+      "initial request",
+      "Turn 1",
+      "waiting for guidance",
+      "same-turn guidance",
+      "Guidance · Turn 1",
+      "guidance accepted",
+    ]);
+    assert.doesNotMatch(html, /Turn 2/u);
+
+    const inspectorHtml = withoutSolidMarkers(
+      renderToString(() =>
+        SessionInspector({
+          command,
+          view: Object.freeze({
+            ...visualFixture,
+            commands: Object.freeze([command]),
+            initialSelectionKey: command.key,
+          }),
+          onCollapse: (): void => undefined,
+        }),
+      ),
+    );
+    assert.match(inspectorHtml, /<dt>Turns<\/dt><dd[^>]*>1<\/dd>/u);
+  });
+});
+
 test("each rendered reply keeps the effective model of its own durable command after a model switch", async () => {
   const firstRequested = requestedProjection("Solution 5.6", "Maximum");
   const secondRequested = requestedProjection("Terra 5.6", "High");
@@ -377,7 +437,7 @@ test("each rendered reply keeps the effective model of its own durable command a
   }
 });
 
-test("reply attribution distinguishes observed mismatch, unknown, and not-recorded profiles", async () => {
+test("reply attribution distinguishes observed mismatch, unobserved, and not-recorded profiles", async () => {
   await withUserMessageRendererModule(async ({ SessionTranscript }) => {
     const requested = requestedProjection("Requested model", "Requested intensity");
     const mismatch = Object.freeze({
@@ -399,7 +459,7 @@ test("reply attribution distinguishes observed mismatch, unknown, and not-record
         }),
       }),
     });
-    const unknown = Object.freeze({
+    const unobserved = Object.freeze({
       requested,
       effective: Object.freeze({ kind: "unknown" as const }),
     });
@@ -409,7 +469,7 @@ test("reply attribution distinguishes observed mismatch, unknown, and not-record
     });
     const turnTimelines = [
       turnTimeline("mismatch input", "mismatch response", true),
-      turnTimeline("unknown input", "unknown response", false),
+      turnTimeline("unobserved input", "unobserved response", false),
       turnTimeline("legacy input", "legacy response", false),
     ] as const;
     const seed = commandWith({
@@ -424,7 +484,7 @@ test("reply attribution distinguishes observed mismatch, unknown, and not-record
         profile: notRecorded,
         turns: Object.freeze([
           Object.freeze({ profile: mismatch, timeline: turnTimelines[0] }),
-          Object.freeze({ profile: unknown, timeline: turnTimelines[1] }),
+          Object.freeze({ profile: unobserved, timeline: turnTimelines[1] }),
           Object.freeze({ profile: notRecorded, timeline: turnTimelines[2] }),
         ]),
       }),
@@ -437,7 +497,7 @@ test("reply attribution distinguishes observed mismatch, unknown, and not-record
     )].map((match) => decodeText(match[1] ?? ""));
     assert.deepEqual(labels, [
       "Observed different value · differs from requested Requested model",
-      "Model unknown · requested Requested model",
+      "Model not observed · requested Requested model",
       "Model not recorded",
     ]);
     const intensities = [...html.matchAll(
@@ -445,9 +505,142 @@ test("reply attribution distinguishes observed mismatch, unknown, and not-record
     )].map((match) => decodeText(match[1] ?? "").replace(/^·\s*/u, ""));
     assert.deepEqual(intensities, [
       "Requested intensity",
-      "Work Intensity unknown · requested Requested intensity",
+      "Work Intensity not observed · requested Requested intensity",
       "Work Intensity not recorded",
     ]);
+  });
+});
+
+/**
+ * Issue #6 case 2. The owner read
+ * "模型未知 · 请求值为 glm-5.3[1m] · 工作强度未知 · 请求值为 default"
+ * on a GLM turn that never finished and concluded the stored API key had gone
+ * bad. The selection was never unknown -- it is right there in the same line --
+ * and the effective projection's `unknown` arm carries no per-field data, so the
+ * word describes the *observation*, not the model and not the work intensity.
+ * Both nouns must say that no effective value was observed, and a turn that is
+ * still running must be distinguishable from one that ended without ever
+ * reporting: the first is normal, the second is the anomaly worth chasing.
+ */
+test("an unobserved turn never claims the model or work intensity is unknown", async () => {
+  for (const locale of ["en", "zh-CN"] as const) {
+    const dictionary = copyLocaleDictionaries[locale];
+    for (const noun of ["Model", "模型"]) {
+      for (const text of [
+        dictionary.effectiveUnobservedCopy(noun),
+        dictionary.effectiveUnobservedRequestedCopy(noun, "glm-5.3[1m]"),
+        dictionary.effectivePendingObservationCopy(noun),
+        dictionary.effectivePendingObservationRequestedCopy(noun, "glm-5.3[1m]"),
+      ]) {
+        assert.ok(
+          !/unknown/iu.test(text) && !text.includes("未知"),
+          `${locale} copy must not call the selection unknown: ${text}`,
+        );
+        assert.ok(text.includes(noun), `${locale} copy names the field: ${text}`);
+      }
+    }
+    assert.ok(
+      dictionary
+        .effectiveUnobservedRequestedCopy("Model", "glm-5.3[1m]")
+        .includes("glm-5.3[1m]"),
+      `${locale} still echoes the requested value`,
+    );
+  }
+  await withUserMessageRendererModule(async ({ SessionInspector, SessionTranscript }) => {
+    const requested = requestedProjection("glm-5.3[1m]", "default");
+    const unobserved = Object.freeze({
+      requested,
+      effective: Object.freeze({ kind: "unknown" as const }),
+    });
+    // Turn 1 ended without a post-turn observation; turn 2 is still running,
+    // so no observation can exist yet. Same projection, different truths.
+    const endedTimeline = Object.freeze([
+      Object.freeze({ kind: "user-message" as const, text: "ended input" }),
+      Object.freeze({ kind: "session-started" as const }),
+      Object.freeze({ kind: "turn-started" as const }),
+      Object.freeze({ kind: "failed" as const }),
+    ] satisfies readonly WorkbenchTimelineEvent[]);
+    const runningTimeline = Object.freeze([
+      Object.freeze({ kind: "user-message" as const, text: "running input" }),
+      Object.freeze({ kind: "turn-started" as const }),
+    ] satisfies readonly WorkbenchTimelineEvent[]);
+    const seed = commandWith({
+      status: "in-flight",
+      timeline: Object.freeze([...endedTimeline, ...runningTimeline]),
+    });
+    assert.ok(seed.session);
+    const command: WorkbenchCommandView = Object.freeze({
+      ...seed,
+      session: Object.freeze({
+        ...seed.session,
+        profile: unobserved,
+        turns: Object.freeze([
+          Object.freeze({ profile: unobserved, timeline: endedTimeline }),
+          Object.freeze({ profile: unobserved, timeline: runningTimeline }),
+        ]),
+      }),
+    });
+    const html = withoutSolidMarkers(renderToString(() =>
+      SessionTranscript({ command }),
+    ));
+    const models = [...html.matchAll(
+      /<span class="turn-model [^"]*">([^<]*)<\/span>/gu,
+    )].map((match) => decodeText(match[1] ?? ""));
+    assert.deepEqual(models, [
+      "Model not observed · requested glm-5.3[1m]",
+      "Model pending observation · requested glm-5.3[1m]",
+    ]);
+    const intensities = [...html.matchAll(
+      /<span class="turn-intensity [^"]*">([^<]*)<\/span>/gu,
+    )].map((match) => decodeText(match[1] ?? "").replace(/^·\s*/u, ""));
+    assert.deepEqual(intensities, [
+      "Work Intensity not observed · requested default",
+      "Work Intensity pending observation · requested default",
+    ]);
+    assert.ok(
+      !/unknown/iu.test(models.join(" ") + intensities.join(" ")),
+      html,
+    );
+    // The Inspector's "Effective (post-turn)" section carries the same three
+    // values and must not call them unknown either.
+    for (const locale of ["en", "zh-CN"] as const) {
+      const dictionary = inspectorCopyLocaleDictionaries[locale].inspectorCopy;
+      for (const text of [
+        dictionary.unobservedValue,
+        dictionary.pendingObservationValue,
+      ]) {
+        assert.ok(
+          !/unknown/iu.test(text) && !text.includes("未知"),
+          `${locale} Inspector copy must not call the selection unknown: ${text}`,
+        );
+      }
+    }
+    for (const [status, expected] of [
+      ["in-flight", "Pending observation"],
+      ["failed", "Not observed"],
+    ] as const) {
+      const inspected: WorkbenchCommandView = Object.freeze({
+        ...command,
+        status,
+      });
+      const inspectorHtml = withoutSolidMarkers(renderToString(() =>
+        SessionInspector({
+          command: inspected,
+          view: Object.freeze({
+            ...visualFixture,
+            commands: Object.freeze([inspected]),
+            initialSelectionKey: inspected.key,
+          }),
+          onCollapse: (): void => undefined,
+        }),
+      ));
+      assert.equal(
+        inspectorHtml.split(expected).length - 1,
+        3,
+        `${status}: model, work intensity and access mode all read ${expected}`,
+      );
+      assert.doesNotMatch(inspectorHtml, /<dd[^>]*>Unknown<[/]dd>/u);
+    }
   });
 });
 
@@ -493,7 +686,7 @@ test("message-only accepted, failed, recovery, and not-yet-attached commands sta
     assertOrdered(failedHtml, [
       transcriptCopy.actorUser,
       "failed input",
-      "Turn 1",
+      transcriptCopy.turnNotStarted,
       turnStateCopy.failed,
     ]);
     assert.match(failedHtml, new RegExp(transcriptCopy.failedTitle, "u"));
@@ -501,9 +694,15 @@ test("message-only accepted, failed, recovery, and not-yet-attached commands sta
       plainText(failedHtml.match(/<button[^>]*class="disclosure"[^>]*>[\s\S]*?<\/button>/u)?.[0] ?? ""),
       "1 event ▾",
     );
-    assert.match(
-      failedHtml,
-      /<span class="ev-kind">failed<\/span><span><\/span>/u,
+    const failedEventLog = failedHtml.match(
+      /<ol[^>]*class="event-log"[^>]*>[\s\S]*?<\/ol>/u,
+    )?.[0];
+    assert.ok(failedEventLog);
+    assert.match(failedEventLog, /\shidden(?:="")?/u);
+    assert.doesNotMatch(
+      failedEventLog,
+      /<li(?:\s|>)/u,
+      "the closed failed-event disclosure reports its count without mounting its row",
     );
 
     const recoveryTimeline = Object.freeze([
@@ -521,7 +720,7 @@ test("message-only accepted, failed, recovery, and not-yet-attached commands sta
     assertOrdered(recoveryHtml, [
       transcriptCopy.actorUser,
       "recover input",
-      "Turn 1",
+      transcriptCopy.turnNotStarted,
       turnStateCopy["recovery-required"],
       transcriptCopy.recoveryTitle,
     ]);
@@ -533,6 +732,27 @@ test("message-only accepted, failed, recovery, and not-yet-attached commands sta
       plainText(recoveryHtml.match(/<button[^>]*class="disclosure"[^>]*>[\s\S]*?<\/button>/u)?.[0] ?? ""),
       "0 events ▾",
     );
+
+    const startedThenFailedTimeline = Object.freeze([
+      Object.freeze({ kind: "user-message" as const, text: "started input" }),
+      Object.freeze({ kind: "turn-started" as const }),
+      Object.freeze({ kind: "failed" as const }),
+    ] satisfies readonly WorkbenchTimelineEvent[]);
+    const startedThenFailedHtml = withoutSolidMarkers(renderToString(() =>
+      SessionTranscript({
+        command: commandWith({
+          status: "failed",
+          timeline: startedThenFailedTimeline,
+        }),
+      }),
+    ));
+    assertOrdered(startedThenFailedHtml, [
+      transcriptCopy.actorUser,
+      "started input",
+      "Turn 1",
+      turnStateCopy.failed,
+    ]);
+    assert.doesNotMatch(startedThenFailedHtml, /Turn not started/u);
 
     const unattached: WorkbenchCommandView = Object.freeze({
       key: "command-awaiting-session",
@@ -603,10 +823,17 @@ test("the You renderer is a direct Solid text node with pre-wrapped safe wrappin
     source.indexOf("const UserMessageTurn: Component"),
     source.indexOf("interface TimelineDisclosureState"),
   );
+  // The literal-text contract is unchanged: the persisted prompt is a direct
+  // Solid text child of the pre-wrapped container — never markdown, never
+  // innerHTML. Long prompts additionally get the clamp affordance (issue #6
+  // case 5): the only structural additions are the `is-clamped` class hook
+  // and the disclosure button, both outside the text node itself.
   assert.match(
     userTurnSource,
-    /<div class="turn-body user-message-text">\{props\.text\}<\/div>/u,
+    /class=\{`turn-body user-message-text\$\{/u,
   );
+  assert.match(userTurnSource, /\{props\.text\}/u);
+  assert.match(userTurnSource, /class="user-message-toggle"/u);
   assert.doesNotMatch(
     userTurnSource,
     /AgentMessageText|agentMessageBlocks|innerHTML|textContent/u,

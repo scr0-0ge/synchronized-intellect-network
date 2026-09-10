@@ -147,6 +147,8 @@ const englishCopy = {
       "This draft stays local. Stop interrupts only the current turn.",
   },
   composerFeedbackCopy: {
+    suggestionRequiresEmptyDraft:
+      "Clear the current draft before choosing a suggested follow-up.",
     loadingContinuationCatalog:
       "Loading the current catalog for this Session’s fixed provider…",
     endpointsReadOnOpen:
@@ -160,6 +162,24 @@ const englishCopy = {
       "Your draft stays local until the Session is durably accepted.",
     executionRemainsSingleAgent: "Execution remains Single agent.",
     footRequiresSelection: "New Sessions require a current selection.",
+    footStartsFreshProfile: "New Agent Sessions use a fresh profile selection.",
+  },
+  automaticContinuationCopy: {
+    label: "Automatic continuation",
+    hint:
+      "Repeat one instruction automatically. Use the two lines below; 2 is the total number of turns, including the first (choose 1–10).",
+    syntaxCommand: "/auto-continue 2",
+    syntaxInstruction: "Do the next verified step.",
+    firstLineError:
+      "Automatic continuation wasn't sent: the first line needs one space after /auto-continue, then a step count. Use these two lines:",
+    invalidStepCountError:
+      "Automatic continuation wasn't sent: the step count must be a whole number from 1 to 10, with no leading zero. Use these two lines:",
+    maximumStepsError: (steps: string): string =>
+      `Automatic continuation wasn't sent: ${steps} exceeds the maximum of 10 steps, including the first turn. Use these two lines:`,
+    nextLineError:
+      "Automatic continuation wasn't sent: put the instruction on the line after the step count. Use these two lines:",
+    instructionError:
+      "Automatic continuation wasn't sent: make the instruction after the newline non-empty. Use these two lines:",
   },
   selectedSessionSummaryCopy: (summary: string): string =>
     `Selected Session: ${summary}`,
@@ -386,6 +406,7 @@ const simplifiedChineseCopy = {
     localDraftFoot: "此草稿保留在本地；“停止”只会中断当前回合。",
   },
   composerFeedbackCopy: {
+    suggestionRequiresEmptyDraft: "请先清空当前草稿，再选择追问建议。",
     loadingContinuationCatalog: "正在加载此会话固定提供方的当前目录…",
     endpointsReadOnOpen: "打开选择器时才会读取端点，在此之前不会运行任何内容。",
     nextTurnModesFixed:
@@ -396,6 +417,21 @@ const simplifiedChineseCopy = {
     startFoot: "会话被持久化接受前，你的草稿只保留在本地。",
     executionRemainsSingleAgent: "执行模式保持为单智能体。",
     footRequiresSelection: "新建会话需要当前选择。",
+    footStartsFreshProfile: "新建智能体会话会使用重新选择的配置。",
+  },
+  automaticContinuationCopy: {
+    label: "自动续办",
+    hint: "重复执行一条指令。按下面两行输入；2 是总回合数（含首回合，可选 1–10）。",
+    syntaxCommand: "/auto-continue 2",
+    syntaxInstruction: "完成下一个已验证的步骤。",
+    firstLineError:
+      "自动续办未发送：第一行中 /auto-continue 后需要一个空格，随后填写步数。请使用这两行：",
+    invalidStepCountError:
+      "自动续办未发送：步数必须是 1 到 10 的整数，且不能以 0 开头。请使用这两行：",
+    maximumStepsError: (steps: string): string =>
+      `自动续办未发送：${steps} 超过最多 10 步（含首回合）。请使用这两行：`,
+    nextLineError: "自动续办未发送：请在步数后的下一行填写指令。请使用这两行：",
+    instructionError: "自动续办未发送：换行后的指令不能为空。请使用这两行：",
   },
   selectedSessionSummaryCopy: (summary: string): string =>
     `所选会话：${summary}`,
@@ -547,6 +583,7 @@ export const unavailableComposerCopy = localizedCopy.unavailableComposerCopy;
 export const interruptCopy = localizedCopy.interruptCopy;
 export const steerCopy = localizedCopy.steerCopy;
 export const composerFeedbackCopy = localizedCopy.composerFeedbackCopy;
+export const automaticContinuationCopy = localizedCopy.automaticContinuationCopy;
 
 export function selectedSessionSummaryCopy(summary: string): string {
   return currentLocaleCopy(copyLocaleDictionaries).selectedSessionSummaryCopy(

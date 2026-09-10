@@ -1,4 +1,12 @@
 import { types as nodeUtilTypes } from "node:util";
+import {
+  vendorRecordExtraKeys as catalogModelExtraKeys,
+  vendorRecordOwnKeys as catalogRecordOwnKeys,
+  isSafeVendorText as isSafeCatalogText,
+  hasUnpairedSurrogate,
+  isVendorRecord,
+} from "./vendor-wire.ts";
+export { vendorRecordExtraKeys as catalogModelExtraKeys } from "./vendor-wire.ts";
 
 import type {
   ResumableAgentRuntimeAdapter,
@@ -7,83 +15,22 @@ import type {
   RuntimeModel,
   RuntimeResume,
   RuntimeStart,
+  SessionProfile,
 } from "./index.ts";
 import { RuntimeAdapterError } from "./index.ts";
 import { CodexRuntimeBinding } from "./codex/binding.ts";
 import type { CodexNativeTurnAccess } from "./codex/binding.ts";
 import { createOfficialCodexTransport } from "./codex/process-transport.ts";
-import { asObject, CodexJsonlPeer, toRuntimeError } from "./codex/protocol.ts";
+import { discoverOfficialCodexExecutable } from "./codex/process-transport.ts";
+import type { CodexExecutableDiscoveryResult } from "./codex/executable-discovery.ts";
+import type {
+  CodexEndpointEnvironmentResolver,
+} from "./codex/endpoint-env-factory.ts";
+import { resolveCodexEndpointProcessEnvironment } from "./codex/endpoint-env-factory.ts";
+import { asObject, CodexJsonlPeer, reportCodexDiagnostic, toRuntimeError } from "./codex/protocol.ts";
 import type { OfficialRuntimeTransportFactory } from "./codex/transport.ts";
 import type { ProviderRequestBudget } from "./provider-request-budget.ts";
 
-const legacyResumeResultKeys = [
-  "thread",
-  "model",
-  "reasoningEffort",
-  "approvalPolicy",
-  "sandbox",
-] as const;
-
-// Runtime releases on the supported desktop channel currently return this
-// expanded response. Keep both generations exact instead of opening the wire
-// object to arbitrary native fields.
-const currentResumeResultKeys = [
-  "activePermissionProfile",
-  "approvalPolicy",
-  "approvalsReviewer",
-  "cwd",
-  "initialTurnsPage",
-  "instructionSources",
-  "itemsBackwardsCursor",
-  "model",
-  "modelProvider",
-  "multiAgentMode",
-  "reasoningEffort",
-  "runtimeWorkspaceRoots",
-  "sandbox",
-  "serviceTier",
-  "thread",
-  "turnsBackwardsCursor",
-] as const;
-
-const currentResumeThreadKeys = [
-  "agentNickname",
-  "agentRole",
-  "canAcceptDirectInput",
-  "cliVersion",
-  "createdAt",
-  "cwd",
-  "ephemeral",
-  "extra",
-  "forkedFromId",
-  "gitInfo",
-  "historyMode",
-  "id",
-  "modelProvider",
-  "name",
-  "parentThreadId",
-  "path",
-  "preview",
-  "recencyAt",
-  "section",
-  "sectionEnteredAt",
-  "sessionId",
-  "source",
-  "status",
-  "threadSource",
-  "turns",
-  "updatedAt",
-] as const;
-
-// codex-cli 0.151 on the supported desktop channel adds exactly one thread
-// field, `projectId`; the resume result envelope is unchanged. Both thread
-// generations stay exact — an older CLI's 26-key thread and the 0.151 27-key
-// thread are each admitted whole, and any other key set still rejects.
-// Measured from a live `thread/resume` reply on 0.151.0-alpha.7.1.
-const currentResumeThreadKeysWithProjectId = [
-  ...currentResumeThreadKeys,
-  "projectId",
-] as const;
 
 /**
  * The exact recognised `model/list` model shape. Extended deliberately under
@@ -296,19 +243,79 @@ function toCatalogObservation(
   });
 }
 
+/**
+ * Per-endpoint context that lets one CodexAdapter class serve several
+ * Runtime Endpoints (the codex-family counterpart of `ClaudeEndpointContext`;
+ * adapter : endpoint = 1 : N):
+ *
+ * - `environmentSource`: every spawn builds its process environment through
+ *   the codex endpoint environment factory (cleanse, then inject).
+ * - `prepareEndpoint`: filesystem preparation (the kimi-platform CODEX_HOME
+ *   seeding), awaited before every operation, inspect included.
+ * - `discoverExecutable`: executable lookup for the spawn-free static
+ *   inspection path; defaults to the production discovery.
+ * - `staticCatalog`: when set, `inspect` serves this catalog without probing
+ *   the CLI, and session selection is validated against this catalog — the
+ *   CLI-reported catalog (which carries the provider's built-in names) is
+ *   never trusted for model identity on such an endpoint. `start`/`resume`
+ *   also skip the chatgpt-account gate: `account/read` answers for the
+ *   CLI's own subscription, not for a custom model provider's env key.
+ */
+export interface CodexEndpointContext {
+  readonly environmentSource: CodexEndpointEnvironmentResolver;
+  /** Source environment the factory reads the endpoint key from. */
+  readonly sourceEnvironment?: NodeJS.ProcessEnv;
+  readonly prepareEndpoint?: () => Promise<void>;
+  readonly discoverExecutable?: () => Promise<CodexExecutableDiscoveryResult>;
+  readonly staticCatalog?: RuntimeCatalog;
+}
+
 export class CodexAdapter implements ResumableAgentRuntimeAdapter {
   private readonly createTransport: OfficialRuntimeTransportFactory;
   private readonly providerRequestBudget: ProviderRequestBudget | undefined;
   private readonly onCatalogObservation: CodexCatalogObserver | undefined;
+  readonly #endpointContext: CodexEndpointContext | undefined;
 
   constructor(
-    createTransport: OfficialRuntimeTransportFactory = createOfficialCodexTransport,
+    createTransport?: OfficialRuntimeTransportFactory,
     providerRequestBudget?: ProviderRequestBudget,
     onCatalogObservation?: CodexCatalogObserver,
+    endpointContext?: CodexEndpointContext,
   ) {
-    this.createTransport = createTransport;
     this.providerRequestBudget = providerRequestBudget;
     this.onCatalogObservation = onCatalogObservation;
+    this.#endpointContext = endpointContext;
+    // Without an endpoint context the transport is the historical spawn:
+    // inherited environment, CLI-owned catalog, chatgpt-account gate. With
+    // one (kimi-platform, ticket 17), the default transport factory builds
+    // the spawn environment through the codex endpoint environment factory
+    // (cleanse, then inject CODEX_HOME + the endpoint key) and runs the
+    // endpoint's filesystem preparation before every spawn.
+    this.createTransport =
+      createTransport ??
+      (endpointContext === undefined
+        ? createOfficialCodexTransport
+        : async () => {
+            const context = endpointContext;
+            const environment = resolveCodexEndpointProcessEnvironment(
+              context.sourceEnvironment ?? process.env,
+              context.environmentSource,
+            );
+            await context.prepareEndpoint?.();
+            // A context-provided discovery pre-gates the launch (static
+            // endpoints keep inspect and spawn discovery coherent, and
+            // tests stay hermetic); the production transport re-discovers
+            // through its own dependencies exactly as before.
+            if (context.discoverExecutable !== undefined) {
+              const discovery = await context.discoverExecutable().catch(
+                (): CodexExecutableDiscoveryResult => ({ kind: "not-located" }),
+              );
+              if (discovery.kind !== "located") {
+                throw new RuntimeAdapterError("runtime-not-located");
+              }
+            }
+            return createOfficialCodexTransport(undefined, { environment });
+          });
   }
 
   /**
@@ -332,6 +339,31 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
   async inspect(projectDirectory: string): Promise<RuntimeCatalog> {
     if (projectDirectory.length === 0) throw new RuntimeAdapterError("invalid-input");
 
+    const staticCatalog = this.#endpointContext?.staticCatalog;
+    if (staticCatalog !== undefined && this.#endpointContext !== undefined) {
+      // Static-catalog endpoints never probe the CLI for models. The endpoint
+      // environment is validated first (a missing key is an authentication
+      // state, reported without spawning anything), the endpoint's filesystem
+      // preparation runs (CODEX_HOME seeding / repair), and the executable
+      // must be locatable for sessions to be possible at all.
+      resolveCodexEndpointProcessEnvironment(
+        this.#endpointContext.sourceEnvironment ?? process.env,
+        this.#endpointContext.environmentSource,
+      );
+      try {
+        await (this.#endpointContext.prepareEndpoint?.() ?? undefined);
+      } catch (error) {
+        throw toRuntimeError(error, "runtime-unavailable");
+      }
+      const discovery = await (
+        this.#endpointContext.discoverExecutable ?? discoverOfficialCodexExecutable
+      )().catch((): CodexExecutableDiscoveryResult => ({ kind: "not-located" }));
+      if (discovery.kind !== "located") {
+        throw new RuntimeAdapterError("runtime-not-located");
+      }
+      return staticCatalog;
+    }
+
     let peer: CodexJsonlPeer;
     try {
       peer = new CodexJsonlPeer(
@@ -349,6 +381,11 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
       const nativeCatalog = await readNativeCatalog(peer, collector);
       return normalizeCatalog(nativeCatalog);
     } catch (error) {
+      if (error instanceof RuntimeAdapterError && error.category === "catalog-invalid") {
+        reportCodexDiagnostic("Codex CLI model/list output is unrecognized or inconsistent; model selection is unavailable. Refresh the catalog after the CLI output is supported; no model or effort was guessed.");
+      } else if (error instanceof RuntimeAdapterError && (error.category === "protocol-invalid" || error.category === "protocol-rejected")) {
+        reportCodexDiagnostic("Codex CLI initialization or account/read output is unrecognized or rejected; catalog inspection is unavailable. Authentication was not assumed.");
+      }
       throw toRuntimeError(error, "runtime-unavailable");
     } finally {
       await peer.stop();
@@ -359,6 +396,15 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
   async start(request: RuntimeStart): Promise<ResumableRuntimeBinding> {
     if (request.projectDirectory.length === 0) {
       throw new RuntimeAdapterError("invalid-input");
+    }
+
+    const staticCatalog = this.#endpointContext?.staticCatalog;
+    if (staticCatalog !== undefined) {
+      // Selection truth on a static-catalog endpoint is the static catalog,
+      // checked before anything is spawned: a bogus selection must not cost
+      // a process. The native `model/list` read and the chatgpt-account gate
+      // are both skipped (they answer for the CLI's own provider).
+      assertStaticProfileSelection(staticCatalog, request.profile);
     }
 
     let peer: CodexJsonlPeer;
@@ -374,13 +420,16 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
     let keepRunning = false;
     try {
       await initialize(peer);
-      await assertAuthenticated(peer);
-      // `start` parses the same wire but is not the diagnostic path: its
-      // observation is discarded so `inspect` keeps exactly one emission point.
-      const catalog = normalizeCatalog(
-        await readNativeCatalog(peer, createCatalogObservationCollector()),
-      );
-      assertSelection(catalog, request);
+      if (staticCatalog === undefined) {
+        await assertAuthenticated(peer);
+        // `start` parses the same wire but is not the diagnostic path: its
+        // observation is discarded so `inspect` keeps exactly one emission
+        // point.
+        const catalog = normalizeCatalog(
+          await readNativeCatalog(peer, createCatalogObservationCollector()),
+        );
+        assertSelection(catalog, request);
+      }
       const nativeAccess = toNativeAccess(request.profile.accessMode);
       const startResult = asObject(
         await peer.request("thread/start", {
@@ -415,6 +464,9 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
         "new",
       );
     } catch (error) {
+      if (error instanceof RuntimeAdapterError && ["protocol-invalid", "protocol-rejected", "correlation-invalid", "unsupported-selection", "catalog-invalid"].includes(error.category)) {
+        reportCodexDiagnostic("Codex CLI startup output is unrecognized, rejected, or did not confirm the requested model and permissions; no turn was sent. Startup remains unavailable until the CLI can confirm the selection.");
+      }
       throw toRuntimeError(error, "runtime-unavailable");
     } finally {
       if (!keepRunning) await peer.stop();
@@ -424,6 +476,12 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
   async resume(request: RuntimeResume): Promise<ResumableRuntimeBinding> {
     const validatedRequest = validateResumeRequest(request);
     const nativeAccess = toNativeAccess(validatedRequest.profile.accessMode);
+
+    const staticCatalog = this.#endpointContext?.staticCatalog;
+    if (staticCatalog !== undefined) {
+      // Same static-selection rule as `start`, before anything is spawned.
+      assertStaticProfileSelection(staticCatalog, validatedRequest.profile);
+    }
 
     let peer: CodexJsonlPeer;
     try {
@@ -438,7 +496,9 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
     let keepRunning = false;
     try {
       await initialize(peer);
-      await assertAuthenticated(peer);
+      if (staticCatalog === undefined) {
+        await assertAuthenticated(peer);
+      }
       const resumeResultValue = await peer.request("thread/resume", {
         threadId: validatedRequest.opaqueSessionReference,
         excludeTurns: true,
@@ -455,10 +515,22 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
       if (!threadId || threadId !== validatedRequest.opaqueSessionReference) {
         throw new RuntimeAdapterError("correlation-invalid");
       }
-      const sandbox = asClosedObject(resumeResult.sandbox, ["type"], "protocol-invalid");
+      const sandbox = resumeResult.sandbox;
+      // "default" is the static-catalog tier meaning "effort not pinned"
+      // (kimi-platform). `thread/start` echoes the unpinned spelling back
+      // verbatim, but `thread/resume` (measured on 0.153.4)
+      // resolves the request's "default" against the thread's pinned
+      // effort and echoes the resolved value ("high" under the seeded
+      // kimi-platform home). A literal equality can never hold for this
+      // tier on resume, so the resolved spelling is tolerated for the
+      // unpinned tier only; every pinned tier keeps the strict echo.
+      const effortEchoTolerated =
+        validatedRequest.profile.effortLevel === "default";
       if (
         resumeResult.model !== validatedRequest.profile.model ||
-        resumeResult.reasoningEffort !== validatedRequest.profile.effortLevel ||
+        (!effortEchoTolerated &&
+          resumeResult.reasoningEffort !==
+            validatedRequest.profile.effortLevel) ||
         resumeResult.approvalPolicy !== nativeAccess.approvalPolicy ||
         sandbox.type !== nativeAccess.turnAccess.sandboxPolicy.type
       ) {
@@ -474,6 +546,9 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
         "resumed",
       );
     } catch (error) {
+      if (error instanceof RuntimeAdapterError && ["protocol-invalid", "protocol-rejected", "correlation-invalid", "unsupported-selection"].includes(error.category)) {
+        reportCodexDiagnostic("Codex CLI resume output is unrecognized, rejected, or did not confirm the session, model and permissions; no turn was sent. Resume remains unavailable; the saved session reference was not replaced.");
+      }
       throw toRuntimeError(error, "runtime-unavailable");
     } finally {
       if (!keepRunning) await peer.stop();
@@ -484,7 +559,7 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
 async function initialize(peer: CodexJsonlPeer): Promise<void> {
   await peer.request("initialize", {
     clientInfo: {
-      name: "unified-agent-workbench",
+      name: "synchronized-intellect-network",
       title: "Synchronized Intellect Network",
       version: "0.1.0",
     },
@@ -999,103 +1074,6 @@ function isToleratedCatalogAvailabilityNux(
   return true;
 }
 
-/**
- * The own key names of a catalog wire record, or `undefined` when the value is
- * not a plain string-keyed data record at all.
- *
- * This is the object-hygiene half of `catalogModelExtraKeys`. Nothing here
- * decides which keys are acceptable — that is each caller's contract — so the
- * split changes no behaviour.
- */
-function catalogRecordOwnKeys(value: unknown): readonly string[] | undefined {
-  try {
-    if (
-      typeof value !== "object" ||
-      value === null ||
-      nodeUtilTypes.isProxy(value) ||
-      Array.isArray(value) ||
-      Object.getPrototypeOf(value) !== Object.prototype
-    ) {
-      return undefined;
-    }
-    const keys = Reflect.ownKeys(value);
-    if (!keys.every((key) => typeof key === "string")) return undefined;
-    return keys as readonly string[];
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Prototype-pollution vectors are refused as key names rather than tolerated.
- * This is a correctness rule, not a threat model: a record carrying one of these
- * as an own key cannot be reasoned about safely by ordinary key arithmetic.
- */
-const forbiddenCatalogKeyNames: readonly string[] = [
-  "__proto__",
-  "constructor",
-  "prototype",
-];
-
-/**
- * The extra own keys a catalog wire record carries beyond `requiredKeys`, or
- * `undefined` when the value is not an acceptable superset of that shape.
- *
- * This is the asymmetric `F110` contract, and since round 2 it is the ONE
- * predicate behind every catalog wire layer — the page envelope, all four
- * model shapes, effort entries, service tier entries, `upgradeInfo` and
- * `availabilityNux` — so the tolerant and hygiene halves cannot drift apart
- * between layers. Additive vendor change is the failure mode both live
- * outages actually had, and it is the one this tolerates: every required key
- * must still be present, so a *missing* required key is still fatal exactly
- * as before, and only unrecognised *additional* keys are admitted. Their
- * values are never read and never forwarded — each layer rebuilds a fresh
- * literal carrying only its consumed members — so a value-shape check on a
- * tolerated key would protect nothing.
- *
- * Two checks are kept on the key names themselves, both for correctness rather
- * than defence: the name must be printable and bounded, and the prototype-
- * pollution names are refused outright.
- *
- * The per-key property-descriptor sweep covers *every* own key, not only the
- * required ones. The retired exact-shape predicate got that coverage for free
- * from its `keys.length === expectedKeys.length` arithmetic, which does not
- * hold once extra keys are admitted; the explicit sweep preserves it.
- */
-export function catalogModelExtraKeys(
-  value: unknown,
-  requiredKeys: readonly string[],
-): readonly string[] | undefined {
-  const keys = catalogRecordOwnKeys(value);
-  if (keys === undefined) return undefined;
-  try {
-    for (const key of keys) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (
-        descriptor === undefined ||
-        !descriptor.enumerable ||
-        !Object.prototype.hasOwnProperty.call(descriptor, "value")
-      ) {
-        return undefined;
-      }
-    }
-    if (!requiredKeys.every((key) => keys.includes(key))) return undefined;
-    const extraKeys = keys.filter((key) => !requiredKeys.includes(key));
-    if (
-      extraKeys.some(
-        (key) =>
-          !isSafeCatalogText(key, 120) ||
-          forbiddenCatalogKeyNames.includes(key),
-      )
-    ) {
-      return undefined;
-    }
-    return Object.freeze([...extraKeys].sort());
-  } catch {
-    return undefined;
-  }
-}
-
 function isDenseCatalogArray(value: unknown): value is unknown[] {
   try {
     if (
@@ -1132,18 +1110,6 @@ function isSafeCatalogCursor(value: unknown): value is string {
   );
 }
 
-function isSafeCatalogText(value: unknown, maximum: number): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= maximum &&
-    [...value].length <= maximum &&
-    value.trim() === value &&
-    !hasUnpairedSurrogate(value) &&
-    !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
-  );
-}
-
 function isNullOrSafeCatalogMetadataText(
   value: unknown,
   maximum: number,
@@ -1165,20 +1131,6 @@ function isSafeCatalogMetadataText(
       value,
     )
   );
-}
-
-function hasUnpairedSurrogate(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const codeUnit = value.charCodeAt(index);
-    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) return true;
-      index += 1;
-    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function isSafeCatalogDisplayText(value: unknown, maximum: number): value is string {
@@ -1264,6 +1216,27 @@ function assertSelection(catalog: RuntimeCatalog, request: RuntimeStart): void {
   }
 }
 
+/**
+ * Static-catalog selection gate (endpoint-context endpoints): the same rule
+ * as `assertSelection`, stated over a bare profile so `resume` can share it.
+ * The static catalog is the model-identity truth on such endpoints — a
+ * selection outside it never reaches a spawn.
+ */
+function assertStaticProfileSelection(
+  catalog: RuntimeCatalog,
+  profile: SessionProfile,
+): void {
+  const model = catalog.models.find((candidate) => candidate.id === profile.model);
+  if (
+    !model ||
+    !model.effortLevels.includes(profile.effortLevel) ||
+    !catalog.executionModes.includes(profile.executionMode) ||
+    !catalog.accessModes.includes(profile.accessMode)
+  ) {
+    throw new RuntimeAdapterError("unsupported-selection");
+  }
+}
+
 function toNativeAccess(accessMode: string): {
   readonly approvalPolicy: "never";
   readonly threadSandbox: "danger-full-access";
@@ -1301,47 +1274,26 @@ function asClosedObject(
 function readResumeResult(
   value: unknown,
   category: ConstructorParameters<typeof RuntimeAdapterError>[0],
-): {
-  readonly resumeResult: Record<string, unknown>;
-  readonly thread: Record<string, unknown>;
-} {
-  const resumeResult = asObject(value, category);
-  const actualKeys = Object.keys(resumeResult);
-  const hasExactKeys = (keys: readonly string[]) =>
-    actualKeys.length === keys.length &&
-    keys.every((key) => Object.prototype.hasOwnProperty.call(resumeResult, key));
-
-  if (hasExactKeys(legacyResumeResultKeys)) {
-    return {
-      resumeResult,
-      thread: asClosedObject(resumeResult.thread, ["id"], category),
-    };
+) {
+  if (
+    !isVendorRecord(value, ["thread", "model", "reasoningEffort", "approvalPolicy", "sandbox"]) ||
+    !isVendorRecord(value.thread, ["id"]) ||
+    !isVendorRecord(value.sandbox, ["type"]) ||
+    typeof value.reasoningEffort !== "string" || value.reasoningEffort.length === 0
+  ) {
+    throw new RuntimeAdapterError(category);
   }
-  if (hasExactKeys(currentResumeResultKeys)) {
-    return {
-      resumeResult,
-      thread: asClosedObjectOfGenerations(
-        resumeResult.thread,
-        [currentResumeThreadKeys, currentResumeThreadKeysWithProjectId],
-        category,
-      ),
-    };
-  }
-  throw new RuntimeAdapterError(category);
-}
-
-function asClosedObjectOfGenerations(
-  value: unknown,
-  generations: readonly (readonly string[])[],
-  category: ConstructorParameters<typeof RuntimeAdapterError>[0],
-): Record<string, unknown> {
-  const object = asObject(value, category);
-  const actualKeys = Object.keys(object);
-  const matches = (keys: readonly string[]) =>
-    actualKeys.length === keys.length &&
-    keys.every((key) => Object.prototype.hasOwnProperty.call(object, key));
-  if (generations.some(matches)) return object;
-  throw new RuntimeAdapterError(category);
+  // Only identity and the applied profile/access echo are consumed. Native
+  // thread history and every other vendor field are dropped at this boundary.
+  return {
+    resumeResult: {
+      model: value.model,
+      reasoningEffort: value.reasoningEffort,
+      approvalPolicy: value.approvalPolicy,
+      sandbox: { type: value.sandbox.type },
+    },
+    thread: { id: value.thread.id },
+  };
 }
 
 function validateResumeRequest(request: RuntimeResume): RuntimeResume {

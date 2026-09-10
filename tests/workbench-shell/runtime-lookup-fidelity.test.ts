@@ -122,10 +122,10 @@ test("only a not-located row carries a lookup, and it is the right one", () => {
     phase: "ready",
     result: {
       ok: false,
-      endpointDiscovery: publicRuntimeEndpointDiscovery(
-        "runtime-not-located",
-        "catalog-ready",
-      ),
+      endpointDiscovery: publicRuntimeEndpointDiscovery([
+        { endpointId: "codex-desktop", category: "runtime-not-located" },
+        { endpointId: "claude-code-desktop", category: "catalog-ready" },
+      ]),
     },
   } as unknown as Parameters<typeof directEndpointStatusRows>[0]);
 

@@ -4,6 +4,7 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   chmod,
   link,
@@ -25,6 +26,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import type { Writable } from "node:stream";
 
 import {
   historyRecoveryBounds,
@@ -89,9 +91,14 @@ interface HistoryRecoveryOwnerOnlyStorage {
   verify(path: string, kind: "directory" | "file"): Promise<boolean>;
 }
 
+interface OwnerOnlyEntry {
+  readonly path: string;
+  readonly kind: "directory" | "file";
+}
+
 class HistoryRecoveryOwnerOnlyStorageError extends Error {
-  constructor() {
-    super("owner-only-postcondition-unproved");
+  constructor(cause?: unknown) {
+    super("owner-only-postcondition-unproved", { cause });
     this.name = "HistoryRecoveryOwnerOnlyStorageError";
   }
 }
@@ -284,14 +291,244 @@ const ownerDirectoryMode = 0o700;
 const ownerFileMode = 0o600;
 const durableMetadataMaxBytes = 64 * 1024;
 
-function platformOwnerOnlyStorage(): HistoryRecoveryOwnerOnlyStorage {
+// Use SIDs rather than localized account names. A fresh, protected DACL replaces
+// both explicit and inherited grants; descendants inherit only the user's grant
+// even before their own postcondition is established. Paths are data, not script.
+const windowsOwnerOnlyScript = `
+$ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+while ($true) {
+$line = [Console]::In.ReadLine()
+if ($null -eq $line) { break }
+if ($line.Length -eq 0) { continue }
+$answer = $null
+$action = $null
+try {
+$request = ConvertFrom-Json -InputObject $line
+$action = $request.action
+foreach ($entry in @($request.entries)) {
+$path = $entry.path
+$directory = $entry.kind -eq 'directory'
+$item = Get-Item -LiteralPath $path -Force
+if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.PSIsContainer -ne $directory) {
+  throw 'owner-only-storage-kind-mismatch'
+}
+$inheritance = [Security.AccessControl.InheritanceFlags]::None
+if ($directory) {
+  $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+}
+if ($action -ne 'verify') {
+  if ($directory) { $acl = New-Object Security.AccessControl.DirectorySecurity }
+  else { $acl = New-Object Security.AccessControl.FileSecurity }
+  $acl.SetOwner($sid)
+  $acl.SetAccessRuleProtection($true, $false)
+  $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', $inheritance, 'None', 'Allow')
+  $acl.AddAccessRule($rule)
+  if ($directory) { [IO.Directory]::SetAccessControl($path, $acl) }
+  else { [IO.File]::SetAccessControl($path, $acl) }
+}
+# Read the persisted descriptor, not the object passed to SetAccessControl.
+if ($action -ne 'establish') {
+if ($directory) { $acl = [IO.Directory]::GetAccessControl($path) }
+else { $acl = [IO.File]::GetAccessControl($path) }
+$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+$valid = $acl.AreAccessRulesProtected -and $acl.GetOwner([Security.Principal.SecurityIdentifier]).Equals($sid) -and $rules.Count -eq 1
+if ($valid) {
+  $rule = $rules[0]
+  $valid = $rule.IdentityReference.Equals($sid) -and
+    $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+    $rule.FileSystemRights -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+    -not $rule.IsInherited -and $rule.InheritanceFlags -eq $inheritance -and
+    $rule.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None
+}
+if (-not $valid) { $answer = 'not-owner-only'; break }
+}
+}
+if ($null -eq $answer) { if ($action -eq 'establish') { $answer = 'established' } else { $answer = 'owner-only' } }
+} catch {
+# The caller learns that the postcondition was not proved, never why: the
+# reason can name a private path. It stays fail-closed either way.
+$answer = 'failed'
+}
+[Console]::Out.WriteLine($answer)
+[Console]::Out.Flush()
+}
+`;
+
+// The script above asserts one entry at a time; what used to be expensive was
+// getting to it. Starting powershell.exe costs 418-833 ms on this machine and a
+// launch asks for 42 owner-only postconditions, so the ceremony cost ~10.6 s of
+// an ~11 s `prepareLaunch()` while the ACL work itself is sub-millisecond. One
+// reader now serves the whole process. What is asserted does not change: the
+// same establish and the same read-back run per entry, in the same order, and
+// only the exact success line lets a caller through.
+const ownerOnlyRequestTimeoutMilliseconds = 10_000;
+
+/** Child stdio is a socket on Windows; the stream types do not say so. */
+function unrefStream(stream: unknown): void {
+  const candidate = (stream as { readonly unref?: unknown } | null)?.unref;
+  if (typeof candidate === "function") candidate.call(stream);
+}
+
+interface WindowsOwnerOnlyWorker {
+  readonly child: ReturnType<typeof spawn>;
+  readonly stdin: Writable;
+  buffer: string;
+  pending: {
+    readonly resolve: (line: string) => void;
+    readonly reject: (reason: unknown) => void;
+  } | null;
+  alive: boolean;
+}
+
+let windowsOwnerOnlyWorker: WindowsOwnerOnlyWorker | null = null;
+let windowsOwnerOnlyGate: Promise<unknown> = Promise.resolve();
+
+function retireWindowsOwnerOnlyWorker(
+  worker: WindowsOwnerOnlyWorker,
+  reason: unknown,
+): void {
+  if (!worker.alive) return;
+  worker.alive = false;
+  if (windowsOwnerOnlyWorker === worker) windowsOwnerOnlyWorker = null;
+  const pending = worker.pending;
+  worker.pending = null;
+  try {
+    worker.child.kill();
+  } catch {
+    // Already gone. The request it was serving still fails closed below.
+  }
+  pending?.reject(reason);
+}
+
+function startWindowsOwnerOnlyWorker(): WindowsOwnerOnlyWorker {
+  const powershell = join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
+  );
+  const child = spawn(powershell, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(windowsOwnerOnlyScript, "utf16le").toString("base64"),
+  ], { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+  const stdin = child.stdin;
+  const stdout = child.stdout;
+  if (stdin === null || stdout === null) {
+    child.kill();
+    throw new Error("owner-only-worker-unavailable");
+  }
+  const worker: WindowsOwnerOnlyWorker = {
+    child,
+    stdin,
+    buffer: "",
+    pending: null,
+    alive: true,
+  };
+  stdout.setEncoding("utf8");
+  stdout.on("data", (chunk: string) => {
+    worker.buffer += chunk;
+    for (
+      let end = worker.buffer.indexOf("\n");
+      end >= 0;
+      end = worker.buffer.indexOf("\n")
+    ) {
+      const line = worker.buffer.slice(0, end).replace(/\r$/u, "");
+      worker.buffer = worker.buffer.slice(end + 1);
+      const pending = worker.pending;
+      worker.pending = null;
+      pending?.resolve(line);
+    }
+  });
+  child.once("error", (error) => retireWindowsOwnerOnlyWorker(worker, error));
+  child.once("exit", () =>
+    retireWindowsOwnerOnlyWorker(worker, new Error("owner-only-worker-exited")),
+  );
+  child.stderr?.resume();
+  // Nothing here may keep this process alive between requests: an outstanding
+  // request holds the loop open through its own timeout, and closing our end of
+  // the pipe on exit is what tells the reader to stop.
+  child.unref();
+  for (const stream of [stdin, stdout, child.stderr]) unrefStream(stream);
+  return worker;
+}
+
+function askWindowsOwnerOnlyWorker(
+  worker: WindowsOwnerOnlyWorker,
+  payload: string,
+): Promise<string> {
+  return new Promise<string>((resolveLine, rejectLine) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      retireWindowsOwnerOnlyWorker(worker, new Error("owner-only-timeout"));
+    }, ownerOnlyRequestTimeoutMilliseconds);
+    const settle = (deliver: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      deliver();
+    };
+    worker.pending = {
+      resolve: (line) => settle(() => resolveLine(line)),
+      reject: (reason) => settle(() => rejectLine(reason)),
+    };
+    worker.stdin.write(payload, (error) => {
+      if (error) retireWindowsOwnerOnlyWorker(worker, error);
+    });
+  });
+}
+
+async function requestWindowsOwnerOnly(
+  action: "establish" | "verify" | "establish-and-verify",
+  entries: readonly OwnerOnlyEntry[],
+): Promise<{ readonly stdout: string }> {
+  // Paths stay JSON data, never script. One request is one line, and
+  // JSON.stringify never emits a raw newline.
+  const payload = `${JSON.stringify({ action, entries })}\n`;
+  const worker =
+    windowsOwnerOnlyWorker !== null && windowsOwnerOnlyWorker.alive
+      ? windowsOwnerOnlyWorker
+      : (windowsOwnerOnlyWorker = startWindowsOwnerOnlyWorker());
+  const line = await askWindowsOwnerOnlyWorker(worker, payload);
+  if (line === "owner-only" || line === "not-owner-only") return { stdout: line };
+  if (line === "established" && action === "establish") return { stdout: "" };
+  throw new Error("owner-only-storage-failed");
+}
+
+async function runWindowsOwnerOnly(
+  action: "establish" | "verify" | "establish-and-verify",
+  entries: readonly OwnerOnlyEntry[],
+): Promise<{ readonly stdout: string }> {
+  const attempt = async (): Promise<{ readonly stdout: string }> => {
+    try {
+      return await requestWindowsOwnerOnly(action, entries);
+    } catch (error) {
+      // A reader that had already exited while idle only shows up when the
+      // write or the read fails, and it retires itself on the way out. One
+      // replacement process is the same freshness a per-call spawn had. A
+      // refused postcondition answers on its line instead and never lands here.
+      if (windowsOwnerOnlyWorker !== null) throw error;
+      return requestWindowsOwnerOnly(action, entries);
+    }
+  };
+  // One reader, one request at a time: the protocol is a line per answer.
+  const run = windowsOwnerOnlyGate.then(attempt, attempt);
+  windowsOwnerOnlyGate = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+export function platformOwnerOnlyStorage(): HistoryRecoveryOwnerOnlyStorage {
   if (process.platform === "win32") {
     return Object.freeze({
-      async establish() {
-        throw new Error("owner-only-access-control-unavailable");
+      async establish(path: string, kind: "directory" | "file") {
+        await runWindowsOwnerOnly("establish", [{ path, kind }]);
       },
-      async verify() {
-        return false;
+      async verify(path: string, kind: "directory" | "file") {
+        try {
+          return (await runWindowsOwnerOnly("verify", [{ path, kind }])).stdout.trim() === "owner-only";
+        } catch {
+          return false;
+        }
       },
     });
   }
@@ -342,6 +579,7 @@ export function createHistoricalRecoveryLibrary(options: {
   let prepared = false;
   let preparationUnavailable = false;
   let closed = false;
+  let ownerOnlyFailureReported = false;
   let mutationTail: Promise<void> = Promise.resolve();
   let captureAttempts = 0;
 
@@ -471,17 +709,21 @@ export function createHistoricalRecoveryLibrary(options: {
   async function prepare(): Promise<HistoryRecoveryPreparationResult> {
     const deadline = now() + historyRecoveryBounds.preparationDeadlineMilliseconds;
     try {
-      await Promise.all([
-        ensureOwnerDirectory(dataDirectory),
-        ensureOwnerDirectory(intakeRoot),
-        ensureOwnerDirectory(libraryRoot),
-        ensureOwnerDirectory(quarantineRoot),
-        ensureOwnerDirectory(blobContainerRoot),
-        ensureOwnerDirectory(blobRoot),
-        ensureOwnerDirectory(generationRoot),
-        ensureOwnerDirectory(acknowledgementRoot),
-        ensureOwnerDirectory(operationRoot),
+      // Never race recursive mkdir/ACL writes against an ancestor: Windows
+      // inheritance propagation can overwrite a child's protected descriptor.
+      await ensureOwnerDirectory(dataDirectory);
+      await ensureOwnerDirectories([
+        intakeRoot,
+        libraryRoot,
+        quarantineRoot,
       ]);
+      await ensureOwnerDirectories([
+        blobContainerRoot,
+        generationRoot,
+        acknowledgementRoot,
+        operationRoot,
+      ]);
+      await ensureOwnerDirectory(blobRoot);
       secret = await loadOrCreateSecret();
       await recoverUnpublishedIntake();
       await reassertStoredBlobPostconditions();
@@ -528,6 +770,7 @@ export function createHistoricalRecoveryLibrary(options: {
         );
         let captured: CaptureAttemptResult | undefined;
         let captureProblem: HistoryRecoveryProblemCode = "verification-failed";
+        let captureError: unknown;
         for (
           let attempt = 1;
           attempt <= historyRecoveryBounds.captureAttempts;
@@ -542,10 +785,12 @@ export function createHistoricalRecoveryLibrary(options: {
             break;
           } catch (error) {
             captureProblem = captureErrorCode(error);
+            captureError = error;
             await inject(`capture:${attempt}:failed`).catch(() => undefined);
           }
         }
         if (captured === undefined) {
+          console.warn("Historical recovery source capture failed.", captureProblem, captureError);
           preparedSources.push(
             unavailablePreparedSource(
               identity,
@@ -561,10 +806,11 @@ export function createHistoricalRecoveryLibrary(options: {
         try {
           inventory = await readHistoricalRecoveryInventory(
             join(captured.intakeDirectory, "raw"),
-            { deadline, now },
+            { deadline, now, disposableParent: intakeRoot },
           );
         } catch (error) {
           if (error instanceof Error && error.message === "capture-deadline") {
+            console.warn("Historical recovery source inventory exceeded the preparation deadline.", error);
             await quarantine(captured.intakeDirectory).catch(() => undefined);
             preparedSources.push(
               unavailablePreparedSource(
@@ -615,7 +861,8 @@ export function createHistoricalRecoveryLibrary(options: {
         sourceCount: preparedSources.length,
         captureAttempts,
       });
-    } catch {
+    } catch (error) {
+      console.error("Historical recovery preparation failed.", error);
       prepared = true;
       preparationUnavailable = true;
       return Object.freeze({
@@ -1506,19 +1753,34 @@ export function createHistoricalRecoveryLibrary(options: {
           await ensureOwnerDirectory(safeJoin(raw, entry.relativePath));
         }
       }
-      for (const source of before.files) {
+      // Hold only a bounded batch of exclusive destination handles. Establish
+      // and read back all their ACLs before any source bytes enter the batch.
+      for (let start = 0; start < before.files.length; start += 8) {
         assertCaptureDeadline(deadline);
-        const destination = safeJoin(raw, source.relativePath);
-        await ensureOwnerDirectory(dirname(destination));
-        captured.push(
-          await copyStableSourceFile(
-            source.path,
-            destination,
-            source.relativePath,
-            deadline,
-            budget,
-          ),
-        );
+        const batch = before.files.slice(start, start + 8);
+        const paths = batch.map((source) => safeJoin(raw, source.relativePath));
+        await ensureOwnerDirectories(paths.map((path) => dirname(path)));
+        const destinations: Array<Awaited<ReturnType<typeof open>>> = [];
+        try {
+          for (const path of paths) {
+            assertCaptureDeadline(deadline);
+            destinations.push(await open(path, "wx", ownerFileMode));
+          }
+          await assertOwnerOnlyPostconditions(paths.map((path) => ({ path, kind: "file" })));
+          for (let index = 0; index < batch.length; index += 1) {
+            const source = batch[index]!;
+            captured.push(await copyStableSourceFile(
+              source.path,
+              paths[index]!,
+              destinations[index]!,
+              source.relativePath,
+              deadline,
+              budget,
+            ));
+          }
+        } finally {
+          await Promise.all(destinations.map((handle) => handle.close().catch(() => undefined)));
+        }
       }
       await inject("capture:before-reconciliation");
       assertCaptureDeadline(deadline);
@@ -1623,13 +1885,13 @@ export function createHistoricalRecoveryLibrary(options: {
   async function copyStableSourceFile(
     sourcePath: string,
     destinationPath: string,
+    destination: Awaited<ReturnType<typeof open>>,
     relativePath: string,
     deadline: number,
     budget: CaptureBudget,
   ): Promise<CapturedFile> {
     assertCaptureDeadline(deadline);
     const source = await open(sourcePath, "r");
-    let destination: Awaited<ReturnType<typeof open>> | undefined;
     try {
       const before = await source.stat({ bigint: true });
       const pathBefore = await lstat(sourcePath, { bigint: true });
@@ -1651,8 +1913,6 @@ export function createHistoricalRecoveryLibrary(options: {
       if (budget.openedBytes > historyRecoveryBounds.maximumSourceBytes) {
         throw new Error("quota-exceeded");
       }
-      destination = await open(destinationPath, "wx", ownerFileMode);
-      await assertOwnerOnlyPostcondition(destinationPath, "file");
       const hash = createHash("sha256");
       const buffer = Buffer.allocUnsafe(1024 * 1024);
       let position = 0;
@@ -1695,7 +1955,6 @@ export function createHistoricalRecoveryLibrary(options: {
       if (isMissing(error)) throw new Error("capture-drift");
       throw error;
     } finally {
-      await destination?.close().catch(() => undefined);
       await source.close().catch(() => undefined);
     }
   }
@@ -1889,6 +2148,9 @@ export function createHistoricalRecoveryLibrary(options: {
 
   async function loadOrCreateSecret(): Promise<Buffer> {
     try {
+      // Absence means create, not an ACL failure. The ACL boundary deliberately
+      // sanitizes its errors, so detect a first launch before entering it.
+      await lstat(secretPath);
       await assertOwnerOnlyPostcondition(secretPath, "file");
       const existing = await readFile(secretPath);
       if (existing.length !== 32) throw new Error("invalid-secret");
@@ -1978,9 +2240,9 @@ export function createHistoricalRecoveryLibrary(options: {
     }
     const manifestPath = join(directory, "manifest-v1.json");
     const receiptPath = join(directory, "receipt-v1.json");
-    await Promise.all([
-      assertOwnerOnlyPostcondition(manifestPath, "file"),
-      assertOwnerOnlyPostcondition(receiptPath, "file"),
+    await assertOwnerOnlyPostconditions([
+      { path: manifestPath, kind: "file" },
+      { path: receiptPath, kind: "file" },
     ]);
     const [manifestInformation, receiptInformation] = await Promise.all([
       lstat(manifestPath),
@@ -2314,6 +2576,7 @@ export function createHistoricalRecoveryLibrary(options: {
   async function readCanonicalMetadata(
     path: string,
   ): Promise<Readonly<{ bytes: Buffer; value: unknown }>> {
+    await lstat(path);
     await assertOwnerOnlyPostcondition(path, "file");
     const handle = await open(path, "r");
     try {
@@ -2702,20 +2965,40 @@ export function createHistoricalRecoveryLibrary(options: {
     path: string,
     kind: "directory" | "file",
   ): Promise<void> {
+    await assertOwnerOnlyPostconditions([{ path, kind }]);
+  }
+
+  async function assertOwnerOnlyPostconditions(entries: readonly OwnerOnlyEntry[]): Promise<void> {
+    if (entries.length === 0) return;
     try {
-      await ownerOnlyStorage.establish(path, kind);
-      if ((await ownerOnlyStorage.verify(path, kind)) !== true) {
-        throw new HistoryRecoveryOwnerOnlyStorageError();
+      if (process.platform === "win32" && options.ownerOnlyStorage === undefined) {
+        const result = await runWindowsOwnerOnly("establish-and-verify", entries);
+        if (result.stdout.trim() !== "owner-only") throw new HistoryRecoveryOwnerOnlyStorageError();
+      } else {
+        for (const { path, kind } of entries) {
+          await ownerOnlyStorage.establish(path, kind);
+          if ((await ownerOnlyStorage.verify(path, kind)) !== true) {
+            throw new HistoryRecoveryOwnerOnlyStorageError();
+          }
+        }
       }
     } catch (error) {
+      if (!ownerOnlyFailureReported) {
+        ownerOnlyFailureReported = true;
+        console.warn("Historical recovery could not establish or verify owner-only storage protection; the affected recovery operation was stopped.");
+      }
       if (error instanceof HistoryRecoveryOwnerOnlyStorageError) throw error;
-      throw new HistoryRecoveryOwnerOnlyStorageError();
+      throw new HistoryRecoveryOwnerOnlyStorageError(error);
     }
   }
 
   async function ensureOwnerDirectory(path: string): Promise<void> {
-    await mkdir(path, { recursive: true, mode: ownerDirectoryMode });
-    await assertOwnerOnlyPostcondition(path, "directory");
+    await ensureOwnerDirectories([path]);
+  }
+
+  async function ensureOwnerDirectories(paths: readonly string[]): Promise<void> {
+    await Promise.all(paths.map((path) => mkdir(path, { recursive: true, mode: ownerDirectoryMode })));
+    await assertOwnerOnlyPostconditions(paths.map((path) => ({ path, kind: "directory" })));
   }
 
   async function atomicCreateFile(path: string, bytes: Buffer): Promise<void> {

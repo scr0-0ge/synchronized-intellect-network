@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from "node:path";
 import { win32 } from "node:path";
 
-const productDirectoryName = "unified-agent-workbench";
+const productDirectoryName = "synchronized-intellect-network";
 const projectHostDirectoryName = "workbench-project-host";
 
 export interface ConversationStoreRootOptions {
@@ -49,9 +49,12 @@ export function resolveConversationStoreRoot(
       if (requested.toLowerCase() !== resolvedByElectron.toLowerCase()) {
         throw new Error("isolated-conversation-store-root-mismatch");
       }
+      // Historical identities must not follow a product rename: recovery
+      // still discovers these roots, so none is safe for an isolated launch.
       const discoverableProfiles = [
         "Electron",
         productDirectoryName,
+        "unified-agent-workbench",
         "Unified Agent Workbench",
       ].map((name) => win32.join(ownerRoamingDirectory, name).toLowerCase());
       if (discoverableProfiles.includes(requested.toLowerCase())) {

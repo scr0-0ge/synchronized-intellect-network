@@ -9,8 +9,8 @@
  * inheriting the machine's PATH would make every assertion accidental — pnpm
  * and corepack both exist on a developer machine, and the tests that require
  * their absence would pass for the wrong reason. pnpm, corepack, vite and
- * electron are stubs, so no package is downloaded, no bundle is built, nothing
- * is installed, and the app never starts.
+ * electron are stubs. Node provisioning copies a locally built, official-shaped
+ * zip, so the suite uses no network, installs nothing, and never starts the app.
  *
  * Two things deserve their own note.
  *
@@ -27,6 +27,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,6 +36,9 @@ import test from 'node:test';
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const launcherSource = path.join(repositoryRoot, 'start.bat');
 const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
+const powershell = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const nodeArchiveName = 'node-v24.20.0-win-x64.zip';
+const nodeArchiveBytes = new Map();
 
 /* The launcher spawns at most five short-lived stubs. 30s is far above all of
    them together and still separates "did the work" from "hung", which is what
@@ -200,19 +204,85 @@ function pretendNodeVersion(root, version) {
   const preload = path.join(root, `pretend-node-${version}.cjs`);
   fs.writeFileSync(
     preload,
-    'Object.defineProperty(process, "versions", {\n' +
-      `  value: Object.freeze({ ...process.versions, node: ${JSON.stringify(version)} }),\n` +
-      '  configurable: true,\n' +
-      '});\n',
+    `if (process.execPath.replaceAll('\\\\', '/').toLowerCase().includes('/fake-path/')) {\n` +
+      '  Object.defineProperty(process, "versions", {\n' +
+      `    value: Object.freeze({ ...process.versions, node: ${JSON.stringify(version)} }),\n` +
+      '    configurable: true,\n' +
+      '  });\n' +
+      '}\n',
   );
-  return { NODE_OPTIONS: `--require ${preload}` };
+  return { NODE_OPTIONS: `--require "${preload.replaceAll('\\', '/')}"` };
+}
+
+/**
+ * Make the exact archive shape published by nodejs.org, plus the corresponding
+ * SHASUMS256.txt beside it. start.bat copies these local files instead of using
+ * the network when SIN_NODE_ZIP_SOURCE is set.
+ */
+function createNodeArchive(root, { contents = 'node' } = {}) {
+  const source = path.join(root, 'node-download-source');
+  const packageRoot = path.join(source, 'package', 'node-v24.20.0-win-x64');
+  fs.mkdirSync(source, { recursive: true });
+  const archive = path.join(source, nodeArchiveName);
+
+  if (contents === 'not-a-zip') {
+    fs.writeFileSync(archive, 'this has a valid checksum but is not a zip\n');
+  } else if (nodeArchiveBytes.has(contents)) {
+    fs.writeFileSync(archive, nodeArchiveBytes.get(contents));
+  } else {
+    fs.mkdirSync(packageRoot, { recursive: true });
+    if (contents === 'node') {
+      fs.copyFileSync(process.execPath, path.join(packageRoot, 'node.exe'));
+      fs.writeFileSync(
+        path.join(packageRoot, 'corepack.cmd'),
+        batch(
+          '@echo off',
+          '>>"%CD%\\corepack-calls.txt" echo %*',
+          '>>"%CD%\\corepack-prompt.txt" echo COREPACK_ENABLE_DOWNLOAD_PROMPT=[%COREPACK_ENABLE_DOWNLOAD_PROMPT%]',
+          'call "%CD%\\install-stub.cmd"',
+          'exit /b %ERRORLEVEL%',
+        ),
+      );
+    } else if (contents === 'broken-node') {
+      fs.writeFileSync(path.join(packageRoot, 'node.exe'), 'not an executable\n');
+    }
+
+    const zipped = spawnSync(
+      powershell,
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        'Add-Type -AssemblyName System.IO.Compression.FileSystem; ' +
+          '[System.IO.Compression.ZipFile]::CreateFromDirectory(' +
+          '$env:SIN_TEST_PACKAGE, $env:SIN_TEST_ARCHIVE, ' +
+          '[System.IO.Compression.CompressionLevel]::Optimal, $true)',
+      ],
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          SIN_TEST_PACKAGE: path.join(source, 'package', 'node-v24.20.0-win-x64'),
+          SIN_TEST_ARCHIVE: archive,
+        },
+        windowsHide: true,
+      },
+    );
+    assert.equal(zipped.status, 0, output(zipped));
+    nodeArchiveBytes.set(contents, fs.readFileSync(archive));
+  }
+
+  const digest = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
+  fs.writeFileSync(path.join(source, 'SHASUMS256.txt'), `${digest}  ${nodeArchiveName}\n`);
+  return archive;
 }
 
 /** A NODE_OPTIONS preload that makes a real node exit before it answers. */
 function pretendNodeIsBroken(root) {
   const preload = path.join(root, 'pretend-node-broken.cjs');
   fs.writeFileSync(preload, 'process.exit(3);\n');
-  return { NODE_OPTIONS: `--require ${preload}` };
+  return { NODE_OPTIONS: `--require "${preload.replaceAll('\\', '/')}"` };
 }
 
 function runLauncher(root, pathDirectory, { args = [], env = {} } = {}) {
@@ -227,10 +297,14 @@ function runLauncher(root, pathDirectory, { args = [], env = {} } = {}) {
       windir: systemRoot,
       TEMP: path.join(root, 'temp'),
       TMP: path.join(root, 'temp'),
+      LOCALAPPDATA: path.join(root, 'local-app-data'),
       PATHEXT: '.COM;.EXE;.BAT;.CMD',
       // The fake directory, and System32 for the findstr the vite stub uses.
       // Nothing else on the machine is reachable from inside the launcher.
       PATH: `${pathDirectory};${path.join(systemRoot, 'System32')}`,
+      // A qualified PATH node must never consult this deliberately absent
+      // source. Provisioning tests replace it with a local archive.
+      SIN_NODE_ZIP_SOURCE: path.join(root, 'download-must-not-run.zip'),
       ...env,
     },
     input: '\r\n',
@@ -286,6 +360,11 @@ test('a stranger with node and pnpm gets a fresh build and a started app', (t) =
   // node_modules was already there, so no install ran.
   assert.equal(readIfPresent(path.join(root, 'install-ran.txt')), null, text);
   assert.ok(fs.existsSync(path.join(root, 'electron-args.txt')), text);
+  assert.equal(
+    fs.existsSync(path.join(root, 'local-app-data', 'unified-agent-workbench', 'runtime', 'node')),
+    false,
+    'a qualified PATH node must not create or download a private runtime',
+  );
 });
 
 test('every argument reaches the app, so --user-data-dir keeps a throwaway profile', (t) => {
@@ -455,20 +534,41 @@ test('no pnpm and no corepack names both, and where to get pnpm', (t) => {
 // node
 // ---------------------------------------------------------------------------
 
-test('no node on PATH names node.exe, PATH, and nodejs.org', (t) => {
-  const root = createFixture(t);
-  const pathDirectory = createPathDirectory(root, { node: false, pnpm: true });
+test('no node on PATH provisions the private LTS runtime, then builds and starts', (t) => {
+  const root = createFixture(t, { installed: false });
+  const pathDirectory = createPathDirectory(root, { node: false, pnpm: false, corepack: false });
+  const archive = createNodeArchive(root);
 
-  const result = runLauncher(root, pathDirectory);
+  const result = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
   const text = output(result);
 
-  assert.equal(result.status, 1, text);
-  assert.match(text, /Could not find node/i);
-  assert.match(text, /node\.exe/i);
-  assert.match(text, /every directory on your PATH/i);
-  assert.match(text, /https:\/\/nodejs\.org/i);
-  assert.match(text, /22\.5 or newer/i);
-  assert.equal(readIfPresent(path.join(root, 'electron-args.txt')), null, text);
+  assert.equal(result.status, 0, text);
+  assert.match(text, /node was not found on PATH/i);
+  assert.match(text, /private Node 24\.20\.0 LTS/i);
+  assert.match(text, /checksum verified/i);
+  assert.match(text, /corepack/i);
+  assert.match(text, /installing dependencies from pnpm-lock\.yaml/i);
+  assert.match(text, /build ok/i);
+  assert.ok(
+    fs.existsSync(
+      path.join(
+        root,
+        'local-app-data',
+        'unified-agent-workbench',
+        'runtime',
+        'node',
+        'bin',
+        'node.exe',
+      ),
+    ),
+    text,
+  );
+  assert.equal(fs.readFileSync(path.join(root, 'install-ran.txt'), 'utf8').trim(), 'installed');
+  assert.match(
+    fs.readFileSync(path.join(root, 'corepack-calls.txt'), 'utf8'),
+    /pnpm@11\.20\.0 install --frozen-lockfile/,
+  );
+  assert.ok(fs.existsSync(path.join(root, 'electron-args.txt')), text);
 });
 
 test('a node.exe that cannot report a version is refused, not guessed at', (t) => {
@@ -484,31 +584,120 @@ test('a node.exe that cannot report a version is refused, not guessed at', (t) =
   assert.equal(readIfPresent(path.join(root, 'electron-args.txt')), null, text);
 });
 
-test('a node older than 22.5 is refused, with node:sqlite given as the reason', (t) => {
+test('a node older than 22.5 is left untouched while the private LTS runtime is used', (t) => {
   const root = createFixture(t);
   const pathDirectory = createPathDirectory(root, { pnpm: true });
+  const archive = createNodeArchive(root);
 
-  const result = runLauncher(root, pathDirectory, { env: pretendNodeVersion(root, '22.4.9') });
+  const result = runLauncher(root, pathDirectory, {
+    env: { ...pretendNodeVersion(root, '22.4.9'), SIN_NODE_ZIP_SOURCE: archive },
+  });
+  const text = output(result);
+
+  assert.equal(result.status, 0, text);
+  assert.match(text, /node 22\.4\.9 on PATH is too old/i);
+  assert.match(text, /node:sqlite/i);
+  assert.match(text, /using private Node 24\.20\.0 LTS/i);
+  assert.ok(fs.existsSync(path.join(pathDirectory, 'node.exe')), text);
+  assert.ok(fs.existsSync(path.join(root, 'electron-args.txt')), text);
+});
+
+test('an older major also falls back to the private LTS runtime', (t) => {
+  const root = createFixture(t);
+  const pathDirectory = createPathDirectory(root, { pnpm: true });
+  const archive = createNodeArchive(root);
+
+  const result = runLauncher(root, pathDirectory, {
+    env: { ...pretendNodeVersion(root, '20.19.0'), SIN_NODE_ZIP_SOURCE: archive },
+  });
+  const text = output(result);
+
+  assert.equal(result.status, 0, text);
+  assert.match(text, /node 20\.19\.0 on PATH is too old/i);
+  assert.ok(fs.existsSync(path.join(root, 'electron-args.txt')), text);
+});
+
+test('a validated private runtime is reused without touching the download source', (t) => {
+  const root = createFixture(t);
+  const pathDirectory = createPathDirectory(root, { node: false, pnpm: true });
+  const archive = createNodeArchive(root);
+
+  const first = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
+  assert.equal(first.status, 0, output(first));
+
+  fs.rmSync(path.dirname(archive), { force: true, recursive: true });
+  fs.rmSync(path.join(root, 'electron-args.txt'));
+  const second = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
+
+  assert.equal(second.status, 0, output(second));
+  assert.match(output(second), /cached private Node/i);
+  assert.ok(fs.existsSync(path.join(root, 'electron-args.txt')), output(second));
+});
+
+test('a checksum mismatch is refused before the downloaded node can execute', (t) => {
+  const root = createFixture(t);
+  const pathDirectory = createPathDirectory(root, { node: false, pnpm: true });
+  const archive = createNodeArchive(root);
+  const executionMarker = path.join(root, 'downloaded-node-executed.txt');
+  const markerPreload = path.join(root, 'mark-node-execution.cjs');
+  fs.writeFileSync(
+    markerPreload,
+    `require('node:fs').writeFileSync(${JSON.stringify(executionMarker)}, 'executed\\n');\n`,
+  );
+  fs.writeFileSync(path.join(path.dirname(archive), 'SHASUMS256.txt'), `${'0'.repeat(64)}  ${nodeArchiveName}\n`);
+
+  const result = runLauncher(root, pathDirectory, {
+    env: {
+      NODE_OPTIONS: `--require "${markerPreload.replaceAll('\\', '/')}"`,
+      SIN_NODE_ZIP_SOURCE: archive,
+    },
+  });
   const text = output(result);
 
   assert.equal(result.status, 1, text);
-  assert.match(text, /node 22\.4\.9 is too old/i);
-  assert.match(text, /22\.5 or newer/i);
-  assert.match(text, /node:sqlite/i);
-  assert.match(text, /https:\/\/nodejs\.org/i);
-  assert.equal(readIfPresent(path.join(root, 'vite-calls.txt')), null, text);
+  assert.match(text, /SHA-256 checksum did not match/i);
+  assert.match(text, /https:\/\/nodejs\.org\/dist\/v24\.20\.0\/SHASUMS256\.txt/i);
+  assert.equal(readIfPresent(executionMarker), null, 'the unverified node.exe was executed');
   assert.equal(readIfPresent(path.join(root, 'electron-args.txt')), null, text);
 });
 
-test('an older major is refused even when its minor is high', (t) => {
+test('a missing download source explains the failed fetch and official destination', (t) => {
   const root = createFixture(t);
-  const pathDirectory = createPathDirectory(root, { pnpm: true });
+  const pathDirectory = createPathDirectory(root, { node: false, pnpm: true });
 
-  const result = runLauncher(root, pathDirectory, { env: pretendNodeVersion(root, '20.19.0') });
+  const result = runLauncher(root, pathDirectory);
   const text = output(result);
 
   assert.equal(result.status, 1, text);
-  assert.match(text, /node 20\.19\.0 is too old/i);
+  assert.match(text, /Node zip could not be downloaded or copied/i);
+  assert.match(text, /https:\/\/nodejs\.org\/dist\/v24\.20\.0\/node-v24\.20\.0-win-x64\.zip/i);
+  assert.equal(readIfPresent(path.join(root, 'electron-args.txt')), null, text);
+});
+
+test('a verified file that is not a zip reports extraction failure', (t) => {
+  const root = createFixture(t);
+  const pathDirectory = createPathDirectory(root, { node: false, pnpm: true });
+  const archive = createNodeArchive(root, { contents: 'not-a-zip' });
+
+  const result = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
+  const text = output(result);
+
+  assert.equal(result.status, 1, text);
+  assert.match(text, /verified Node zip could not be extracted into the private cache/i);
+  assert.equal(readIfPresent(path.join(root, 'electron-args.txt')), null, text);
+});
+
+test('an archive that has no working node is refused after extraction', (t) => {
+  const root = createFixture(t);
+  const pathDirectory = createPathDirectory(root, { node: false, pnpm: true });
+  const archive = createNodeArchive(root, { contents: 'broken-node' });
+
+  const result = runLauncher(root, pathDirectory, { env: { SIN_NODE_ZIP_SOURCE: archive } });
+  const text = output(result);
+
+  assert.equal(result.status, 1, text);
+  assert.match(text, /archive did not contain a working node\.exe/i);
+  assert.match(text, /private cache/i);
   assert.equal(readIfPresent(path.join(root, 'electron-args.txt')), null, text);
 });
 

@@ -233,11 +233,26 @@ export function createWorkbenchLifecycleController(options: {
       event.preventDefault();
       if (closePromptPending || quitPromptPending) return;
       if (guardedCloseDialogs === null) {
-        if (!isTrayReady()) return;
+        // Nothing in this composition can ask the user anything, so a close
+        // that cannot hide has exactly two honest outcomes: hide, or leave.
+        //
+        // Returning instead — which is what this branch did with no tray —
+        // keeps the prevented close and does nothing else: a window that will
+        // not close, no tray to reopen it from, and no menu, because
+        // `Menu.setApplicationMenu(null)` removed it. That is `F117`, which
+        // `main.ts` names at its startup-failure boundary, surviving on the
+        // close path because the fix went in on the startup path only.
+        if (!isTrayReady()) {
+          startQuitAttempt();
+          return;
+        }
         try {
           options.hideWindow();
         } catch {
-          // A failed tray hide leaves the window visible and usable.
+          // The close is already prevented and the hide did not happen, so the
+          // click has produced nothing at all. Treat it as the exit request it
+          // was rather than leaving the user holding an unclosable window.
+          startQuitAttempt();
         }
         return;
       }
@@ -255,6 +270,24 @@ export function createWorkbenchLifecycleController(options: {
     },
     handleBeforeQuit(event: WorkbenchPreventableEvent): void {
       if (systemSessionEnding) return;
+      /*
+       * Unlike `handleWindowClose`, preventing first is correct here: every
+       * path below either starts a drain or is already running one, and every
+       * drain ends in `exit()`. There is no prevent-and-do-nothing outcome.
+       *
+       * One hazard does survive, and worker 482 measured it rather than fixing
+       * it. `closeBackend` has no deadline, so a drain that wedges leaves every
+       * later quit prevented and dropped for good — the app cannot then be
+       * closed by ordinary means, which is the `F117` shape this file's own
+       * "half 2" comment already names in `handleBeforeQuit`. Letting a repeat
+       * quit through is NOT the fix: Electron would then complete its own quit
+       * and abandon the in-flight `closeBackend()`, and since the tray Quit
+       * shows no progress while draining, an impatient second click is more
+       * likely than a wedged drain. That trades a rare stranding for common
+       * data loss. The real fix is either a deadline on the flush or the
+       * `showQuitDialog` surface this controller already accepts and production
+       * never passes; both are owner decisions, so neither was taken.
+       */
       event.preventDefault();
       if (shutdownStarted || quitPromptPending) return;
       if (closePromptPending) {

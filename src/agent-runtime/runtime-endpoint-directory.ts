@@ -746,10 +746,15 @@ function wrapDirectoryRuntimeBinding(
   const interrupt = binding.interrupt;
   const interruptAvailability = binding.interruptAvailability;
   const effectiveProfile = binding.effectiveProfile;
+  const close = binding.close;
   return Object.freeze({
     profile: Object.freeze({ ...selectionProfile }),
     opaqueSessionReference,
+    ...(binding.userInput === undefined ? {} : { userInput: binding.userInput }),
     send: (input: RuntimeInput) => binding.send(input),
+    ...(typeof close === "function"
+      ? { close: () => close.call(binding) }
+      : {}),
     ...(typeof steer === "function"
       ? { steer: (input: RuntimeInput) => steer.call(binding, input) }
       : {}),

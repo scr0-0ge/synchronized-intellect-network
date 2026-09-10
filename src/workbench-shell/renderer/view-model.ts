@@ -29,6 +29,9 @@ import type {
   WorkbenchSessionContextUsage,
   WorkbenchSubmissionResult,
   WorkbenchTimelineEvent,
+  WorkbenchEndpointFamilyId,
+  WorkbenchFamilyEndpointPreferences,
+  WorkbenchSubscriptionAuthenticationState,
 } from "../contract.ts";
 import {
   RUNTIME_LOOKUP_SURFACES,
@@ -36,7 +39,9 @@ import {
 } from "../../agent-runtime/runtime-lookup-surface.ts";
 import {
   isValidWorkbenchDirectInput,
-  publicRuntimeEndpointDiscovery,
+  publicUniformRuntimeEndpointDiscovery,
+  WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS,
+  defaultWorkbenchFamilyEndpointPreferences,
 } from "../contract.ts";
 import { WORKBENCH_TURN_NOTIFICATION_LIMITS } from "../notification-bridge.ts";
 import {
@@ -65,6 +70,8 @@ import {
 import {
   endpointIdentityCopy,
   endpointStatusRowCopy,
+  endpointApiKeyAuthenticationDetail,
+  endpointFamilyUnconfiguredDetail,
   contextWindowTitleCopy,
   contextWindowAriaCopy,
   contextUsedTokensCopy,
@@ -72,6 +79,30 @@ import {
   type EndpointLabelText,
   type EndpointStatusRowLabelText as StatusRowLabelText,
 } from "./copy/runtime-profile-copy.ts";
+
+/** Endpoint-id → identity-copy key; total so a new endpoint is a data change. */
+const endpointIdentityCopyKey: Readonly<
+  Record<
+    WorkbenchRuntimeEndpointId,
+    | "codex"
+    | "claude"
+    | "glm"
+    | "kimi"
+    | "deepseek"
+    | "kimiPlatform"
+    | "claudeApi"
+    | "codexApi"
+  >
+> = Object.freeze({
+  "codex-desktop": "codex",
+  "claude-code-desktop": "claude",
+  "glm-coding-plan": "glm",
+  "kimi-code": "kimi",
+  "deepseek-api": "deepseek",
+  "kimi-platform": "kimiPlatform",
+  "claude-api": "claudeApi",
+  "codex-api": "codexApi",
+});
 import {
   projectAcquisitionCopy,
   openingProjectFeedbackCopy,
@@ -221,6 +252,8 @@ export interface WorkbenchComposerState {
   readonly draft: string;
   readonly phase: WorkbenchComposerPhase;
   readonly feedback: WorkbenchPresentationText | null;
+  readonly sessionDrafts?: Readonly<Record<string, string>>;
+  readonly pendingSessionKey?: string;
 }
 
 export type WorkbenchDirectProfilePhase =
@@ -306,6 +339,17 @@ export interface WorkbenchRendererState {
   readonly newSession: WorkbenchNewSessionState;
   readonly projectSwitch: WorkbenchProjectSwitchState;
   readonly projectOpen: WorkbenchProjectOpenState;
+}
+
+type WorkbenchHostedProjectViewResult = Extract<
+  WorkbenchHostedProjectResult,
+  { readonly view: unknown }
+>;
+
+export function hasHostedProjectView(
+  result: WorkbenchHostedProjectResult | null | undefined,
+): result is WorkbenchHostedProjectViewResult {
+  return result?.ok === true && "view" in result;
 }
 
 const initialDirectProfileState: WorkbenchDirectProfileState = Object.freeze({
@@ -517,6 +561,17 @@ export function replaceProjectResult(
   state: WorkbenchRendererState,
   result: WorkbenchHostedProjectResult,
 ): WorkbenchRendererState {
+  if (result.ok && "empty" in result) {
+    return Object.freeze({
+      ...state,
+      result,
+      selectedKey: null,
+      composer: resetComposer(state.composer),
+      newSession: inactiveNewSessionState,
+      projectSwitch: idleProjectSwitchState,
+      projectOpen: idleProjectOpenState,
+    });
+  }
   if (!result.ok) {
     const preserveAcquisitionScope =
       state.projectOpen.phase === "pending" ||
@@ -555,7 +610,8 @@ export function replaceProjectResult(
     });
   }
   const targetProject =
-    state.projectSwitch.phase === "pending" &&
+    (state.projectSwitch.phase === "pending" ||
+      state.projectSwitch.phase === "error") &&
     state.projectSwitch.targetIndex !== null
       ? result.view.projectSelection.projects[state.projectSwitch.targetIndex]
       : undefined;
@@ -570,17 +626,16 @@ export function replaceProjectResult(
     selectedKey = initialSelection(result.view);
     profile = initialDirectProfileState;
     newSession = inactiveNewSessionState;
-    composer = Object.freeze({
-      draft: "",
-      phase: "idle" as const,
-      feedback: null,
-    });
-    projectSwitch = state.projectSwitch.selectionAccepted
-      ? idleProjectSwitchState
-      : Object.freeze({
-          ...state.projectSwitch,
-          viewArrived: true,
-        });
+    composer = resetComposer(state.composer);
+    projectSwitch =
+      state.projectSwitch.phase === "error"
+        ? Object.freeze({ ...idleProjectSwitchState, viewArrived: true })
+        : state.projectSwitch.selectionAccepted
+          ? idleProjectSwitchState
+          : Object.freeze({
+              ...state.projectSwitch,
+              viewArrived: true,
+            });
   } else if (state.projectOpen.phase === "pending") {
     const selectedIndex = result.view.projectSelection.projects.findIndex(
       (project) => project.selected,
@@ -609,11 +664,7 @@ export function replaceProjectResult(
         selectedKey = initialSelection(result.view);
         profile = initialDirectProfileState;
         newSession = inactiveNewSessionState;
-        composer = Object.freeze({
-          draft: "",
-          phase: "idle" as const,
-          feedback: null,
-        });
+        composer = resetComposer(state.composer);
       } else {
         selectedKey = state.selectedKey;
       }
@@ -715,6 +766,7 @@ export function replaceProjectResult(
     continuationLoadRequest?.kind === "continuation-session" &&
     (selectedContinuation === undefined ||
       (selectedContinuation.status !== "completed" &&
+        selectedContinuation.status !== "quota-paused" &&
         selectedContinuation.failureCategory !== "interrupted") ||
       selectedContinuation.session?.resumable !== true ||
       selectedContinuation.session.selectionKey !==
@@ -738,7 +790,6 @@ export function canOpenProject(state: WorkbenchRendererState): boolean {
     state.result !== null &&
     state.projectSwitch.phase !== "pending" &&
     state.projectOpen.phase !== "pending" &&
-    state.composer.draft.length === 0 &&
     state.composer.phase !== "pending" &&
     state.profile.phase !== "loading" &&
     state.profile.defaultPreference.phase !== "pending" &&
@@ -772,7 +823,9 @@ function beginProjectAcquisition(
     ? canOpenProject(state)
     : canCreateProject(state);
   if (!allowed || state.result === null) return state;
-  const currentView = state.result.ok ? state.result.view : undefined;
+  const currentView = hasHostedProjectView(state.result)
+    ? state.result.view
+    : undefined;
   const baselineSelectedIndex =
     currentView?.projectSelection.projects.findIndex(
       (project) => project.selected,
@@ -966,15 +1019,11 @@ function replaceCompletedProjectAcquisition(
   return Object.freeze({
     result: state.result,
     selectedKey:
-      resetProjectScope && state.result?.ok
+      resetProjectScope && hasHostedProjectView(state.result)
         ? initialSelection(state.result.view)
         : state.selectedKey,
     composer: resetProjectScope
-      ? Object.freeze({
-          draft: "",
-          phase: "idle" as const,
-          feedback: null,
-        })
+      ? resetComposer(state.composer)
       : state.composer,
     profile: resetProjectScope ? initialDirectProfileState : state.profile,
     newSession: resetProjectScope ? inactiveNewSessionState : state.newSession,
@@ -986,7 +1035,7 @@ function replaceCompletedProjectAcquisition(
 function projectAcquisitionChangedTarget(
   state: WorkbenchRendererState,
 ): boolean {
-  if (!state.result?.ok) return false;
+  if (!hasHostedProjectView(state.result)) return false;
   const selectedIndex = state.result.view.projectSelection.projects.findIndex(
     (project) => project.selected,
   );
@@ -1008,12 +1057,11 @@ export function canSelectProject(
   targetIndex: number,
 ): boolean {
   if (
-    !state.result?.ok ||
+    !hasHostedProjectView(state.result) ||
     !Number.isSafeInteger(targetIndex) ||
     targetIndex < 0 ||
     state.projectSwitch.phase === "pending" ||
     projectOpenBlocksOrdinaryActions(state) ||
-    state.composer.draft.length > 0 ||
     state.composer.phase === "pending" ||
     state.profile.phase === "loading" ||
     state.profile.defaultPreference.phase === "pending" ||
@@ -1039,7 +1087,7 @@ export function beginProjectSelection(
   state: WorkbenchRendererState,
   targetIndex: number,
 ): ProjectSelectionAttempt {
-  if (!canSelectProject(state, targetIndex) || !state.result?.ok) {
+  if (!canSelectProject(state, targetIndex) || !hasHostedProjectView(state.result)) {
     return Object.freeze({ state, request: null });
   }
   const project = state.result.view.projectSelection.projects[targetIndex];
@@ -1063,7 +1111,7 @@ export function beginProjectSelection(
           () => openingProjectFeedbackCopy(project.label),
         ),
       }),
-      projectOpen: state.projectOpen,
+      projectOpen: idleProjectOpenState,
     }),
     request: Object.freeze({ selectionKey: project.selectionKey }),
   });
@@ -1127,7 +1175,7 @@ export function selectProjectCommand(
   if (
     state.projectSwitch.phase === "pending" ||
     projectOpenBlocksOrdinaryActions(state) ||
-    !state.result?.ok ||
+    !hasHostedProjectView(state.result) ||
     !state.result.view.commands.some((command) => command.key === key)
   ) {
     return state;
@@ -1139,7 +1187,9 @@ export function selectProjectCommand(
     composer:
       state.newSession.phase === "active"
         ? resetComposer(state.composer)
-        : state.composer,
+        : !returnsFromNewSession && key !== state.selectedKey
+          ? selectSessionComposer(state.composer, state.selectedKey, key)
+          : state.composer,
     profile:
       returnsFromNewSession ||
       (key !== state.selectedKey &&
@@ -1329,7 +1379,7 @@ export type WorkbenchNewAgentSessionRefusal =
 export function newAgentSessionModeRefusal(
   state: WorkbenchRendererState,
 ): WorkbenchNewAgentSessionRefusal | null {
-  if (state.result?.ok !== true) return "project-view-failed";
+  if (!hasHostedProjectView(state.result)) return "project-view-failed";
   if (state.projectSwitch.phase === "pending") return "project-switch-pending";
   /* Routed through the shared helper rather than restating its two phases, so
      the set of project-open phases that block cannot drift from the set this
@@ -1387,7 +1437,7 @@ export function replacementSessionRefusal(
 ): WorkbenchReplacementSessionRefusal | null {
   const modeRefusal = newAgentSessionModeRefusal(state);
   if (modeRefusal !== null) return modeRefusal;
-  if (!state.result?.ok) return "project-view-failed";
+  if (!hasHostedProjectView(state.result)) return "project-view-failed";
   if (state.selectedKey === null) return "no-selection";
   if (
     !state.result.view.commands.some(
@@ -1418,7 +1468,7 @@ export function replacementSessionRequest(
      every state in which either of these could be absent, and
      `blocked-composer-reason-fidelity.test.ts` sweeps that they never disagree.
      A term written here that is NOT up there is the F207 defect again. */
-  if (!state.result?.ok || state.selectedKey === null) return null;
+  if (!hasHostedProjectView(state.result) || state.selectedKey === null) return null;
   return Object.freeze({
     kind: "replacement-session" as const,
     sourceSelectionKey: state.selectedKey,
@@ -1476,6 +1526,14 @@ export function updateDirectInputDraft(
       draft,
       phase: "idle" as const,
       feedback: null,
+      sessionDrafts:
+        state.newSession.phase === "inactive" && state.selectedKey !== null
+          ? updateSessionDraft(
+              state.composer.sessionDrafts,
+              state.selectedKey,
+              draft,
+            )
+          : state.composer.sessionDrafts,
     }),
     profile: state.profile,
     newSession: state.newSession,
@@ -1957,14 +2015,12 @@ export function directEndpointStatusRows(
 ): readonly WorkbenchRuntimeEndpointStatusRow[] {
   const discovery =
     profile.result?.endpointDiscovery ??
-    publicRuntimeEndpointDiscovery("not-inspected", "not-inspected");
+    publicUniformRuntimeEndpointDiscovery("not-inspected");
   const endpoints = profile.result?.ok ? profile.result.profile.endpoints : [];
   return Object.freeze(
     discovery.statuses.map((status) => {
       const identity =
-        status.endpointId === "codex-desktop"
-          ? endpointIdentityCopy.codex
-          : endpointIdentityCopy.claude;
+        endpointIdentityCopy[endpointIdentityCopyKey[status.endpointId]];
       const catalogEndpoint = endpoints.find(
         (candidate) => candidate.endpointId === status.endpointId,
       );
@@ -1980,7 +2036,7 @@ export function directEndpointStatusRows(
         endpointId: status.endpointId,
         ...identity,
         category,
-        ...endpointStatusCopy(category),
+        ...endpointStatusCopy(status.endpointId, category),
         endpoint,
         runtime,
         lookup:
@@ -1993,9 +2049,302 @@ export function directEndpointStatusRows(
 }
 
 function endpointStatusCopy(
+  endpointId: WorkbenchRuntimeEndpointId,
   category: WorkbenchRuntimeEndpointDiscoveryCategory,
 ): Pick<WorkbenchRuntimeEndpointStatusRow, "detail" | "statusLabel"> {
-  return endpointStatusRowCopy[category];
+  const copy = endpointStatusRowCopy[category];
+  /**
+   * Ticket 20 dead-copy ruling: "sign-in remains in the official provider
+   * flow" is a claim about a login action, and it may only live where that
+   * action exists. API-key faces (the endpoint-key roster) carry the key
+   * guidance sentence instead — the sentence and the real action can no
+   * longer disagree.
+   */
+  if (
+    category === "authentication-required" &&
+    (WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS as readonly string[]).includes(
+      endpointId,
+    )
+  ) {
+    return Object.freeze({
+      statusLabel: copy.statusLabel,
+      detail: endpointApiKeyAuthenticationDetail(),
+    });
+  }
+  return copy;
+}
+
+/**
+ * The family facades (ticket 25, generalizing ticket 20's Kimi-only
+ * facade). Each family merges its two endpoints into one presentation
+ * entry: `claude = [claude-code-desktop, claude-api]`, `codex =
+ * [codex-desktop, codex-api]`, `kimi = [kimi-code, kimi-platform]`. The
+ * roster and directory keep all endpoints; every session/ledger record
+ * keeps the real backend's endpointId.
+ */
+const FAMILY_FACADE_ENDPOINT_IDS: Readonly<
+  Record<
+    WorkbenchEndpointFamilyId,
+    readonly [WorkbenchRuntimeEndpointId, WorkbenchRuntimeEndpointId]
+  >
+> = Object.freeze({
+  claude: Object.freeze([
+    "claude-code-desktop",
+    "claude-api",
+  ] as const),
+  codex: Object.freeze(["codex-desktop", "codex-api"] as const),
+  kimi: Object.freeze(["kimi-code", "kimi-platform"] as const),
+});
+
+const FACADE_FAMILY_BY_ENDPOINT_ID: Readonly<
+  Partial<Record<WorkbenchRuntimeEndpointId, WorkbenchEndpointFamilyId>>
+> = Object.freeze(
+  Object.fromEntries(
+    (Object.keys(FAMILY_FACADE_ENDPOINT_IDS) as WorkbenchEndpointFamilyId[])
+      .flatMap((family) =>
+        FAMILY_FACADE_ENDPOINT_IDS[family].map(
+          (endpointId) => [endpointId, family] as const,
+        ),
+      ),
+  ),
+);
+
+/** Which family a facade-backend endpointId belongs to (undefined: none). */
+export function workbenchFacadeFamilyOfEndpointId(
+  endpointId: WorkbenchRuntimeEndpointId,
+): WorkbenchEndpointFamilyId | undefined {
+  return FACADE_FAMILY_BY_ENDPOINT_ID[endpointId];
+}
+
+/** The automatic order = the family's registered backend order. */
+const FAMILY_AUTOMATIC_ORDER: Readonly<
+  Record<WorkbenchEndpointFamilyId, readonly WorkbenchRuntimeEndpointId[]>
+> = Object.freeze({
+  claude: FAMILY_FACADE_ENDPOINT_IDS.claude,
+  codex: FAMILY_FACADE_ENDPOINT_IDS.codex,
+  kimi: FAMILY_FACADE_ENDPOINT_IDS.kimi,
+});
+
+/**
+ * The subscription-authentication input the claude/codex resolution reads:
+ * the settings surface's per-endpoint entries structurally satisfy this
+ * (only `authentication` is observed), so the facade consumes the
+ * subscription-auth service's report without depending on the settings
+ * view-model module.
+ */
+export type WorkbenchFacadeSubscriptionAuthenticationInput = Readonly<
+  Partial<
+    Record<
+      WorkbenchRuntimeEndpointId,
+      { readonly authentication: WorkbenchSubscriptionAuthenticationState }
+    >
+  >
+>;
+
+/**
+ * Resolution is configuration-derived only (owner ruling (a)): a backend
+ * counts as key-resolvable when its discovery category proves the key is in
+ * place — `authentication-required` is the definitive "no key" signal and
+ * `not-inspected` means no data. Nothing here probes the network.
+ */
+function facadeKeyResolvable(
+  category: WorkbenchRuntimeEndpointDiscoveryCategory,
+): boolean {
+  return category !== "authentication-required" && category !== "not-inspected";
+}
+
+function facadeCategory(
+  profile: WorkbenchDirectProfileState,
+  endpointId: WorkbenchRuntimeEndpointId,
+): WorkbenchRuntimeEndpointDiscoveryCategory {
+  const discovery =
+    profile.result?.endpointDiscovery ??
+    publicUniformRuntimeEndpointDiscovery("not-inspected");
+  return (
+    discovery.statuses.find((status) => status.endpointId === endpointId)
+      ?.category ?? "not-inspected"
+  );
+}
+
+/**
+ * A desktop (subscription) backend is usable when the subscription-auth
+ * service reports it bound (the ticket 25 ruling names that service), or —
+ * before the service has reported — when its own endpoint discovery proves
+ * the subscription works (`catalog-ready` requires a signed-in CLI). Both
+ * signals are configuration facts already in the renderer; neither is a
+ * probe. Every non-proving category (runtime-not-located,
+ * authentication-required, inspection-failed, not-inspected) leaves the
+ * desktop backend unusable.
+ */
+function facadeSubscriptionUsable(
+  profile: WorkbenchDirectProfileState,
+  endpointId: WorkbenchRuntimeEndpointId,
+  subscriptionAuthentication: WorkbenchFacadeSubscriptionAuthenticationInput | undefined,
+): boolean {
+  if (
+    subscriptionAuthentication?.[endpointId]?.authentication === "bound"
+  ) {
+    return true;
+  }
+  return facadeCategory(profile, endpointId) === "catalog-ready";
+}
+
+/** Whether one family backend can serve the family's single entry. */
+function familyBackendUsable(
+  profile: WorkbenchDirectProfileState,
+  family: WorkbenchEndpointFamilyId,
+  backend: WorkbenchRuntimeEndpointId,
+  subscriptionAuthentication: WorkbenchFacadeSubscriptionAuthenticationInput | undefined,
+): boolean {
+  if (family === "kimi") {
+    return facadeKeyResolvable(facadeCategory(profile, backend));
+  }
+  if (
+    backend === "claude-code-desktop" ||
+    backend === "codex-desktop"
+  ) {
+    return facadeSubscriptionUsable(
+      profile,
+      backend,
+      subscriptionAuthentication,
+    );
+  }
+  return facadeKeyResolvable(facadeCategory(profile, backend));
+}
+
+/**
+ * Resolve one family's single entry to the backend that will serve it: the
+ * persisted preference first, then the automatic order. For claude/codex the
+ * automatic order is subscription-first (ticket 25 ruling); for kimi it is
+ * kimi-code first (ticket 20 ruling). The preference overrides the ordering,
+ * never the usability: a preferred backend that cannot serve falls through
+ * to the other backend when that one can. `null` means neither backend is
+ * usable — the unconfigured facade state.
+ */
+export function resolveFamilyFacadeBackend(
+  profile: WorkbenchDirectProfileState,
+  family: WorkbenchEndpointFamilyId,
+  preferences: WorkbenchFamilyEndpointPreferences = defaultWorkbenchFamilyEndpointPreferences,
+  subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput,
+): WorkbenchRuntimeEndpointId | null {
+  const preferred = preferences[family];
+  const automatic = FAMILY_AUTOMATIC_ORDER[family];
+  const order: readonly WorkbenchRuntimeEndpointId[] =
+    preferred === automatic[1]
+      ? [automatic[1], automatic[0]]
+      : [automatic[0], automatic[1]];
+  for (const backend of order) {
+    if (
+      familyBackendUsable(profile, family, backend, subscriptionAuthentication)
+    ) {
+      return backend;
+    }
+  }
+  return null;
+}
+
+/**
+ * The presentation-layer roster for every endpoint-status surface (picker,
+ * statusbar, runtime-not-located stage, settings groups): the raw per-
+ * endpoint rows with each family's two rows replaced by its single facade
+ * row. The merged row carries the resolved backend's real endpointId,
+ * labels, category and catalog (so the model list follows the resolved
+ * backend); when neither backend is usable it shows the unconfigured
+ * guidance. The first-registered backend's position keeps the roster order.
+ */
+export function directFacadeEndpointStatusRows(
+  profile: WorkbenchDirectProfileState,
+  preferences: WorkbenchFamilyEndpointPreferences = defaultWorkbenchFamilyEndpointPreferences,
+  subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput,
+): readonly WorkbenchRuntimeEndpointStatusRow[] {
+  const rows = directEndpointStatusRows(profile);
+  const rowByEndpointId = new Map(
+    rows.map((row) => [row.endpointId, row] as const),
+  );
+  const mergedFamilies = new Set<WorkbenchEndpointFamilyId>();
+  const merged: WorkbenchRuntimeEndpointStatusRow[] = [];
+  for (const row of rows) {
+    const family = FACADE_FAMILY_BY_ENDPOINT_ID[row.endpointId];
+    if (family === undefined) {
+      merged.push(row);
+      continue;
+    }
+    if (mergedFamilies.has(family)) continue;
+    mergedFamilies.add(family);
+    merged.push(
+      familyFacadeRow(profile, family, rowByEndpointId, preferences, subscriptionAuthentication),
+    );
+  }
+  return Object.freeze(merged);
+}
+
+function familyFacadeRow(
+  profile: WorkbenchDirectProfileState,
+  family: WorkbenchEndpointFamilyId,
+  rowByEndpointId: ReadonlyMap<WorkbenchRuntimeEndpointId, WorkbenchRuntimeEndpointStatusRow>,
+  preferences: WorkbenchFamilyEndpointPreferences,
+  subscriptionAuthentication: WorkbenchFacadeSubscriptionAuthenticationInput | undefined,
+): WorkbenchRuntimeEndpointStatusRow {
+  const backend = resolveFamilyFacadeBackend(
+    profile,
+    family,
+    preferences,
+    subscriptionAuthentication,
+  );
+  if (backend !== null) {
+    const resolved = rowByEndpointId.get(backend);
+    if (resolved !== undefined) return resolved;
+  }
+  // Unconfigured: keep the preferred backend's identity (its honest face)
+  // but mark the entry unselectable and guide to the settings card.
+  const preferred = preferences[family];
+  const base =
+    rowByEndpointId.get(preferred) ??
+    FAMILY_FACADE_ENDPOINT_IDS[family].map((candidate) =>
+      rowByEndpointId.get(candidate),
+    ).find((row) => row !== undefined)!;
+  return Object.freeze({
+    ...base,
+    endpoint: null,
+    detail: endpointFamilyUnconfiguredDetail(family),
+  });
+}
+
+/**
+ * The picker's selectable endpoint list under the facade: the raw catalog
+ * endpoints with every hidden family backend removed, so the visible
+ * options, the heading count and the roving focus all agree with the single
+ * rendered family row. When a family resolves to nothing usable, neither of
+ * its backends can be in the catalog (an unusable backend never produced a
+ * sanitized catalog), so the raw list already carries no family entry.
+ */
+export function directFacadeProfileEndpoints(
+  state: WorkbenchRendererState,
+  preferences: WorkbenchFamilyEndpointPreferences = defaultWorkbenchFamilyEndpointPreferences,
+  subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput,
+): readonly WorkbenchRuntimeEndpointOption[] {
+  const endpoints = directProfileEndpoints(state);
+  const hiddenEndpointIds = new Set<WorkbenchRuntimeEndpointId>();
+  for (const family of Object.keys(
+    FAMILY_FACADE_ENDPOINT_IDS,
+  ) as WorkbenchEndpointFamilyId[]) {
+    const backend = resolveFamilyFacadeBackend(
+      state.profile,
+      family,
+      preferences,
+      subscriptionAuthentication,
+    );
+    if (backend === null) continue;
+    for (const endpointId of FAMILY_FACADE_ENDPOINT_IDS[family]) {
+      if (endpointId !== backend) hiddenEndpointIds.add(endpointId);
+    }
+  }
+  if (hiddenEndpointIds.size === 0) return endpoints;
+  return Object.freeze(
+    endpoints.filter(
+      (endpoint) => !hiddenEndpointIds.has(endpoint.endpointId),
+    ),
+  );
 }
 
 export function selectedDirectEndpoint(
@@ -2227,7 +2576,7 @@ export function beginDirectInputSubmission(
     ? Object.freeze({
         phase: "submitting" as const,
         baselineKeys: Object.freeze(
-          state.result?.ok
+          hasHostedProjectView(state.result)
             ? state.result.view.commands.map((command) => command.key)
             : [],
         ),
@@ -2248,6 +2597,11 @@ export function beginDirectInputSubmission(
           ? continuationInputCopy.pending
           : directInputCopy.pending,
       ),
+      sessionDrafts: state.composer.sessionDrafts,
+      pendingSessionKey:
+        explicitNewSession || state.selectedKey === null
+          ? undefined
+          : state.selectedKey,
     }),
     profile: state.profile,
     newSession,
@@ -2313,7 +2667,7 @@ export function completeDirectInputSubmission(
   const visibleNewCommand =
     state.newSession.phase === "submitting" &&
     state.newSession.visibleKey !== null &&
-    state.result?.ok
+    hasHostedProjectView(state.result)
       ? state.result.view.commands.find(
           (command) => command.key === state.newSession.visibleKey,
         )
@@ -2323,6 +2677,14 @@ export function completeDirectInputSubmission(
     visibleNewCommand?.session === undefined &&
     visibleNewCommand !== undefined &&
     isTerminalCommandStatus(visibleNewCommand.status);
+  const submittedSessionKey = explicitNewSession
+    ? undefined
+    : state.composer.pendingSessionKey;
+  const sessionDrafts = result.ok && submittedSessionKey !== undefined
+    ? updateSessionDraft(state.composer.sessionDrafts, submittedSessionKey, "")
+    : state.composer.sessionDrafts;
+  const completionMatchesSelection = submittedSessionKey === undefined ||
+    submittedSessionKey === state.selectedKey;
   const newSession: WorkbenchNewSessionState = !explicitNewSession
     ? state.newSession
     : result.ok
@@ -2341,7 +2703,16 @@ export function completeDirectInputSubmission(
     result: state.result,
     selectedKey: state.selectedKey,
     composer: Object.freeze(
-      result.ok
+      !completionMatchesSelection
+        ? {
+            draft: state.selectedKey === null
+              ? ""
+              : (sessionDrafts?.[state.selectedKey] ?? ""),
+            phase: "idle" as const,
+            feedback: null,
+            sessionDrafts,
+          }
+        : result.ok
         ? acceptedWithoutSession
           ? {
               draft: "",
@@ -2350,6 +2721,7 @@ export function completeDirectInputSubmission(
                 "composer.accepted-session-unavailable",
                 () => acceptedSessionUnavailableCopy,
               ),
+              sessionDrafts,
             }
           : {
               draft: "",
@@ -2360,11 +2732,13 @@ export function completeDirectInputSubmission(
                     () => acceptedSubmissionFeedbackCopy,
                   )
                 : submissionResultText(result),
+              sessionDrafts,
             }
         : {
             draft: state.composer.draft,
             phase: "error" as const,
             feedback: submissionResultText(result),
+            sessionDrafts,
           },
       ),
     profile: acceptedNewSession ? initialDirectProfileState : state.profile,
@@ -2508,7 +2882,9 @@ export function directInputMode(
     state.projectSwitch.phase === "pending" ||
     projectOpenBlocksOrdinaryActions(state)
   ) return "unavailable";
-  if (!state.result?.ok) return state.result === null ? "start" : "unavailable";
+  if (!hasHostedProjectView(state.result)) {
+    return state.result === null ? "start" : "unavailable";
+  }
   if (
     state.result.view.projectSelection.projects.find(
       (project) => project.selected,
@@ -2529,6 +2905,8 @@ export function directInputMode(
     selected.session.resumable === true &&
     selected.session.selectionKey !== null &&
     (selected.status === "completed" ||
+      selected.status === "recovery-required" ||
+      selected.status === "quota-paused" ||
       selected.failureCategory === "interrupted")
     ? "continue"
     : "unavailable";
@@ -2541,7 +2919,40 @@ function resetComposer(
     draft: composer.draft,
     phase: "idle",
     feedback: null,
+    sessionDrafts: composer.sessionDrafts,
+    pendingSessionKey: composer.pendingSessionKey,
   });
+}
+
+function selectSessionComposer(
+  composer: WorkbenchComposerState,
+  currentKey: string | null,
+  selectedKey: string,
+): WorkbenchComposerState {
+  const sessionDrafts = currentKey === null
+    ? composer.sessionDrafts
+    : updateSessionDraft(composer.sessionDrafts, currentKey, composer.draft);
+  return Object.freeze({
+    draft: sessionDrafts?.[selectedKey] ?? "",
+    phase: composer.phase === "pending" ? "pending" : "idle",
+    feedback: composer.phase === "pending" ? composer.feedback : null,
+    sessionDrafts,
+    pendingSessionKey: composer.pendingSessionKey,
+  });
+}
+
+function updateSessionDraft(
+  sessionDrafts: WorkbenchComposerState["sessionDrafts"],
+  key: string,
+  draft: string,
+): Readonly<Record<string, string>> {
+  const updated = { ...sessionDrafts };
+  if (draft === "") {
+    delete updated[key];
+  } else {
+    updated[key] = draft;
+  }
+  return Object.freeze(updated);
 }
 
 function acceptedSessionUnavailableComposer(
@@ -2554,12 +2965,15 @@ function acceptedSessionUnavailableComposer(
       "composer.accepted-session-unavailable",
       () => acceptedSessionUnavailableCopy,
     ),
+    sessionDrafts: composer.sessionDrafts,
+    pendingSessionKey: composer.pendingSessionKey,
   });
 }
 
 function isTerminalCommandStatus(status: ProjectCommandStatus): boolean {
   return (
     status === "completed" ||
+    status === "quota-paused" ||
     status === "failed" ||
     status === "recovery-required"
   );
@@ -2568,7 +2982,7 @@ function isTerminalCommandStatus(status: ProjectCommandStatus): boolean {
 function selectedFromState(
   state: WorkbenchRendererState,
 ): WorkbenchCommandView | undefined {
-  return state.result?.ok
+  return hasHostedProjectView(state.result)
     ? selectedCommand(state.result.view, state.selectedKey)
     : undefined;
 }
@@ -2599,7 +3013,7 @@ function refreshedSelection(
 ): string | null {
   const next = view.commands.find((command) => command.key === state.selectedKey);
   if (next === undefined) return initialSelection(view);
-  const prior = state.result?.ok
+  const prior = hasHostedProjectView(state.result)
     ? state.result.view.commands.find(
         (command) => command.key === state.selectedKey,
       )

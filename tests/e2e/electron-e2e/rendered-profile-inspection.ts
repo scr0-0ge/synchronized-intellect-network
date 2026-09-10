@@ -113,11 +113,14 @@ export async function inspectRenderedProfileProjection(
     collapsedProjectIndex < 0
       ? -1
       : await collapsedProject.locator(".proj-sessions .session-row").count();
+  // Issue #6 comment 3.3: the note is hover copy on the toggle (title), not
+  // a persistent block under the collapsed Project.
   const collapsedMessage =
     collapsedProjectIndex < 0
       ? ""
-      : ((await collapsedProject.locator(".proj-empty").textContent())?.trim() ??
-        "");
+      : ((await collapsedProject
+          .locator(".proj-toggle")
+          .getAttribute("title")) ?? "");
   const projectTreeExact =
     projectCount === 2 &&
     railTitle.startsWith("Projects") &&

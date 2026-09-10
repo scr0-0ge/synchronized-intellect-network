@@ -1,5 +1,8 @@
 import type {
   NormalizedRuntimeEvent,
+  RuntimeUserInputQuestion,
+  RuntimeUserInputResponse,
+  NormalizedRuntimeUserInputEvent,
   RuntimeFailureCategory,
   SessionProfile,
 } from "../agent-runtime/index.ts";
@@ -23,6 +26,7 @@ export type ProjectCommandStatus =
   | "accepted"
   | "in-flight"
   | "completed"
+  | "quota-paused"
   | "failed"
   | "recovery-required";
 
@@ -36,6 +40,7 @@ export type ProjectTurnActivity =
 export type ProjectCommandFailureCategory =
   | "profile-resolution-failed"
   | "runtime-failed"
+  | "quota-expired"
   | "interrupted";
 
 /**
@@ -44,12 +49,22 @@ export type ProjectCommandFailureCategory =
  * of NULL (F223). `binding-drift` is the coordinator's own invariant check on
  * a returned binding. NULL remains the value for programmatic recovery —
  * channel shutdown, a lost claim race, or the startup sweep — where there is
- * no error to name. The category stays out of every snapshot summary and
- * update payload: `recovery-required` keeps its public contract.
+ * no error to name. This original error remains separate from `recovery`,
+ * which describes a fresh resume observation, not the preceding turn's error.
  */
 export type ProjectRecoveryFailureCategory =
   | RuntimeFailureCategory
   | "binding-drift";
+
+/** Presence records an unknown turn outcome, not a failed or successful turn. */
+export type ProjectCommandRecovery =
+  | { readonly resume: "confirmed" }
+  | {
+      readonly resume: "unconfirmed";
+      readonly reason: ProjectRecoveryFailureCategory
+        | "session-reference-unavailable" | "authentication-changed"
+        | "channel-closed" | "resume-timeout" | "resume-unconfirmed";
+    };
 
 export type ProjectInterruptCapability =
   | { readonly status: "idle" | "unknown" }
@@ -167,6 +182,10 @@ export interface ProjectSessionSummary {
   readonly requestedProfileProjection?: RequestedSessionProfileProjection;
   readonly effectiveProfileProjection?: EffectiveSessionProfileProjection;
   readonly events: readonly ProjectRecordedTurnEvent[];
+  /** Last recorded `agent-message` cursor; backend-only rail recency signal. */
+  readonly lastModelReplyCursor?: Cursor;
+  /** This command's acceptance cursor; backend-only pending-reply recency signal. */
+  readonly acceptedCommandCursor?: Cursor;
   /** Native resume material remains coordinator-only. */
   readonly resumable: boolean;
 }
@@ -176,6 +195,7 @@ export interface ProjectCommandSummary {
   readonly runtime: "codex";
   readonly status: ProjectCommandStatus;
   readonly failureCategory?: ProjectCommandFailureCategory;
+  readonly recovery?: ProjectCommandRecovery;
   /** Exact accepted command input; absent only for legacy digest-v1 rows. */
   readonly input?: string;
   readonly session?: ProjectSessionSummary;
@@ -187,13 +207,25 @@ export interface ProjectSnapshot {
   readonly commands: readonly ProjectCommandSummary[];
 }
 
+/** Authoritative command headers and event tails since one full/changes cursor. */
+export interface ProjectSnapshotChanges {
+  readonly projectId: string;
+  readonly after: Cursor;
+  readonly cursor: Cursor;
+  /** Events contain only the tail after `after`; all other fields are current. */
+  readonly commands: readonly ProjectCommandSummary[];
+  /** Session-wide facts can change independently of a particular old command. */
+  readonly sessions: readonly Pick<ProjectSessionSummary,
+    "sessionId" | "displayName" | "archived" | "resumable" | "lastModelReplyCursor">[];
+}
+
 export interface ProjectSessionRemovalRequest {
   /** Trusted Workbench identity; renderer selection keys resolve before this seam. */
   readonly sessionId: string;
   /**
    * The owner has been shown what an unknown turn outcome means and has asked
-   * for removal anyway. It releases only the `recovery-required` barrier, whose
-   * runtime binding is already gone and can never be re-established; `accepted`
+   * for removal anyway. It releases only the historical `recovery-required`
+   * barrier, independently of whether CLI resume was confirmed; `accepted`
    * and `in-flight` work still blocks, so D16.2's rule that deletion never
    * interrupts a running turn is unchanged. Only the literal `true` is a legal
    * value, so there is exactly one way to express the acknowledgement.
@@ -234,7 +266,7 @@ interface DurableProjectUpdateBase {
 
 export type DurableProjectUpdate =
   | (DurableProjectUpdateBase & {
-      readonly kind: "accepted" | "in-flight" | "completed" | "recovery-required";
+      readonly kind: "accepted" | "in-flight" | "completed" | "quota-paused" | "recovery-required";
     })
   | (DurableProjectUpdateBase & {
       readonly kind: "profile-resolved";
@@ -269,7 +301,20 @@ export type ProjectUpdate =
       readonly snapshot: ProjectSnapshot;
     };
 
+export type ProjectUserInputView =
+  | { readonly requestKey: string; readonly state: "pending";
+      readonly questions: readonly RuntimeUserInputQuestion[]; readonly isBlocking: boolean; readonly expiresAt: number }
+  | { readonly requestKey: string; readonly state: Extract<NormalizedRuntimeUserInputEvent, { kind: "user-input-resolved" }>["resolution"] };
+export type ProjectUserInputResponse =
+  | { readonly kind: "cancel"; readonly requestKey: string }
+  | { readonly kind: "answer"; readonly requestKey: string; readonly answers: RuntimeUserInputResponse["answers"] };
+export type ProjectUserInputResponseResult = { readonly status: "answered" | "cancelled" | "invalid-answer" | "unavailable" };
+
 export interface ProjectChannel {
+  /** Ephemeral questions on the existing active binding; never turn-history events. */
+  readUserInput?(sessionId: string): readonly ProjectUserInputView[];
+  observeUserInput?(listener: () => void): () => void;
+  respondToUserInput?(request: ProjectUserInputResponse): Promise<ProjectUserInputResponseResult>;
   /**
    * Serializes commands. A same-key/same-payload retry returns the original
    * receipt; a different payload fails before external execution.
@@ -295,7 +340,9 @@ export interface ProjectChannel {
   ): Promise<ProjectSessionRemovalResult>;
   /**
    * Mutates only Session-owned display/archive metadata. Archive is reversible
-   * and fail-closed for accepted, in-flight, recovery-required, or unknown work.
+   * and fail-closed for accepted, in-flight, or unknown work. A terminal
+   * recovery-required Session needs the same explicit unknown-outcome
+   * acknowledgement as deletion.
    */
   mutateSessionMetadata(
     request: ProjectSessionMetadataMutationRequest,
@@ -314,6 +361,8 @@ export interface ProjectChannel {
     request: ProjectSteerRequest,
   ): Promise<ProjectSteerResult>;
   snapshot(): Promise<ProjectSnapshot>;
+  /** Optional for non-durable channel implementations; production supplies it. */
+  snapshotChanges?(after: Cursor): Promise<ProjectSnapshotChanges>;
   /**
    * Without a cursor yields one current snapshot, then follows later durable
    * updates. With a cursor, catches up from SQLite before following live

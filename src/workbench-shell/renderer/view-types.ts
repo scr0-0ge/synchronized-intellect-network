@@ -25,7 +25,9 @@ subscribeLocale(() => {
     runtimeProfileCopy.workbenchFallbackControlLabelTitle;
 });
 
-export const WorkbenchRendererBridgeContext = createContext<WorkbenchRendererBridge>();
+export const WorkbenchRendererBridgeContext = createContext<
+  Omit<WorkbenchRendererBridge, "observeProject">
+>();
 
 export function recordedRequestedProfile(
   command: WorkbenchCommandView | undefined,
@@ -56,6 +58,8 @@ function statusGlyphClass(status: WorkbenchCommandView["status"]): string {
       return "st-running";
     case "completed":
       return "st-completed";
+    case "quota-paused":
+      return "st-interrupted";
     case "failed":
       return "st-failed";
     case "recovery-required":
@@ -70,6 +74,8 @@ function statusGlyph(status: WorkbenchCommandView["status"]): string {
       return "▸";
     case "completed":
       return "✓";
+    case "quota-paused":
+      return "Ⅱ";
     case "failed":
       return "✕";
     case "recovery-required":

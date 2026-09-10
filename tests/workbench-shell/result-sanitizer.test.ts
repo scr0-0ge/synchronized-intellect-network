@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { hostedProjectView } from "./w26-hosted-project-view.ts";
+import { publicEmptyProjectRegistry } from "../../src/workbench-shell/contract.ts";
+
 import {
   reconstructWorkbenchDirectInputRequest,
   reconstructWorkbenchDirectSessionProfileDefaultRequest,
@@ -2486,6 +2489,12 @@ test("profile-result sanitization preserves Claude authentication-required besid
           endpointId: "claude-code-desktop",
           category: "authentication-required",
         },
+        base.endpointDiscovery.statuses[2],
+        base.endpointDiscovery.statuses[3],
+        base.endpointDiscovery.statuses[4],
+        base.endpointDiscovery.statuses[5],
+        base.endpointDiscovery.statuses[6],
+        base.endpointDiscovery.statuses[7],
       ],
     },
   });
@@ -2497,6 +2506,12 @@ test("profile-result sanitization preserves Claude authentication-required besid
       endpointId: "claude-code-desktop",
       category: "authentication-required",
     },
+    { endpointId: "glm-coding-plan", category: "not-inspected" },
+    { endpointId: "kimi-code", category: "not-inspected" },
+    { endpointId: "deepseek-api", category: "not-inspected" },
+    { endpointId: "kimi-platform", category: "not-inspected" },
+    { endpointId: "claude-api", category: "not-inspected" },
+    { endpointId: "codex-api", category: "not-inspected" },
   ]);
   assert.equal(Object.isFrozen(result.endpointDiscovery.statuses), true);
 });
@@ -2657,9 +2672,11 @@ test("hosted Project sanitization preserves duplicate labels only for exact publ
   };
   const sanitized = sanitizeWorkbenchHostedProjectResult(incoming);
   assert.equal(sanitized.ok, true);
-  if (!sanitized.ok) assert.fail("Expected a sanitized hosted Project.");
+  if (!sanitized.ok || "empty" in sanitized) {
+    assert.fail("Expected a sanitized hosted Project.");
+  }
   assert.deepEqual(
-    sanitized.view.projectSelection.projects.map((project) => ({
+    hostedProjectView(sanitized).projectSelection.projects.map((project) => ({
       label: project.label,
       availability: project.availability,
       selected: project.selected,
@@ -2680,7 +2697,7 @@ test("hosted Project sanitization preserves duplicate labels only for exact publ
       },
     ],
   );
-  assert.equal(Object.isFrozen(sanitized.view.projectSelection.projects), true);
+  assert.equal(Object.isFrozen(hostedProjectView(sanitized).projectSelection.projects), true);
 
   for (const widened of [
     { ...incoming, privateRegistry: "PRIVATE_REGISTRY" },
@@ -2704,6 +2721,32 @@ test("hosted Project sanitization preserves duplicate labels only for exact publ
     assert.equal(rejected.ok, false);
     assert.equal(JSON.stringify(rejected).includes("PRIVATE_"), false);
   }
+});
+
+test("hosted Project sanitization accepts only the exact empty registry result", () => {
+  const publicEmpty = publicEmptyProjectRegistry();
+  assert.deepEqual(publicEmpty, { ok: true, empty: true });
+  assert.deepEqual(Object.keys(publicEmpty).sort(), ["empty", "ok"]);
+  assert.equal(Object.isFrozen(publicEmpty), true);
+
+  const empty = sanitizeWorkbenchHostedProjectResult(publicEmpty);
+  assert.deepEqual(empty, { ok: true, empty: true });
+  assert.equal(Object.isFrozen(empty), true);
+
+  assert.deepEqual(
+    sanitizeWorkbenchHostedProjectResult({
+      ok: true,
+      empty: true,
+      extra: true,
+    }),
+    {
+      ok: false,
+      error: {
+        category: "project-view-unavailable",
+        message: "Live Project data is unavailable.",
+      },
+    },
+  );
 });
 
 test("hosted Project sanitization uses the Host's 80-code-point label boundary", () => {
@@ -2731,7 +2774,9 @@ test("hosted Project sanitization uses the Host's 80-code-point label boundary",
   assert.equal([...label].length, 41);
   assert.equal(label.length, 82);
   assert.equal(sanitized.ok, true);
-  if (!sanitized.ok) assert.fail("Expected a Unicode Project label.");
+  if (!sanitized.ok || "empty" in sanitized) {
+    assert.fail("Expected a Unicode Project label.");
+  }
   assert.equal(sanitized.view.project.label, label);
   assert.equal(sanitized.view.projectSelection.projects[0]?.label, label);
 });
@@ -3370,6 +3415,70 @@ test("Project context sanitization carries one exact frozen pair and rejects eac
   }
 });
 
+test("Project prompt suggestions cross the renderer boundary exactly or reject the whole view", () => {
+  const suggestion = "Inspect C:\\project\\src and explain the next step";
+  const resultWith = (event: unknown) => ({
+    ok: true,
+    view: {
+      project: { label: "Suggestion Project" },
+      observation: { cursor: 6, live: true },
+      commands: [
+        {
+          key: "command-1",
+          label: "Agent Session 01",
+          runtime: "Quartz",
+          status: "completed",
+          session: {
+            archived: false,
+            metadataKey,
+            profile: projectedProfile,
+            timeline: [event],
+            removalKey,
+            selectionKey: null,
+            resumable: false,
+          },
+        },
+      ],
+      initialSelectionKey: "command-1",
+    },
+  });
+  const sanitized = sanitizeWorkbenchProjectResult(
+    resultWith({
+      kind: "turn-completed",
+      status: "completed",
+      suggestions: [suggestion, "Run the focused tests"],
+    }),
+  );
+  assert.equal(sanitized.ok, true);
+  if (!sanitized.ok) assert.fail("Expected exact prompt suggestions.");
+  const terminal = sanitized.view.commands[0]?.session?.timeline[0];
+  assert.deepEqual(terminal, {
+    kind: "turn-completed",
+    status: "completed",
+    suggestions: [suggestion, "Run the focused tests"],
+  });
+  assert.equal(
+    terminal?.kind === "turn-completed" && Object.isFrozen(terminal.suggestions),
+    true,
+  );
+
+  for (const suggestions of [
+    [],
+    [42],
+    [" \t\n "],
+    ["bad\u000bcontrol"],
+    ["valid", "x".repeat(8_001)],
+  ]) {
+    assert.equal(
+      sanitizeWorkbenchProjectResult(
+        resultWith({ kind: "turn-completed", status: "completed", suggestions }),
+      ).ok,
+      false,
+      JSON.stringify(suggestions),
+    );
+  }
+});
+
 test("Project user-message sanitization preserves one exact frozen event and fails closed on every adversarial row", () => {
   const prefix = "C:\\literal-user\\token.txt\nTOKEN_sk_literal";
   const suffix = "\t\r\n🙂";
@@ -3578,6 +3687,57 @@ function endpointDiscovery(
     statuses: [
       { endpointId: "codex-desktop" as const, category: codexCategory },
       { endpointId: "claude-code-desktop" as const, category: claudeCategory },
+      // The static-key endpoints carry no catalog in these two-endpoint
+      // fixtures (never catalog-ready) and share the aggregate
+      // runtime-not-located verdict when both desktop runtimes are absent.
+      {
+        endpointId: "glm-coding-plan" as const,
+        category:
+          codexCategory === "runtime-not-located" &&
+          claudeCategory === "runtime-not-located"
+            ? ("runtime-not-located" as const)
+            : ("not-inspected" as const),
+      },
+      {
+        endpointId: "kimi-code" as const,
+        category:
+          codexCategory === "runtime-not-located" &&
+          claudeCategory === "runtime-not-located"
+            ? ("runtime-not-located" as const)
+            : ("not-inspected" as const),
+      },
+      {
+        endpointId: "deepseek-api" as const,
+        category:
+          codexCategory === "runtime-not-located" &&
+          claudeCategory === "runtime-not-located"
+            ? ("runtime-not-located" as const)
+            : ("not-inspected" as const),
+      },
+      {
+        endpointId: "kimi-platform" as const,
+        category:
+          codexCategory === "runtime-not-located" &&
+          claudeCategory === "runtime-not-located"
+            ? ("runtime-not-located" as const)
+            : ("not-inspected" as const),
+      },
+      {
+        endpointId: "claude-api" as const,
+        category:
+          codexCategory === "runtime-not-located" &&
+          claudeCategory === "runtime-not-located"
+            ? ("runtime-not-located" as const)
+            : ("not-inspected" as const),
+      },
+      {
+        endpointId: "codex-api" as const,
+        category:
+          codexCategory === "runtime-not-located" &&
+          claudeCategory === "runtime-not-located"
+            ? ("runtime-not-located" as const)
+            : ("not-inspected" as const),
+      },
     ] as const,
   };
 }

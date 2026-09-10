@@ -46,9 +46,10 @@ export interface SessionRenameRowKeyboardEvent extends SessionRenameRowEvent {
 export function sessionMetadataRequest(
   command: WorkbenchCommandView,
   operation: SessionMetadataOperation,
+  acknowledgedUnknownOutcome?: true,
 ): WorkbenchSessionMetadataMutationRequest | null {
   if (command.session === undefined) return null;
-  return Object.freeze({
+  const request = {
     metadataKey: command.session.metadataKey,
     operation:
       operation.kind === "rename"
@@ -57,13 +58,37 @@ export function sessionMetadataRequest(
             displayName: operation.displayName,
           })
         : Object.freeze({ kind: operation.kind }),
-  });
+  };
+  if (
+    acknowledgedUnknownOutcome === true &&
+    requiresRecoveryArchiveAcknowledgement(command, operation)
+  ) {
+    return Object.freeze({ ...request, acknowledgedUnknownOutcome: true });
+  }
+  return Object.freeze(request);
 }
 
 /**
- * The renderer-side mirror of the durable terminal-only archive matrix. The
- * coordinator remains authoritative, while this presentation fails closed so
- * the visible control never invites an operation the durable layer must reject.
+ * A recovery-required Session can be archived only after the user expressly
+ * acknowledges that its last turn's outcome is unknown. This keeps the
+ * renderer from adding the acknowledgement to ordinary archive or restore
+ * requests.
+ */
+export function requiresRecoveryArchiveAcknowledgement(
+  command: WorkbenchCommandView,
+  operation: SessionMetadataOperation,
+): boolean {
+  return (
+    command.status === "recovery-required" &&
+    command.session?.archived === false &&
+    operation.kind === "archive"
+  );
+}
+
+/**
+ * The renderer-side mirror of the durable archive matrix. The coordinator
+ * remains authoritative, while this presentation fails closed so the visible
+ * control never invites an operation the durable layer must reject.
  */
 export function sessionArchiveControlPresentation(
   command: WorkbenchCommandView,
@@ -72,7 +97,11 @@ export function sessionArchiveControlPresentation(
   const archived: unknown = command.session?.archived;
   const status: unknown = command.status;
   if (archived === true) {
-    if (status !== "completed" && status !== "failed") {
+    if (
+      status !== "completed" &&
+      status !== "failed" &&
+      status !== "recovery-required"
+    ) {
       return archiveControl(
         restoreAccessibleNameCopy(command.label),
         true,
@@ -118,11 +147,11 @@ export function sessionArchiveControlPresentation(
     );
   }
   if (status === "recovery-required") {
-    // Terminal, not transient: this Session's last turn outcome was never
-    // established and never will be, so the tooltip must not imply that
-    // waiting makes archive available. Delete is the exit and it says so.
-    return unavailableArchiveControl(
-      command.label,
+    return archiveControl(
+      archiveAccessibleNameCopy(command.label),
+      actionsDisabled,
+      sessionMetadataCopy.archiveLabel,
+      "archive",
       sessionMetadataCopy.recoveryArchiveTitle,
     );
   }
