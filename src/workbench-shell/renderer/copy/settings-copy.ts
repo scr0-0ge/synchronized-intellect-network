@@ -74,16 +74,41 @@ const englishCopy = {
       "Recorded conversations stay in the Workbench. Resumable Sessions for this provider will no longer be resumable when this authentication action begins.",
     confirmLogout: "Ask the provider CLI to log out",
     continueWithLogin: "Continue with Login",
-    codexApiBaseUrlLabel: "Base URL (optional)",
-    codexApiBaseUrlPlaceholder: "https://your-openai-compatible-gateway/v1",
-    codexApiBaseUrlHint:
-      "For an OpenAI-compatible gateway. Leave blank to use the OpenAI default.",
-    codexApiBaseUrlSaveAction: "Save base URL",
-    codexApiBaseUrlSavedLabel: "Base URL",
-    codexApiBaseUrlNotSetLabel: "Using the OpenAI default",
-    codexApiBaseUrlInvalidSentence: "That must be an http(s):// address.",
-    codexApiBaseUrlSaveFailedSentence:
-      "The base URL could not be saved. Keep the current value and try again.",
+  },
+  /**
+   * One "Base URL (optional)" block per base-URL endpoint (ticket 21/w223
+   * shipped Codex · API alone; w232 generalizes across GLM, DeepSeek, Kimi
+   * Code and Codex · API instead of copying the copy four times): shared
+   * generic sentences plus each provider's own placeholder and hint.
+   */
+  baseUrlCopy: {
+    shared: {
+      label: "Base URL (optional)",
+      saveAction: "Save base URL",
+      savedLabel: "Base URL",
+      notSetLabel: "Using the official default",
+      invalidSentence: "That must be an http(s):// address.",
+      saveFailedSentence:
+        "The base URL could not be saved. Keep the current value and try again.",
+    },
+    providers: {
+      "glm-coding-plan": {
+        placeholder: "https://your-glm-compatible-gateway/anthropic",
+        hint: "For a GLM Anthropic-compatible gateway. Leave blank to use the official default.",
+      },
+      "deepseek-api": {
+        placeholder: "https://your-deepseek-compatible-gateway/anthropic",
+        hint: "For a DeepSeek Anthropic-compatible gateway. Leave blank to use the official default.",
+      },
+      "kimi-code": {
+        placeholder: "https://your-kimi-compatible-gateway/coding/",
+        hint: "For a Kimi Code Anthropic-compatible gateway. Leave blank to use the official default.",
+      },
+      "codex-api": {
+        placeholder: "https://your-openai-compatible-gateway/v1",
+        hint: "For an OpenAI-compatible gateway. Leave blank to use the official default.",
+      },
+    },
   },
   /**
    * One API-key management block per static-key endpoint (WO16 Part 1
@@ -430,14 +455,34 @@ const simplifiedChineseCopy = {
       "已记录的对话会保留在 Workbench 中。开始此身份验证操作后，此提供方的可继续会话将无法继续。",
     confirmLogout: "要求提供方 CLI 退出登录",
     continueWithLogin: "继续登录",
-    codexApiBaseUrlLabel: "Base URL(可选)",
-    codexApiBaseUrlPlaceholder: "https://你的-openai-兼容网关/v1",
-    codexApiBaseUrlHint: "用于接入 OpenAI 兼容网关。留空则使用 OpenAI 官方默认地址。",
-    codexApiBaseUrlSaveAction: "保存 Base URL",
-    codexApiBaseUrlSavedLabel: "Base URL",
-    codexApiBaseUrlNotSetLabel: "使用 OpenAI 官方默认地址",
-    codexApiBaseUrlInvalidSentence: "必须是 http(s):// 开头的地址。",
-    codexApiBaseUrlSaveFailedSentence: "Base URL 未能保存,请保留当前值并重试。",
+  },
+  baseUrlCopy: {
+    shared: {
+      label: "Base URL(可选)",
+      saveAction: "保存 Base URL",
+      savedLabel: "Base URL",
+      notSetLabel: "使用官方默认地址",
+      invalidSentence: "必须是 http(s):// 开头的地址。",
+      saveFailedSentence: "Base URL 未能保存,请保留当前值并重试。",
+    },
+    providers: {
+      "glm-coding-plan": {
+        placeholder: "https://你的-glm-兼容网关/anthropic",
+        hint: "用于接入 GLM Anthropic 兼容网关。留空则使用官方默认地址。",
+      },
+      "deepseek-api": {
+        placeholder: "https://你的-deepseek-兼容网关/anthropic",
+        hint: "用于接入 DeepSeek Anthropic 兼容网关。留空则使用官方默认地址。",
+      },
+      "kimi-code": {
+        placeholder: "https://你的-kimi-兼容网关/coding/",
+        hint: "用于接入 Kimi Code Anthropic 兼容网关。留空则使用官方默认地址。",
+      },
+      "codex-api": {
+        placeholder: "https://你的-openai-兼容网关/v1",
+        hint: "用于接入 OpenAI 兼容网关。留空则使用官方默认地址。",
+      },
+    },
   },
   endpointKeyCopy: {
     shared: {
@@ -765,6 +810,26 @@ export const deepseekEndpointKeyCopy = workbenchEndpointKeyCopy("deepseek-api");
 /** Flattened Kimi Platform view for the merged Kimi card's platform side. */
 export const kimiPlatformEndpointKeyCopy =
   workbenchEndpointKeyCopy("kimi-platform");
+
+export const baseUrlSharedCopy = localizedCopy.baseUrlCopy.shared;
+
+export const baseUrlProviderCopy = localizedCopy.baseUrlCopy.providers;
+
+export type WorkbenchBaseUrlCopyEndpointId = keyof typeof baseUrlProviderCopy;
+
+/**
+ * The composed per-endpoint copy dictionary for one provider's base-URL
+ * block (ticket 21/w223 shipped Codex · API alone; w232 generalizes it):
+ * shared generic sentences plus the provider's own placeholder and hint.
+ */
+export function workbenchBaseUrlCopy(endpointId: WorkbenchBaseUrlCopyEndpointId) {
+  const provider = baseUrlProviderCopy[endpointId];
+  return Object.freeze({
+    ...baseUrlSharedCopy,
+    placeholder: provider.placeholder,
+    hint: provider.hint,
+  });
+}
 
 /** Copy for the merged family settings cards' backend segment switch. */
 export const familyFacadeCopy = localizedCopy.familyFacadeCopy;

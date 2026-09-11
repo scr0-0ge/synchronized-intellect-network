@@ -8,9 +8,10 @@
  * from scratch, because "what is on PATH" is the only input that matters and
  * inheriting the machine's PATH would make every assertion accidental — pnpm
  * and corepack both exist on a developer machine, and the tests that require
- * their absence would pass for the wrong reason. pnpm, corepack, vite and
- * electron are stubs. Node provisioning copies a locally built, official-shaped
- * zip, so the suite uses no network, installs nothing, and never starts the app.
+ * their absence would pass for the wrong reason. The fixture cases stub pnpm,
+ * corepack, Vite and Electron. One production smoke deliberately starts the
+ * installed Electron offscreen; every other case uses no network, installs
+ * nothing, and never starts the app.
  *
  * Two things deserve their own note.
  *
@@ -26,7 +27,7 @@
  * rather than against a mock of itself.
  */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -51,6 +52,7 @@ const nodeArchiveBytes = new Map();
    machine. Every failure message now carries the status, the kill signal and
    the elapsed time, so the two can never be confused again. */
 const LAUNCHER_TIMEOUT_MS = 120_000;
+const PRODUCTION_START_TIMEOUT_MS = 90_000;
 
 function batch(...lines) {
   return [...lines, ''].join('\r\n');
@@ -352,6 +354,144 @@ function readIfPresent(file) {
   return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
 }
 
+async function observeProductionStart(t) {
+  const scratch = path.join(
+    path.parse(repositoryRoot).root,
+    `uaw-start-smoke-${String(process.pid)}-${Date.now().toString(36)}`,
+  );
+  const profile = path.join(scratch, 'profile');
+  const fakeHome = path.join(scratch, 'home');
+  const fakePath = path.join(scratch, 'path');
+  for (const directory of [
+    profile,
+    fakeHome,
+    fakePath,
+    path.join(scratch, 'roaming'),
+    path.join(scratch, 'local'),
+    path.join(scratch, 'temp'),
+    path.join(scratch, 'codex'),
+    path.join(scratch, 'claude'),
+  ]) {
+    fs.mkdirSync(directory, { recursive: true });
+  }
+  t.after(() =>
+    fs.rmSync(scratch, {
+      force: true,
+      recursive: true,
+      maxRetries: 20,
+      retryDelay: 100,
+    }),
+  );
+
+  // start.bat only needs to locate pnpm before it sees the current, complete
+  // node_modules. If it unexpectedly attempts an install, make that a loud
+  // failure rather than reaching a machine-global package manager.
+  fs.writeFileSync(path.join(fakePath, 'pnpm.cmd'), batch('@echo off', 'exit /b 97'));
+
+  const environment = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (
+      value !== undefined &&
+      !/^(PATH|HOME|USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|TEMP|TMP|TMPDIR|ELECTRON_RUN_AS_NODE|NODE_OPTIONS|NODE_PATH)$/iu.test(key) &&
+      !/(ANTHROPIC|CLAUDE|CODEX|OPENAI|GLM|KIMI|MOONSHOT|DEEPSEEK|ZHIPU|API_KEY|AUTH_TOKEN|ACCESS_TOKEN|PASSWORD|SECRET|TOKEN)/iu.test(key)
+    ) {
+      environment[key] = value;
+    }
+  }
+  Object.assign(environment, {
+    PATH: `${path.dirname(process.execPath)};${fakePath};${path.join(systemRoot, 'System32')}`,
+    HOME: fakeHome,
+    USERPROFILE: fakeHome,
+    HOMEDRIVE: path.parse(fakeHome).root.slice(0, 2),
+    HOMEPATH: fakeHome.slice(2),
+    APPDATA: path.join(scratch, 'roaming'),
+    LOCALAPPDATA: path.join(scratch, 'local'),
+    TEMP: path.join(scratch, 'temp'),
+    TMP: path.join(scratch, 'temp'),
+    TMPDIR: path.join(scratch, 'temp'),
+    CODEX_HOME: path.join(scratch, 'codex'),
+    CLAUDE_CONFIG_DIR: path.join(scratch, 'claude'),
+    // Electron inherits this from some Node-hosted shells. The public launcher
+    // must still start Electron as an app rather than as its embedded Node.
+    ELECTRON_RUN_AS_NODE: '1',
+  });
+
+  const child = spawn(
+    'cmd.exe',
+    [
+      '/d',
+      '/c',
+      launcherSource,
+      `--user-data-dir=${profile}`,
+      '--window-placement=offscreen',
+    ],
+    {
+      cwd: repositoryRoot,
+      env: environment,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    },
+  );
+  child.stdin.end('\r\n');
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+
+  let stdout = '';
+  let stderr = '';
+  let ready = false;
+  let markReady;
+  const readySignal = new Promise((resolve) => {
+    markReady = resolve;
+  });
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    if (!ready && /\[window-placement\] surface=main-window;offscreen@/u.test(stdout)) {
+      ready = true;
+      markReady({ kind: 'ready' });
+    }
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  const closeSignal = new Promise((resolve) => {
+    child.once('close', (code, signal) => resolve({ kind: 'exit', code, signal }));
+  });
+  const timeoutSignal = new Promise((resolve) => {
+    setTimeout(() => resolve({ kind: 'timeout' }), PRODUCTION_START_TIMEOUT_MS).unref();
+  });
+
+  let outcome;
+  try {
+    outcome = await Promise.race([readySignal, closeSignal, timeoutSignal]);
+    assert.notEqual(
+      outcome.kind,
+      'timeout',
+      `production start did not reach the offscreen window in ${String(PRODUCTION_START_TIMEOUT_MS)}ms\n${stdout}\n${stderr}`,
+    );
+    if (outcome.kind === 'exit') {
+      assert.notEqual(outcome.code, 1, `${stdout}\n${stderr}`);
+      assert.fail(
+        `production Electron exited before its offscreen main window (code=${String(outcome.code)} signal=${String(outcome.signal)})\n${stdout}\n${stderr}`,
+      );
+    }
+    assert.doesNotMatch(stderr, /cjsPreparseModuleExports|TypeError: Cannot read properties of undefined \(reading 'exports'\)/u);
+    assert.match(stdout, /build ok/u);
+    assert.match(stdout, /\[window-placement\] surface=main-window;offscreen@/u);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      const stopped = spawnSync(
+        path.join(systemRoot, 'System32', 'taskkill.exe'),
+        ['/pid', String(child.pid), '/t', '/f'],
+        { encoding: 'utf8', windowsHide: true },
+      );
+      assert.equal(stopped.status, 0, `${stopped.stdout}\n${stopped.stderr}`);
+      await closeSignal;
+    }
+  }
+
+  return { stdout, stderr, outcome };
+}
+
 // ---------------------------------------------------------------------------
 // the happy path
 // ---------------------------------------------------------------------------
@@ -396,6 +536,11 @@ test('a stranger with node and pnpm gets a fresh build and a started app', (t) =
     false,
     'a qualified PATH node must not create or download a private runtime',
   );
+});
+
+test('the real electron . launch survives an inherited ELECTRON_RUN_AS_NODE and reaches its offscreen window', async (t) => {
+  const observation = await observeProductionStart(t);
+  assert.equal(observation.outcome.kind, 'ready', `${observation.stdout}\n${observation.stderr}`);
 });
 
 test('every argument reaches the app, so --user-data-dir keeps a throwaway profile', (t) => {

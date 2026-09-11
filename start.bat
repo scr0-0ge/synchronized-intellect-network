@@ -209,6 +209,10 @@ echo   starting the app
 echo   -- keep this window open; closing it closes the app
 echo.
 
+REM Electron's Node-hosted tooling can leave this internal switch in the
+REM environment. It would turn `electron .` into embedded Node and make the
+REM ESM main entry fail while importing Electron itself.
+set "ELECTRON_RUN_AS_NODE="
 call "node_modules\.bin\electron.CMD" . %*
 set "APPEXIT=%ERRORLEVEL%"
 

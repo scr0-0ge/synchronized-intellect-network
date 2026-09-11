@@ -118,9 +118,10 @@ import {
   type WorkbenchClaudePermissionHandlingIpcBinding,
 } from "./claude-permission-handling-ipc.ts";
 import {
-  installWorkbenchCodexApiBaseUrlIpc,
-  type WorkbenchCodexApiBaseUrlIpcBinding,
-} from "./codex-api-base-url-ipc.ts";
+  installWorkbenchEndpointBaseUrlIpc,
+  type WorkbenchEndpointBaseUrlIpcBinding,
+} from "./endpoint-base-url-ipc.ts";
+import { WORKBENCH_BASE_URL_ENDPOINT_IDS, type WorkbenchBaseUrlEndpointId } from "../contract.ts";
 import {
   installWorkbenchEndpointPreferenceIpc,
   type WorkbenchEndpointPreferenceIpcBinding,
@@ -257,7 +258,7 @@ let appearancePreferenceIpc: WorkbenchAppearancePreferenceIpcBinding | null =
   null;
 let claudePermissionHandlingIpc: WorkbenchClaudePermissionHandlingIpcBinding | null =
   null;
-let codexApiBaseUrlIpc: WorkbenchCodexApiBaseUrlIpcBinding | null = null;
+let baseUrlIpc: WorkbenchEndpointBaseUrlIpcBinding[] = [];
 let subscriptionUsageIpc: ReturnType<typeof installWorkbenchSubscriptionUsageIpc> | null = null;
 let endpointPreferenceIpc: WorkbenchEndpointPreferenceIpcBinding | null =
   null;
@@ -274,12 +275,17 @@ let deepseekEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let kimiPlatformEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let claudeApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let codexApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
-// In-memory mirror of the preference store's codex-api base URL (w223), kept
-// current by hydration at startup and every successful save. Sync reads let
-// the codex-api key source's "Test connection" probe use the saved override
-// without giving the probe's base-URL resolver a disk read on every call --
-// the store itself stays the single source of truth; this is a read cache.
-let codexApiBaseUrlOverride = "";
+// In-memory mirror of the preference store's per-endpoint base URL overrides
+// (w223 shipped codex-api alone; w232 generalizes to all four base-URL
+// endpoints), kept current by hydration at startup and every successful
+// save. Sync reads let the codex-api key source's "Test connection" probe
+// (and each endpoint's session-start environment resolver) use the saved
+// override without a disk read on every call -- the store itself stays the
+// single source of truth; this is a read cache.
+const baseUrlOverrides: Record<WorkbenchBaseUrlEndpointId, string> =
+  Object.fromEntries(
+    WORKBENCH_BASE_URL_ENDPOINT_IDS.map((endpointId) => [endpointId, ""]),
+  ) as Record<WorkbenchBaseUrlEndpointId, string>;
 let endpointCatalogFreshnessService: EndpointCatalogFreshnessService | null =
   null;
 let runtimeExecutableIpc: WorkbenchRuntimeExecutableIpcBinding | null = null;
@@ -356,11 +362,11 @@ function disposeWindowScopedBindings(): void {
         },
       },
       {
-        name: "codexApiBaseUrlIpc",
+        name: "baseUrlIpc",
         run() {
-          const closing = codexApiBaseUrlIpc;
-          codexApiBaseUrlIpc = null;
-          closing?.dispose();
+          const closing = baseUrlIpc;
+          baseUrlIpc = [];
+          for (const binding of closing) binding.dispose();
         },
       },
       // main-resync: the lane's window-scoped bindings ride the same one list
@@ -828,8 +834,12 @@ function startPrimaryWorkbench(): void {
             "workbench-appearance-preferences-v1.json",
           ),
         });
-        codexApiBaseUrlOverride =
-          await appearancePreferenceStore.readCodexApiBaseUrl();
+        await Promise.all(
+          WORKBENCH_BASE_URL_ENDPOINT_IDS.map(async (endpointId) => {
+            baseUrlOverrides[endpointId] =
+              await appearancePreferenceStore!.readBaseUrl(endpointId);
+          }),
+        );
         // One shared secret-envelope store FILE for every API-transport
         // endpoint key (ADR 0022 multi-subject shape), platform-encrypted via
         // Electron safeStorage, beside the other userData stores. Each
@@ -900,8 +910,8 @@ function startPrimaryWorkbench(): void {
           // "Test connection" honors the saved override (w223) over the
           // env-var / contract default, same precedence prepareEndpoint uses.
           probeBaseUrl: (environment) =>
-            codexApiBaseUrlOverride.trim().length > 0
-              ? codexApiBaseUrlOverride
+            baseUrlOverrides["codex-api"].trim().length > 0
+              ? baseUrlOverrides["codex-api"]
               : (environment[CODEX_API_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar]
                   ?.trim() || CODEX_API_ENDPOINT_ENV_CONTRACT.defaultBaseUrl),
         });
@@ -971,14 +981,17 @@ function startPrimaryWorkbench(): void {
                   }
                 },
                 resolveGlmAuthToken: () => glmEndpointKeySource?.resolve(),
+                resolveGlmBaseUrl: () => baseUrlOverrides["glm-coding-plan"],
                 resolveKimiAuthToken: () => kimiEndpointKeySource?.resolve(),
+                resolveKimiBaseUrl: () => baseUrlOverrides["kimi-code"],
                 resolveDeepseekAuthToken: () =>
                   deepseekEndpointKeySource?.resolve(),
+                resolveDeepseekBaseUrl: () => baseUrlOverrides["deepseek-api"],
                 resolveKimiPlatformApiKey: () =>
                   kimiPlatformEndpointKeySource?.resolve(),
                 resolveClaudeApiKey: () => claudeApiEndpointKeySource?.resolve(),
                 resolveCodexApiKey: () => codexApiEndpointKeySource?.resolve(),
-                resolveCodexApiBaseUrl: () => codexApiBaseUrlOverride,
+                resolveCodexApiBaseUrl: () => baseUrlOverrides["codex-api"],
                 catalogAugmentation: (endpointId) =>
                   endpointId === "kimi-code"
                     ? []
@@ -1110,24 +1123,31 @@ function startPrimaryWorkbench(): void {
       window: createdWindow,
       source: initializedAppearancePreferenceStore,
     });
-    codexApiBaseUrlIpc = installWorkbenchCodexApiBaseUrlIpc({
-      ipcMain,
-      window: createdWindow,
-      source: {
-        readCodexApiBaseUrl: () =>
-          initializedAppearancePreferenceStore.readCodexApiBaseUrl(),
-        async saveCodexApiBaseUrl(baseUrl: string): Promise<string> {
-          const saved =
-            await initializedAppearancePreferenceStore.saveCodexApiBaseUrl(
-              baseUrl,
-            );
-          // Keep the sync probe/prepare cache current the moment a save
-          // durably lands (w223); it is the only mirror they read from.
-          codexApiBaseUrlOverride = saved;
-          return saved;
+    // One parameterized base-URL IPC binding per base-URL endpoint (w223
+    // shipped codex-api alone; w232 adds an endpoint dimension instead of
+    // copying the binding three times); each dies with the window.
+    baseUrlIpc = WORKBENCH_BASE_URL_ENDPOINT_IDS.map((endpointId) =>
+      installWorkbenchEndpointBaseUrlIpc({
+        ipcMain,
+        window: createdWindow,
+        endpointId,
+        source: {
+          readBaseUrl: () =>
+            initializedAppearancePreferenceStore.readBaseUrl(endpointId),
+          async saveBaseUrl(baseUrl: string): Promise<string> {
+            const saved =
+              await initializedAppearancePreferenceStore.saveBaseUrl(
+                endpointId,
+                baseUrl,
+              );
+            // Keep the sync probe/prepare cache current the moment a save
+            // durably lands (w223/w232); it is the only mirror they read from.
+            baseUrlOverrides[endpointId] = saved;
+            return saved;
+          },
         },
-      },
-    });
+      }),
+    );
     subscriptionUsageIpc = installWorkbenchSubscriptionUsageIpc({
       ipcMain,
       window: createdWindow,

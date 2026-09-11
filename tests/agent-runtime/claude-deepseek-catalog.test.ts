@@ -132,6 +132,45 @@ test("a DEEPSEEK_ANTHROPIC_BASE_URL override wins over the contract default", ()
   );
 });
 
+// w232: the Settings "Base URL (optional)" field's saved override must win
+// over both the env var and the contract default, mirroring resolveAuthToken.
+test("a live resolveBaseUrl override wins over DEEPSEEK_ANTHROPIC_BASE_URL and the contract default", () => {
+  const sourceEnvironment = Object.freeze({
+    ...FAKE_TOKEN_ENV,
+    DEEPSEEK_ANTHROPIC_BASE_URL: "https://mirror.example.com/anthropic",
+  });
+  const source = createDeepseekEndpointEnvironmentSource({
+    configDir: "C:\\temp\\deepseek-isolated",
+    sourceEnvironment,
+    resolveBaseUrl: () => "http://127.0.0.1:4181",
+  });
+  const environment = createEndpointProcessEnvironment(
+    sourceEnvironment,
+    source({}),
+  );
+  assert.equal(environment.ANTHROPIC_BASE_URL, "http://127.0.0.1:4181");
+});
+
+test("resolveBaseUrl returning undefined falls through to the env var, exactly as before w232", () => {
+  const sourceEnvironment = Object.freeze({
+    ...FAKE_TOKEN_ENV,
+    DEEPSEEK_ANTHROPIC_BASE_URL: "https://mirror.example.com/anthropic",
+  });
+  const source = createDeepseekEndpointEnvironmentSource({
+    configDir: "C:\\temp\\deepseek-isolated",
+    sourceEnvironment,
+    resolveBaseUrl: () => undefined,
+  });
+  const environment = createEndpointProcessEnvironment(
+    sourceEnvironment,
+    source({}),
+  );
+  assert.equal(
+    environment.ANTHROPIC_BASE_URL,
+    "https://mirror.example.com/anthropic",
+  );
+});
+
 test("the endpoint context composes static catalog, api-key-static auth, and the env source", () => {
   const context = createDeepseekEndpointContext({
     configDir: "C:\\temp\\deepseek-isolated",

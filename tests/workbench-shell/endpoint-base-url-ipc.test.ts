@@ -2,21 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL,
-  WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
-  publicCodexApiBaseUrlUnavailable,
+  WORKBENCH_BASE_URL_CHANNELS,
+  publicBaseUrlUnavailable,
 } from "../../src/workbench-shell/contract.ts";
 import {
-  installWorkbenchCodexApiBaseUrlIpc,
-  type CodexApiBaseUrlBrowserWindowBoundary,
-  type CodexApiBaseUrlIpcMainBoundary,
-  type CodexApiBaseUrlRendererSender,
-  type WorkbenchCodexApiBaseUrlSource,
-} from "../../src/workbench-shell/electron/codex-api-base-url-ipc.ts";
+  installWorkbenchEndpointBaseUrlIpc,
+  type EndpointBaseUrlBrowserWindowBoundary,
+  type EndpointBaseUrlIpcMainBoundary,
+  type EndpointBaseUrlRendererSender,
+  type WorkbenchEndpointBaseUrlSource,
+} from "../../src/workbench-shell/electron/endpoint-base-url-ipc.ts";
 
 type Listener = (...values: unknown[]) => unknown;
 
-class FakeIpcMain implements CodexApiBaseUrlIpcMainBoundary {
+class FakeIpcMain implements EndpointBaseUrlIpcMainBoundary {
   readonly handlers = new Map<string, Listener>();
   handle(channel: string, listener: Listener): void {
     this.handlers.set(channel, listener);
@@ -35,7 +34,7 @@ class FakeIpcMain implements CodexApiBaseUrlIpcMainBoundary {
   }
 }
 
-class FakeSender implements CodexApiBaseUrlRendererSender {
+class FakeSender implements EndpointBaseUrlRendererSender {
   destroyed = false;
   readonly listeners = new Map<string, Set<Listener>>();
   isDestroyed(): boolean {
@@ -54,7 +53,7 @@ class FakeSender implements CodexApiBaseUrlRendererSender {
   }
 }
 
-class FakeWindow implements CodexApiBaseUrlBrowserWindowBoundary {
+class FakeWindow implements EndpointBaseUrlBrowserWindowBoundary {
   readonly listeners = new Map<string, Set<Listener>>();
   readonly webContents: FakeSender;
   constructor(webContents: FakeSender) {
@@ -70,18 +69,18 @@ class FakeWindow implements CodexApiBaseUrlBrowserWindowBoundary {
   }
 }
 
-class FakeSource implements WorkbenchCodexApiBaseUrlSource {
+class FakeSource implements WorkbenchEndpointBaseUrlSource {
   readCalls = 0;
   saveCalls = 0;
   saved: string[] = [];
   value = "";
   fail = false;
-  async readCodexApiBaseUrl(): Promise<string> {
+  async readBaseUrl(): Promise<string> {
     this.readCalls += 1;
     if (this.fail) throw new Error("PRIVATE_READ_FAILURE");
     return this.value;
   }
-  async saveCodexApiBaseUrl(baseUrl: string): Promise<string> {
+  async saveBaseUrl(baseUrl: string): Promise<string> {
     this.saveCalls += 1;
     this.saved.push(baseUrl);
     if (this.fail) throw new Error("PRIVATE_SAVE_FAILURE");
@@ -94,19 +93,21 @@ test("the owning renderer loads and saves a valid http(s) base URL", async () =>
   const ipc = new FakeIpcMain();
   const sender = new FakeSender();
   const source = new FakeSource();
-  const binding = installWorkbenchCodexApiBaseUrlIpc({
+  const channels = WORKBENCH_BASE_URL_CHANNELS["codex-api"];
+  const binding = installWorkbenchEndpointBaseUrlIpc({
     ipcMain: ipc,
     window: new FakeWindow(sender),
+    endpointId: "codex-api",
     source,
   });
 
   assert.deepEqual(
-    await ipc.invoke(WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL, sender),
+    await ipc.invoke(channels.load, sender),
     { ok: true, status: "loaded", baseUrl: "" },
   );
   assert.deepEqual(
     await ipc.invoke(
-      WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
+      channels.save,
       sender,
       "https://gateway.example.com/v1",
     ),
@@ -122,14 +123,16 @@ test("an empty draft clears the override without being refused", async () => {
   const sender = new FakeSender();
   const source = new FakeSource();
   source.value = "https://old.example.com/v1";
-  installWorkbenchCodexApiBaseUrlIpc({
+  const channels = WORKBENCH_BASE_URL_CHANNELS["codex-api"];
+  installWorkbenchEndpointBaseUrlIpc({
     ipcMain: ipc,
     window: new FakeWindow(sender),
+    endpointId: "codex-api",
     source,
   });
 
   assert.deepEqual(
-    await ipc.invoke(WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL, sender, "   "),
+    await ipc.invoke(channels.save, sender, "   "),
     { ok: true, status: "saved", baseUrl: "" },
   );
   assert.deepEqual(source.saved, [""]);
@@ -139,9 +142,11 @@ test("a non-http(s) draft is rejected with a reason and never reaches the store"
   const ipc = new FakeIpcMain();
   const sender = new FakeSender();
   const source = new FakeSource();
-  installWorkbenchCodexApiBaseUrlIpc({
+  const channels = WORKBENCH_BASE_URL_CHANNELS["codex-api"];
+  installWorkbenchEndpointBaseUrlIpc({
     ipcMain: ipc,
     window: new FakeWindow(sender),
+    endpointId: "codex-api",
     source,
   });
 
@@ -152,11 +157,11 @@ test("a non-http(s) draft is rejected with a reason and never reaches the store"
     "javascript:alert(1)",
   ]) {
     assert.deepEqual(
-      await ipc.invoke(WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL, sender, draft),
+      await ipc.invoke(channels.save, sender, draft),
       {
         ok: false,
         error: {
-          category: "codex-api-base-url-rejected",
+          category: "base-url-rejected",
           message: "That base URL cannot be used.",
           reason: "invalid-url",
         },
@@ -170,15 +175,17 @@ test("http loopback is accepted (the ticket's own smoke-test shape)", async () =
   const ipc = new FakeIpcMain();
   const sender = new FakeSender();
   const source = new FakeSource();
-  installWorkbenchCodexApiBaseUrlIpc({
+  const channels = WORKBENCH_BASE_URL_CHANNELS["codex-api"];
+  installWorkbenchEndpointBaseUrlIpc({
     ipcMain: ipc,
     window: new FakeWindow(sender),
+    endpointId: "codex-api",
     source,
   });
 
   assert.deepEqual(
     await ipc.invoke(
-      WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
+      channels.save,
       sender,
       "http://127.0.0.1:4180",
     ),
@@ -186,37 +193,39 @@ test("http loopback is accepted (the ticket's own smoke-test shape)", async () =
   );
 });
 
-test("codex-api-base-url IPC rejects foreign, malformed, drifted, and terminal requests before persistence", async () => {
+test("endpoint-base-url IPC rejects foreign, malformed, drifted, and terminal requests before persistence", async () => {
   const ipc = new FakeIpcMain();
   const owner = new FakeSender();
   const intruder = new FakeSender();
   const source = new FakeSource();
-  const binding = installWorkbenchCodexApiBaseUrlIpc({
+  const channels = WORKBENCH_BASE_URL_CHANNELS["codex-api"];
+  const binding = installWorkbenchEndpointBaseUrlIpc({
     ipcMain: ipc,
     window: new FakeWindow(owner),
+    endpointId: "codex-api",
     source,
   });
-  const unavailable = publicCodexApiBaseUrlUnavailable();
+  const unavailable = publicBaseUrlUnavailable();
 
   assert.deepEqual(
-    await ipc.invoke(WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL, intruder),
+    await ipc.invoke(channels.load, intruder),
     unavailable,
   );
   for (const value of [null, 42, {}, ["https://example.com"]]) {
     assert.deepEqual(
-      await ipc.invoke(WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL, owner, value),
+      await ipc.invoke(channels.save, owner, value),
       unavailable,
     );
   }
   source.fail = true;
   assert.deepEqual(
-    await ipc.invoke(WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL, owner),
+    await ipc.invoke(channels.load, owner),
     unavailable,
   );
   owner.emit("destroyed");
   assert.deepEqual(
     await ipc.invoke(
-      WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
+      channels.save,
       owner,
       "https://example.com/v1",
     ),
@@ -225,4 +234,50 @@ test("codex-api-base-url IPC rejects foreign, malformed, drifted, and terminal r
   assert.equal(source.saveCalls, 0);
   assert.equal(JSON.stringify(unavailable).includes("PRIVATE_"), false);
   binding.dispose();
+});
+
+// w232: the shared implementation is parameterized by endpoint id -- prove
+// two endpoints get their own channels and never cross-talk, instead of
+// asserting this only for codex-api (the pre-w232 sole instance).
+test("each base-URL endpoint gets its own channel pair and independent bindings never cross-talk", async () => {
+  const ipc = new FakeIpcMain();
+  const glmSender = new FakeSender();
+  const kimiSender = new FakeSender();
+  const glmSource = new FakeSource();
+  const kimiSource = new FakeSource();
+  const glmChannels = WORKBENCH_BASE_URL_CHANNELS["glm-coding-plan"];
+  const kimiChannels = WORKBENCH_BASE_URL_CHANNELS["kimi-code"];
+  assert.notEqual(glmChannels.load, kimiChannels.load);
+  assert.notEqual(glmChannels.save, kimiChannels.save);
+
+  const glmBinding = installWorkbenchEndpointBaseUrlIpc({
+    ipcMain: ipc,
+    window: new FakeWindow(glmSender),
+    endpointId: "glm-coding-plan",
+    source: glmSource,
+  });
+  const kimiBinding = installWorkbenchEndpointBaseUrlIpc({
+    ipcMain: ipc,
+    window: new FakeWindow(kimiSender),
+    endpointId: "kimi-code",
+    source: kimiSource,
+  });
+
+  assert.deepEqual(
+    await ipc.invoke(
+      glmChannels.save,
+      glmSender,
+      "http://127.0.0.1:4181",
+    ),
+    { ok: true, status: "saved", baseUrl: "http://127.0.0.1:4181" },
+  );
+  assert.deepEqual(glmSource.saved, ["http://127.0.0.1:4181"]);
+  assert.deepEqual(kimiSource.saved, []);
+  assert.deepEqual(
+    await ipc.invoke(kimiChannels.load, kimiSender),
+    { ok: true, status: "loaded", baseUrl: "" },
+  );
+
+  glmBinding.dispose();
+  kimiBinding.dispose();
 });

@@ -73,6 +73,14 @@ export interface GlmEndpointConfiguration {
    * before (P2 fallback); a resolver that throws propagates loudly.
    */
   readonly resolveAuthToken?: () => string | undefined;
+  /**
+   * Live base-URL resolver backed by the Settings "Base URL (optional)"
+   * field (w232), same invocation discipline as `resolveAuthToken`: called
+   * once per session start, taking precedence over `baseUrl` / the
+   * environment variable / the contract default when it returns a
+   * non-empty string.
+   */
+  readonly resolveBaseUrl?: () => string | undefined;
   /** Isolated CLAUDE_CONFIG_DIR for every GLM spawn (required). */
   readonly configDir: string;
   /** Source environment the token/base URL are read from (tests inject fakes). */
@@ -95,10 +103,14 @@ export function createGlmEndpointEnvironmentSource(
         ? profileModel
         : GLM_DEFAULT_MODEL_ID;
     const resolvedAuthToken = configuration.resolveAuthToken?.();
+    const resolvedBaseUrl = configuration.resolveBaseUrl?.();
+    const effectiveBaseUrl = isNonEmpty(resolvedBaseUrl)
+      ? resolvedBaseUrl
+      : configuration.baseUrl;
     return Object.freeze({
       mode: "glm" as const,
-      ...(isNonEmpty(configuration.baseUrl)
-        ? { baseUrl: configuration.baseUrl }
+      ...(isNonEmpty(effectiveBaseUrl)
+        ? { baseUrl: effectiveBaseUrl }
         : {}),
       ...(isNonEmpty(configuration.authTokenEnvVar)
         ? { authTokenEnvVar: configuration.authTokenEnvVar }

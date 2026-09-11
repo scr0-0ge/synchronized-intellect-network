@@ -65,10 +65,6 @@ export const WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL =
   "workbench:load-runtime-executables";
 export const WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL =
   "workbench:save-runtime-executable";
-export const WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL =
-  "workbench:load-codex-api-base-url";
-export const WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL =
-  "workbench:save-codex-api-base-url";
 export const WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL =
   "workbench:install-runtime-executable";
 export const WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL =
@@ -161,6 +157,53 @@ export const WORKBENCH_ENDPOINT_KEY_CHANNELS: Readonly<
     remove: "workbench:endpoint-key/codex-api/remove",
     reveal: "workbench:endpoint-key/codex-api/reveal",
     probe: "workbench:endpoint-key/codex-api/probe",
+  }),
+});
+
+/**
+ * The endpoints whose Anthropic-compatible provider base URL is a persisted,
+ * optional Settings override (w223 shipped this for `codex-api`; w232
+ * generalizes it, adding an endpoint dimension to the same IPC/state shape
+ * instead of copying it three times, and covers `glm-coding-plan`,
+ * `deepseek-api` and `kimi-code`).
+ */
+export const WORKBENCH_BASE_URL_ENDPOINT_IDS = Object.freeze([
+  "glm-coding-plan",
+  "deepseek-api",
+  "kimi-code",
+  "codex-api",
+] as const);
+
+export type WorkbenchBaseUrlEndpointId =
+  (typeof WORKBENCH_BASE_URL_ENDPOINT_IDS)[number];
+
+export type WorkbenchBaseUrlChannel =
+  | `workbench:base-url/${WorkbenchBaseUrlEndpointId}/load`
+  | `workbench:base-url/${WorkbenchBaseUrlEndpointId}/save`;
+
+export interface WorkbenchBaseUrlChannels {
+  readonly load: `workbench:base-url/${WorkbenchBaseUrlEndpointId}/load`;
+  readonly save: `workbench:base-url/${WorkbenchBaseUrlEndpointId}/save`;
+}
+
+export const WORKBENCH_BASE_URL_CHANNELS: Readonly<
+  Record<WorkbenchBaseUrlEndpointId, WorkbenchBaseUrlChannels>
+> = Object.freeze({
+  "glm-coding-plan": Object.freeze({
+    load: "workbench:base-url/glm-coding-plan/load",
+    save: "workbench:base-url/glm-coding-plan/save",
+  }),
+  "deepseek-api": Object.freeze({
+    load: "workbench:base-url/deepseek-api/load",
+    save: "workbench:base-url/deepseek-api/save",
+  }),
+  "kimi-code": Object.freeze({
+    load: "workbench:base-url/kimi-code/load",
+    save: "workbench:base-url/kimi-code/save",
+  }),
+  "codex-api": Object.freeze({
+    load: "workbench:base-url/codex-api/load",
+    save: "workbench:base-url/codex-api/save",
   }),
 });
 
@@ -262,35 +305,38 @@ export type WorkbenchClaudePermissionHandlingSaveResult =
     };
 
 /**
- * The codex-api endpoint's provider base URL override (ticket 21 follow-up,
- * w223): plain user-typed text, not a secret, so it lives in the appearance
- * preference store rather than the safeStorage-encrypted endpoint secret
- * envelope (same split the executable-path escape hatch uses). An empty
- * string means "not set" -- the official OpenAI default applies -- matching
- * the executable-path convention so the key set never varies.
+ * A base-URL-endpoint's provider base URL override: plain user-typed text,
+ * not a secret, so it lives in the appearance preference store rather than
+ * the safeStorage-encrypted endpoint secret envelope (same split the
+ * executable-path escape hatch uses). An empty string means "not set" --
+ * that endpoint's official default applies -- matching the executable-path
+ * convention so the key set never varies.
+ *
+ * Shipped for `codex-api` alone in ticket 21 (w223); w232 generalizes the
+ * same shape across all four base-URL endpoints instead of duplicating it.
  */
-export const WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH = 2_048;
+export const WORKBENCH_BASE_URL_MAX_LENGTH = 2_048;
 
-export const defaultWorkbenchCodexApiBaseUrl = "";
+export const defaultWorkbenchBaseUrl = "";
 
-export type WorkbenchCodexApiBaseUrlRejection = "invalid-url";
+export type WorkbenchBaseUrlRejection = "invalid-url";
 
-export interface WorkbenchCodexApiBaseUrlUnavailableFailure {
-  readonly category: "codex-api-base-url-unavailable";
-  readonly message: "The Codex · API base URL could not be loaded or saved. Keep the current value and try again.";
+export interface WorkbenchBaseUrlUnavailableFailure {
+  readonly category: "base-url-unavailable";
+  readonly message: "The base URL could not be loaded or saved. Keep the current value and try again.";
 }
 
-export interface WorkbenchCodexApiBaseUrlRejectedFailure {
-  readonly category: "codex-api-base-url-rejected";
+export interface WorkbenchBaseUrlRejectedFailure {
+  readonly category: "base-url-rejected";
   readonly message: "That base URL cannot be used.";
-  readonly reason: WorkbenchCodexApiBaseUrlRejection;
+  readonly reason: WorkbenchBaseUrlRejection;
 }
 
-export type WorkbenchCodexApiBaseUrlFailure =
-  | WorkbenchCodexApiBaseUrlUnavailableFailure
-  | WorkbenchCodexApiBaseUrlRejectedFailure;
+export type WorkbenchBaseUrlFailure =
+  | WorkbenchBaseUrlUnavailableFailure
+  | WorkbenchBaseUrlRejectedFailure;
 
-export type WorkbenchCodexApiBaseUrlLoadResult =
+export type WorkbenchBaseUrlLoadResult =
   | {
       readonly ok: true;
       readonly status: "loaded";
@@ -298,10 +344,10 @@ export type WorkbenchCodexApiBaseUrlLoadResult =
     }
   | {
       readonly ok: false;
-      readonly error: WorkbenchCodexApiBaseUrlUnavailableFailure;
+      readonly error: WorkbenchBaseUrlUnavailableFailure;
     };
 
-export type WorkbenchCodexApiBaseUrlSaveResult =
+export type WorkbenchBaseUrlSaveResult =
   | {
       readonly ok: true;
       readonly status: "saved";
@@ -309,7 +355,7 @@ export type WorkbenchCodexApiBaseUrlSaveResult =
     }
   | {
       readonly ok: false;
-      readonly error: WorkbenchCodexApiBaseUrlFailure;
+      readonly error: WorkbenchBaseUrlFailure;
     };
 
 /**
@@ -1868,10 +1914,13 @@ export interface WorkbenchRendererBridge
   saveClaudePermissionHandling(
     permissionHandling: WorkbenchClaudePermissionHandling,
   ): Promise<WorkbenchClaudePermissionHandlingSaveResult>;
-  loadCodexApiBaseUrl?(): Promise<WorkbenchCodexApiBaseUrlLoadResult>;
-  saveCodexApiBaseUrl?(
+  loadBaseUrl?(
+    endpointId: WorkbenchBaseUrlEndpointId,
+  ): Promise<WorkbenchBaseUrlLoadResult>;
+  saveBaseUrl?(
+    endpointId: WorkbenchBaseUrlEndpointId,
     baseUrl: string,
-  ): Promise<WorkbenchCodexApiBaseUrlSaveResult>;
+  ): Promise<WorkbenchBaseUrlSaveResult>;
   loadEndpointPreferences?(): Promise<WorkbenchEndpointPreferenceLoadResult>;
   saveEndpointPreference?(
     preference: WorkbenchFamilyEndpointPreference,
@@ -2013,9 +2062,9 @@ export function publicClaudePermissionHandlingUnavailable(): Extract<
   });
 }
 
-export function publicCodexApiBaseUrlLoaded(
+export function publicBaseUrlLoaded(
   baseUrl: string,
-): WorkbenchCodexApiBaseUrlLoadResult {
+): WorkbenchBaseUrlLoadResult {
   return Object.freeze({
     ok: true,
     status: "loaded",
@@ -2023,9 +2072,9 @@ export function publicCodexApiBaseUrlLoaded(
   });
 }
 
-export function publicCodexApiBaseUrlSaved(
+export function publicBaseUrlSaved(
   baseUrl: string,
-): WorkbenchCodexApiBaseUrlSaveResult {
+): WorkbenchBaseUrlSaveResult {
   return Object.freeze({
     ok: true,
     status: "saved",
@@ -2033,29 +2082,29 @@ export function publicCodexApiBaseUrlSaved(
   });
 }
 
-export function publicCodexApiBaseUrlRejected(
-  reason: WorkbenchCodexApiBaseUrlRejection,
-): Extract<WorkbenchCodexApiBaseUrlSaveResult, { readonly ok: false }> {
+export function publicBaseUrlRejected(
+  reason: WorkbenchBaseUrlRejection,
+): Extract<WorkbenchBaseUrlSaveResult, { readonly ok: false }> {
   return Object.freeze({
     ok: false,
     error: Object.freeze({
-      category: "codex-api-base-url-rejected",
+      category: "base-url-rejected",
       message: "That base URL cannot be used.",
       reason,
     }),
   });
 }
 
-export function publicCodexApiBaseUrlUnavailable(): Extract<
-  WorkbenchCodexApiBaseUrlLoadResult,
+export function publicBaseUrlUnavailable(): Extract<
+  WorkbenchBaseUrlLoadResult,
   { readonly ok: false }
 > {
   return Object.freeze({
     ok: false,
     error: Object.freeze({
-      category: "codex-api-base-url-unavailable",
+      category: "base-url-unavailable",
       message:
-        "The Codex · API base URL could not be loaded or saved. Keep the current value and try again.",
+        "The base URL could not be loaded or saved. Keep the current value and try again.",
     }),
   });
 }

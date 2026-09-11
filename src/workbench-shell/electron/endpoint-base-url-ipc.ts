@@ -1,70 +1,66 @@
 import { isValidEndpointBaseUrl } from "../../agent-runtime/claude/endpoint-env-factory.ts";
 import {
-  WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL,
-  WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
-  publicCodexApiBaseUrlLoaded,
-  publicCodexApiBaseUrlRejected,
-  publicCodexApiBaseUrlSaved,
-  publicCodexApiBaseUrlUnavailable,
+  WORKBENCH_BASE_URL_CHANNELS,
+  publicBaseUrlLoaded,
+  publicBaseUrlRejected,
+  publicBaseUrlSaved,
+  publicBaseUrlUnavailable,
+  type WorkbenchBaseUrlChannel,
+  type WorkbenchBaseUrlEndpointId,
 } from "../contract.ts";
-import { reconstructWorkbenchCodexApiBaseUrl } from "../result-sanitizer.ts";
+import { reconstructWorkbenchBaseUrl } from "../result-sanitizer.ts";
 
 type BoundaryListener = (...values: unknown[]) => unknown;
 
-export interface CodexApiBaseUrlRendererSender {
+export interface EndpointBaseUrlRendererSender {
   isDestroyed(): boolean;
   on(event: string, listener: BoundaryListener): void;
   removeListener(event: string, listener: BoundaryListener): void;
 }
 
-export interface CodexApiBaseUrlBrowserWindowBoundary {
-  readonly webContents: CodexApiBaseUrlRendererSender;
+export interface EndpointBaseUrlBrowserWindowBoundary {
+  readonly webContents: EndpointBaseUrlRendererSender;
   on(event: "closed", listener: BoundaryListener): void;
   removeListener(event: "closed", listener: BoundaryListener): void;
 }
 
-export interface CodexApiBaseUrlIpcMainBoundary {
-  handle(
-    channel:
-      | typeof WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL
-      | typeof WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
-    listener: BoundaryListener,
-  ): void;
-  removeHandler(
-    channel:
-      | typeof WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL
-      | typeof WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
-  ): void;
+export interface EndpointBaseUrlIpcMainBoundary {
+  handle(channel: WorkbenchBaseUrlChannel, listener: BoundaryListener): void;
+  removeHandler(channel: WorkbenchBaseUrlChannel): void;
 }
 
-export interface WorkbenchCodexApiBaseUrlSource {
-  readCodexApiBaseUrl(): Promise<string>;
-  saveCodexApiBaseUrl(baseUrl: string): Promise<string>;
+export interface WorkbenchEndpointBaseUrlSource {
+  readBaseUrl(): Promise<string>;
+  saveBaseUrl(baseUrl: string): Promise<string>;
 }
 
-export interface WorkbenchCodexApiBaseUrlIpcBinding {
+export interface WorkbenchEndpointBaseUrlIpcBinding {
   dispose(): void;
 }
 
 /**
- * IPC surface for the codex-api endpoint's provider base URL override
- * (ticket 21 follow-up, w223): same load/save shape as
+ * IPC surface for one base-URL endpoint's provider base URL override
+ * (ticket 21, w223; generalized with an endpoint dimension in w232 instead
+ * of being copied per endpoint): same load/save shape as
  * claude-permission-handling-ipc.ts, backed by the appearance preference
  * store instead of the safeStorage-encrypted endpoint secret envelope --
  * the value is plain user-typed text, not a secret.
  *
- * A blank draft clears the override (the OpenAI default applies) and is
- * never refused, mirroring the runtime-executable escape hatch. A non-blank
- * draft that is not `http(s)://` is refused at save time with a reason, and
- * never reaches the store -- no connectivity probe here (ticket scope).
+ * A blank draft clears the override (that endpoint's official default
+ * applies) and is never refused, mirroring the runtime-executable escape
+ * hatch. A non-blank draft that is not `http(s)://` is refused at save time
+ * with a reason, and never reaches the store -- no connectivity probe here
+ * (ticket scope).
  */
-export function installWorkbenchCodexApiBaseUrlIpc(options: {
-  readonly ipcMain: CodexApiBaseUrlIpcMainBoundary;
-  readonly window: CodexApiBaseUrlBrowserWindowBoundary;
-  readonly source: WorkbenchCodexApiBaseUrlSource;
-}): WorkbenchCodexApiBaseUrlIpcBinding {
+export function installWorkbenchEndpointBaseUrlIpc(options: {
+  readonly ipcMain: EndpointBaseUrlIpcMainBoundary;
+  readonly window: EndpointBaseUrlBrowserWindowBoundary;
+  readonly endpointId: WorkbenchBaseUrlEndpointId;
+  readonly source: WorkbenchEndpointBaseUrlSource;
+}): WorkbenchEndpointBaseUrlIpcBinding {
   let disposed = false;
   let actionOpen = true;
+  const channels = WORKBENCH_BASE_URL_CHANNELS[options.endpointId];
 
   const loadHandler: BoundaryListener = async (...values) => {
     const sender = owningSender(values[0], options.window);
@@ -74,16 +70,16 @@ export function installWorkbenchCodexApiBaseUrlIpc(options: {
       !actionOpen ||
       sender === undefined
     ) {
-      return publicCodexApiBaseUrlUnavailable();
+      return publicBaseUrlUnavailable();
     }
     try {
-      const baseUrl = await options.source.readCodexApiBaseUrl();
+      const baseUrl = await options.source.readBaseUrl();
       if (disposed || !actionOpen || sender.isDestroyed()) {
-        return publicCodexApiBaseUrlUnavailable();
+        return publicBaseUrlUnavailable();
       }
-      return publicCodexApiBaseUrlLoaded(baseUrl);
+      return publicBaseUrlLoaded(baseUrl);
     } catch {
-      return publicCodexApiBaseUrlUnavailable();
+      return publicBaseUrlUnavailable();
     }
   };
 
@@ -95,24 +91,25 @@ export function installWorkbenchCodexApiBaseUrlIpc(options: {
       !actionOpen ||
       sender === undefined
     ) {
-      return publicCodexApiBaseUrlUnavailable();
+      return publicBaseUrlUnavailable();
     }
-    const reconstructed = reconstructWorkbenchCodexApiBaseUrl(values[1]);
-    if (!reconstructed.ok) return publicCodexApiBaseUrlUnavailable();
+    const reconstructed = reconstructWorkbenchBaseUrl(values[1]);
+    if (!reconstructed.ok) return publicBaseUrlUnavailable();
     const trimmed = reconstructed.baseUrl.trim();
-    // An empty field clears the override and returns to the OpenAI default;
-    // clearing must never be refused (same rule as the runtime executables).
+    // An empty field clears the override and returns to that endpoint's
+    // default; clearing must never be refused (same rule as the runtime
+    // executables).
     if (trimmed.length > 0 && !isValidEndpointBaseUrl(trimmed)) {
-      return publicCodexApiBaseUrlRejected("invalid-url");
+      return publicBaseUrlRejected("invalid-url");
     }
     try {
-      const saved = await options.source.saveCodexApiBaseUrl(trimmed);
+      const saved = await options.source.saveBaseUrl(trimmed);
       if (disposed || !actionOpen || sender.isDestroyed()) {
-        return publicCodexApiBaseUrlUnavailable();
+        return publicBaseUrlUnavailable();
       }
-      return publicCodexApiBaseUrlSaved(saved);
+      return publicBaseUrlSaved(saved);
     } catch {
-      return publicCodexApiBaseUrlUnavailable();
+      return publicBaseUrlUnavailable();
     }
   };
 
@@ -120,8 +117,8 @@ export function installWorkbenchCodexApiBaseUrlIpc(options: {
     actionOpen = false;
   };
 
-  options.ipcMain.handle(WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL, loadHandler);
-  options.ipcMain.handle(WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL, saveHandler);
+  options.ipcMain.handle(channels.load, loadHandler);
+  options.ipcMain.handle(channels.save, saveHandler);
   // Captured while the window is still alive. Reading the `webContents`
   // getter on a destroyed BrowserWindow throws `Object has been destroyed`,
   // and dispose() runs from the window's own "closed" handler, where the
@@ -137,8 +134,8 @@ export function installWorkbenchCodexApiBaseUrlIpc(options: {
       if (disposed) return;
       disposed = true;
       actionOpen = false;
-      options.ipcMain.removeHandler(WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL);
-      options.ipcMain.removeHandler(WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL);
+      options.ipcMain.removeHandler(channels.load);
+      options.ipcMain.removeHandler(channels.save);
       rendererSender.removeListener(
         "render-process-gone",
         terminalLifecycleListener,
@@ -151,8 +148,8 @@ export function installWorkbenchCodexApiBaseUrlIpc(options: {
 
 function owningSender(
   value: unknown,
-  window: CodexApiBaseUrlBrowserWindowBoundary,
-): CodexApiBaseUrlRendererSender | undefined {
+  window: EndpointBaseUrlBrowserWindowBoundary,
+): EndpointBaseUrlRendererSender | undefined {
   try {
     if (typeof value !== "object" || value === null || !("sender" in value)) {
       return undefined;

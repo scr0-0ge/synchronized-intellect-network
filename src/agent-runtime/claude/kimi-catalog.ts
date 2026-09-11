@@ -122,6 +122,14 @@ export interface KimiEndpointConfiguration {
    * before (P2 fallback); a resolver that throws propagates loudly.
    */
   readonly resolveAuthToken?: () => string | undefined;
+  /**
+   * Live base-URL resolver backed by the Settings "Base URL (optional)"
+   * field (w232), same invocation discipline as `resolveAuthToken`: called
+   * once per session start, taking precedence over `baseUrl` / the
+   * environment variable / the contract default when it returns a
+   * non-empty string.
+   */
+  readonly resolveBaseUrl?: () => string | undefined;
   /** Isolated CLAUDE_CONFIG_DIR for every Kimi spawn (required). */
   readonly configDir: string;
   /** Source environment the token/base URL are read from (tests inject fakes). */
@@ -162,6 +170,7 @@ export function createKimiEndpointEnvironmentSource(
     return Object.freeze({
       mode: "glm" as const,
       baseUrl: firstNonEmpty(
+        configuration.resolveBaseUrl?.(),
         configuration.baseUrl,
         sourceEnvironment[KIMI_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar],
         KIMI_ENDPOINT_ENV_CONTRACT.defaultBaseUrl,

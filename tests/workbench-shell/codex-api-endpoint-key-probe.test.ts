@@ -18,11 +18,12 @@ import { CODEX_API_ENDPOINT_ENV_CONTRACT } from "../../src/agent-runtime/codex/e
 
 /**
  * w223: the Codex · API card's "Test connection" probe must honor the saved
- * Base URL override (main.ts's `codexApiBaseUrlOverride` mirror), the same
- * precedence `prepareEndpoint()` uses -- otherwise a user pointed at their
- * own gateway would still get probed against the OpenAI default. This
- * reproduces main.ts's exact `probeBaseUrl` resolver in isolation (no
- * Electron); every network path is a fake fetch, no real network call.
+ * Base URL override (main.ts's `baseUrlOverrides["codex-api"]` mirror, one
+ * slot of the w232-generalized per-endpoint record), the same precedence
+ * `prepareEndpoint()` uses -- otherwise a user pointed at their own gateway
+ * would still get probed against the OpenAI default. This reproduces
+ * main.ts's exact `probeBaseUrl` resolver in isolation (no Electron); every
+ * network path is a fake fetch, no real network call.
  */
 
 const workspaceDirectories: string[] = [];

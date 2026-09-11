@@ -11,6 +11,7 @@ import {
   type Component,
 } from "solid-js";
 import {
+  type WorkbenchBaseUrlEndpointId,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchConfigurableRuntime,
   type WorkbenchRuntimeExecutablePaths,
@@ -37,7 +38,7 @@ import {
 } from "./appearance-preference-state.ts";
 import type { WorkbenchClaudePermissionHandlingPersistencePhase } from "./claude-permission-handling-state.ts";
 import type { WorkbenchEndpointKeyPanel } from "./endpoint-key-state.ts";
-import type { WorkbenchCodexApiBaseUrlPanel } from "./codex-api-base-url-state.ts";
+import type { WorkbenchEndpointBaseUrlPanel } from "./endpoint-base-url-state.ts";
 import {
   directEndpointStatusRows,
   directFacadeEndpointStatusRows,
@@ -83,6 +84,7 @@ import {
   cliUpdateCopy,
   familyFacadeCopy,
   workbenchEndpointKeyCopy,
+  workbenchBaseUrlCopy,
   type ProviderGroupHeading,
   type WorkbenchEndpointKeyCopyEndpointId,
 } from "./copy/settings-copy.ts";
@@ -286,11 +288,15 @@ export const SettingsScreen: Component<{
     Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
   >;
   /**
-   * The Codex · API card's "Base URL (optional)" field (w223). Present only
-   * when the bridge exposes the codex-api-base-url channels; rendered inside
-   * the Codex · API segment, below the API key row.
+   * The GLM / DeepSeek / Kimi Code / Codex · API cards' "Base URL (optional)"
+   * field (ticket 21/w223 shipped Codex · API alone; w232 generalizes to all
+   * four). Present only when the bridge exposes the base-url channels for
+   * that endpoint; rendered below each endpoint's API key row (Kimi Code:
+   * only on the Code segment of the merged Kimi card).
    */
-  readonly codexApiBaseUrl?: WorkbenchCodexApiBaseUrlPanel;
+  readonly endpointBaseUrlPanels?: Partial<
+    Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>
+  >;
   /**
    * Catalog freshness for the static-key endpoints (ticket 14): present
    * only when the bridge exposes the freshness channels. Renders the
@@ -631,7 +637,7 @@ export const SettingsScreen: Component<{
                 rows={endpointGroups().catalogAvailable}
                 authentication={authentication()}
                 endpointKeyPanels={props.endpointKeyPanels}
-                codexApiBaseUrl={props.codexApiBaseUrl}
+                endpointBaseUrlPanels={props.endpointBaseUrlPanels}
                 catalogFreshness={props.catalogFreshness}
                 cliUpdate={cliUpdatePanel()}
                 familySideRows={familySideRows()}
@@ -653,7 +659,7 @@ export const SettingsScreen: Component<{
                 rows={endpointGroups().catalogUnavailable}
                 authentication={authentication()}
                 endpointKeyPanels={props.endpointKeyPanels}
-                codexApiBaseUrl={props.codexApiBaseUrl}
+                endpointBaseUrlPanels={props.endpointBaseUrlPanels}
                 catalogFreshness={props.catalogFreshness}
                 cliUpdate={cliUpdatePanel()}
                 familySideRows={familySideRows()}
@@ -675,7 +681,7 @@ export const SettingsScreen: Component<{
                 rows={endpointGroups().notInspected}
                 authentication={authentication()}
                 endpointKeyPanels={props.endpointKeyPanels}
-                codexApiBaseUrl={props.codexApiBaseUrl}
+                endpointBaseUrlPanels={props.endpointBaseUrlPanels}
                 catalogFreshness={props.catalogFreshness}
                 cliUpdate={cliUpdatePanel()}
                 familySideRows={familySideRows()}
@@ -1069,7 +1075,9 @@ const ProviderGroup: Component<{
   readonly endpointKeyPanels?: Partial<
     Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
   >;
-  readonly codexApiBaseUrl?: WorkbenchCodexApiBaseUrlPanel;
+  readonly endpointBaseUrlPanels?: Partial<
+    Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>
+  >;
   readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
   readonly cliUpdate?: WorkbenchCliUpdatePanel;
   readonly familySideRows: FamilySideRows;
@@ -1125,6 +1133,7 @@ const ProviderGroup: Component<{
                     row={row}
                     authentication={props.authentication[row.endpointId]}
                     endpointKeyPanels={props.endpointKeyPanels}
+                    endpointBaseUrlPanels={props.endpointBaseUrlPanels}
                     catalogFreshness={props.catalogFreshness}
                     cliUpdate={props.cliUpdate}
                     executablePath={props.runtimeExecutables?.[row.runtime]}
@@ -1149,8 +1158,10 @@ const ProviderGroup: Component<{
                       onPreference={props.onEndpointPreference}
                       authentication={props.authentication}
                       endpointKeyPanels={props.endpointKeyPanels}
-                      codexApiBaseUrl={
-                        family === "codex" ? props.codexApiBaseUrl : undefined
+                      endpointBaseUrlPanel={
+                        family === "codex"
+                          ? props.endpointBaseUrlPanels?.["codex-api"]
+                          : undefined
                       }
                       catalogFreshness={props.catalogFreshness}
                       cliUpdate={props.cliUpdate}
@@ -1171,6 +1182,7 @@ const ProviderGroup: Component<{
                     preference={preferences().kimi}
                     onPreference={props.onEndpointPreference}
                     endpointKeyPanels={props.endpointKeyPanels}
+                    endpointBaseUrlPanel={props.endpointBaseUrlPanels?.["kimi-code"]}
                     catalogFreshness={props.catalogFreshness}
                   />
                 </Show>
@@ -1205,6 +1217,8 @@ const KimiFacadeProviderCard: Component<{
   readonly endpointKeyPanels?: Partial<
     Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
   >;
+  /** Kimi Code side only (w232); never shown on the Kimi Platform side. */
+  readonly endpointBaseUrlPanel?: WorkbenchEndpointBaseUrlPanel;
   readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
 }> = (props) => {
   const headingId = "provider-kimi-heading";
@@ -1312,6 +1326,11 @@ const KimiFacadeProviderCard: Component<{
             />
           )}
         </Show>
+        <Show when={props.preference === "kimi-code" && props.endpointBaseUrlPanel}>
+          {(panel) => (
+            <EndpointBaseUrlControls endpointId="kimi-code" panel={panel()} />
+          )}
+        </Show>
         <Show when={endpointFreshnessReport()}>
           {(report) => (
             <EndpointCatalogFreshnessControls
@@ -1353,7 +1372,8 @@ const SubscriptionFacadeProviderCard: Component<{
   readonly endpointKeyPanels?: Partial<
     Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
   >;
-  readonly codexApiBaseUrl?: WorkbenchCodexApiBaseUrlPanel;
+  /** codex-api side only (w223/w232); never on the claude-api side. */
+  readonly endpointBaseUrlPanel?: WorkbenchEndpointBaseUrlPanel;
   readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
   readonly cliUpdate?: WorkbenchCliUpdatePanel;
   readonly executablePath?: WorkbenchRuntimeExecutablePaths;
@@ -1426,9 +1446,9 @@ const SubscriptionFacadeProviderCard: Component<{
   };
   // codex-api only, same slot as the API key row -- never on the desktop
   // subscription side, and never for the Claude · API card.
-  const codexApiBaseUrlPanel = (): WorkbenchCodexApiBaseUrlPanel | undefined => {
+  const codexApiBaseUrlPanel = (): WorkbenchEndpointBaseUrlPanel | undefined => {
     if (onSubscriptionSide() || props.family !== "codex") return undefined;
-    return props.codexApiBaseUrl;
+    return props.endpointBaseUrlPanel;
   };
   // Catalog freshness is enrolled only for GLM and DeepSeek; Kimi Code has no
   // verified zero-inference models-list route, and claude-api/codex-api are not
@@ -1689,7 +1709,9 @@ const SubscriptionFacadeProviderCard: Component<{
           )}
         </Show>
         <Show when={codexApiBaseUrlPanel()}>
-          {(panel) => <CodexApiBaseUrlControls panel={panel()} />}
+          {(panel) => (
+            <EndpointBaseUrlControls endpointId="codex-api" panel={panel()} />
+          )}
         </Show>
         <Show when={cliUpdateEntry()}>
           {(entry) => (
@@ -1943,6 +1965,10 @@ const ProviderCard: Component<{
   readonly endpointKeyPanels?: Partial<
     Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
   >;
+  /** GLM Coding Plan / DeepSeek API only (w232); other rows never match their id. */
+  readonly endpointBaseUrlPanels?: Partial<
+    Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>
+  >;
   readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
   readonly cliUpdate?: WorkbenchCliUpdatePanel;
   readonly executablePath?: string;
@@ -1978,6 +2004,16 @@ const ProviderCard: Component<{
     const endpointId = props.row.endpointId as WorkbenchEndpointKeyCopyEndpointId;
     const panel = panels[endpointId];
     return panel === undefined ? undefined : { endpointId, panel };
+  };
+  const endpointBaseUrlPanel = (): WorkbenchEndpointBaseUrlPanel | undefined => {
+    const endpointId = props.row.endpointId;
+    if (
+      endpointId !== "glm-coding-plan" &&
+      endpointId !== "deepseek-api"
+    ) {
+      return undefined;
+    }
+    return props.endpointBaseUrlPanels?.[endpointId];
   };
   const endpointFreshnessReport = ():
     | WorkbenchEndpointCatalogFreshnessReport
@@ -2181,6 +2217,14 @@ const ProviderCard: Component<{
             <EndpointKeyControls
               endpointId={entry().endpointId}
               panel={entry().panel}
+            />
+          )}
+        </Show>
+        <Show when={endpointBaseUrlPanel()}>
+          {(panel) => (
+            <EndpointBaseUrlControls
+              endpointId={props.row.endpointId as WorkbenchBaseUrlEndpointId}
+              panel={panel()}
             />
           )}
         </Show>
@@ -2688,63 +2732,68 @@ const EndpointKeyControls: Component<{
 };
 
 /**
- * The Codex · API card's "Base URL (optional)" field (w223): plain text, not
- * a secret, so it renders below the API key row instead of inside it. Empty
- * means the OpenAI default applies; a non-blank draft is validated for
- * http(s):// shape only, at save time, main-process side -- no connectivity
- * probe here (out of scope for this field).
+ * A base-URL endpoint card's "Base URL (optional)" field (ticket 21/w223
+ * shipped Codex · API alone; w232 generalizes the same control across GLM,
+ * DeepSeek, Kimi Code and Codex · API instead of copying it four times):
+ * plain text, not a secret, so it renders below the API key row instead of
+ * inside it. Empty means that endpoint's own official default applies; a
+ * non-blank draft is validated for http(s):// shape only, at save time,
+ * main-process side -- no connectivity probe here (out of scope for this
+ * field).
  */
-const CodexApiBaseUrlControls: Component<{
-  readonly panel: WorkbenchCodexApiBaseUrlPanel;
+const EndpointBaseUrlControls: Component<{
+  readonly endpointId: WorkbenchBaseUrlEndpointId;
+  readonly panel: WorkbenchEndpointBaseUrlPanel;
 }> = (props) => {
-  const inputId = "codex-api-base-url-input";
+  const copy = () => workbenchBaseUrlCopy(props.endpointId);
+  const inputId = () => `endpoint-base-url-input-${props.endpointId}`;
   const statusLabel = () =>
     props.panel.savedBaseUrl.length > 0
       ? props.panel.savedBaseUrl
-      : settingsCopy.codexApiBaseUrlNotSetLabel;
+      : copy().notSetLabel;
   const feedbackSentence = () => {
     switch (props.panel.feedback) {
       case "save-invalid":
-        return settingsCopy.codexApiBaseUrlInvalidSentence;
+        return copy().invalidSentence;
       case "save-failed":
-        return settingsCopy.codexApiBaseUrlSaveFailedSentence;
+        return copy().saveFailedSentence;
       case null:
         return null;
     }
   };
   return (
-    <div class="provider-binding-copy codex-api-base-url-copy">
-      <span class="provider-binding-status codex-api-base-url-status" role="status">
-        <span>{settingsCopy.codexApiBaseUrlSavedLabel}</span>
+    <div class="provider-binding-copy endpoint-base-url-copy">
+      <span class="provider-binding-status endpoint-base-url-status" role="status">
+        <span>{copy().savedLabel}</span>
         <strong>{statusLabel()}</strong>
       </span>
-      <p>{settingsCopy.codexApiBaseUrlHint}</p>
-      <div class="endpoint-key-entry codex-api-base-url-entry">
-        <label for={inputId}>{settingsCopy.codexApiBaseUrlLabel}</label>
+      <p>{copy().hint}</p>
+      <div class="endpoint-key-entry endpoint-base-url-entry">
+        <label for={inputId()}>{copy().label}</label>
         <input
-          id={inputId}
+          id={inputId()}
           type="text"
           autocomplete="off"
           spellcheck={false}
-          placeholder={settingsCopy.codexApiBaseUrlPlaceholder}
+          placeholder={copy().placeholder}
           value={props.panel.draft}
           disabled={props.panel.busy}
           onInput={(event) => props.panel.onDraft(event.currentTarget.value)}
         />
       </div>
-      <div class="provider-binding-actions codex-api-base-url-actions">
+      <div class="provider-binding-actions endpoint-base-url-actions">
         <button
           type="button"
           class="btn sm"
           disabled={props.panel.busy}
           onClick={() => props.panel.onSave()}
         >
-          {settingsCopy.codexApiBaseUrlSaveAction}
+          {copy().saveAction}
         </button>
       </div>
       <Show when={feedbackSentence()}>
         {(sentence) => (
-          <p class="codex-api-base-url-feedback" role="alert">
+          <p class="endpoint-base-url-feedback" role="alert">
             {sentence()}
           </p>
         )}
