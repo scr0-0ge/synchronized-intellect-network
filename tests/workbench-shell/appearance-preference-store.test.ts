@@ -155,7 +155,7 @@ test("Ask when needed survives a clean restart without resetting appearance and 
     "ask-when-needed",
   );
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 9,
+    schemaVersion: 10,
     appearance: {
       tone: "dark",
       crt: "blocks",
@@ -251,7 +251,7 @@ test("family endpoint preferences round-trip per family, default from a v4 docum
     kimi: "kimi-platform",
   });
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 9,
+    schemaVersion: 10,
     appearance: {
       tone: "light",
       crt: "full",
@@ -345,7 +345,7 @@ test("a v6 document's kimiEndpointPreference migrates into the endpointPreferenc
   // The next write upgrades the document to the v7 family record.
   await store.saveEndpointPreference("codex-api");
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 9,
+    schemaVersion: 10,
     appearance: {
       tone: "light",
       crt: "full",
@@ -478,7 +478,7 @@ test("one exact non-default appearance survives a clean store restart and cannot
   assert.equal(
     await readFile(appearancePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 9,
+      schemaVersion: 10,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
       endpointPreference: {
@@ -699,7 +699,7 @@ test("close flushes an in-flight appearance save and rejects every later operati
   assert.equal(
     await readFile(filePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 9,
+      schemaVersion: 10,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
       endpointPreference: {
@@ -780,7 +780,7 @@ test("each base-URL endpoint defaults empty, round-trips independently, and surv
   await store.close();
 });
 
-test("a v7 document migrates to v9 with every endpointBaseUrls slot defaulted empty, and a save upgrades the bytes on disk", async (t) => {
+test("a v7 document migrates with every endpointBaseUrls slot defaulted empty, and a save upgrades the bytes on disk to v10", async (t) => {
   const directory = await createTestDirectory(
     t,
     join(tmpdir(), "workbench-appearance-"),
@@ -805,7 +805,7 @@ test("a v7 document migrates to v9 with every endpointBaseUrls slot defaulted em
 
   await store.saveBaseUrl("codex-api", "https://gateway.example.com/v1");
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 9,
+    schemaVersion: 10,
     appearance: defaultWorkbenchAppearancePreference,
     claudePermissionHandling: "without-asking",
     endpointPreference: {
@@ -859,7 +859,7 @@ test("a v8 document's codexApiBaseUrl migrates into the endpointBaseUrls record'
 
   await store.saveBaseUrl("kimi-code", "https://kimi.example.com/coding/");
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 9,
+    schemaVersion: 10,
     appearance: defaultWorkbenchAppearancePreference,
     claudePermissionHandling: "without-asking",
     endpointPreference: {
@@ -873,6 +873,59 @@ test("a v8 document's codexApiBaseUrl migrates into the endpointBaseUrls record'
       "deepseek-api": "",
       "kimi-code": "https://kimi.example.com/coding/",
       "codex-api": "https://old-gateway.example.com/v1",
+    },
+  });
+  await store.close();
+});
+
+// w234 follow-up: a pre-existing v9 document (w232's shape, no usageObservations
+// key) must keep reading with an empty usage map, and the next write upgrades
+// it to v10 without inventing an empty usageObservations key on disk.
+test("a v9 document migrates to v10 with an empty usage-observation map, and a save upgrades the bytes on disk", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const filePath = join(directory, "v9-migration.json");
+  const v9Bytes = `${JSON.stringify({
+    schemaVersion: 9,
+    appearance: defaultWorkbenchAppearancePreference,
+    claudePermissionHandling: "without-asking",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-desktop",
+      kimi: "kimi-code",
+    },
+    runtimeExecutables: { codex: "", claude: "" },
+    endpointBaseUrls: {
+      "glm-coding-plan": "",
+      "deepseek-api": "",
+      "kimi-code": "",
+      "codex-api": "https://gateway.example.com/v1",
+    },
+  })}\n`;
+  await writeFile(filePath, v9Bytes, "utf8");
+  const store = createRegisteredAppearancePreferenceStore(t, { filePath });
+
+  assert.deepEqual(await store.readUsageObservations(), {});
+  assert.equal(await readFile(filePath, "utf8"), v9Bytes);
+
+  await store.saveClaudePermissionHandling("ask-when-needed");
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
+    schemaVersion: 10,
+    appearance: defaultWorkbenchAppearancePreference,
+    claudePermissionHandling: "ask-when-needed",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-desktop",
+      kimi: "kimi-code",
+    },
+    runtimeExecutables: { codex: "", claude: "" },
+    endpointBaseUrls: {
+      "glm-coding-plan": "",
+      "deepseek-api": "",
+      "kimi-code": "",
+      "codex-api": "https://gateway.example.com/v1",
     },
   });
   await store.close();

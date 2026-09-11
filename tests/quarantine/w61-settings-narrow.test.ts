@@ -130,3 +130,44 @@ test(
     }
   },
 );
+
+// w233. The owner's acceptance for the reorganised page: at each of the four
+// widths he named, no control on the Settings page is cut off. This is the
+// clip half only, and deliberately so. A button that ran PAST the scrolling
+// `.settings` edge would not be clipped but would be a horizontal scrollbar;
+// that cannot be asserted from what the harness reports today, because every
+// text box is truncated to the viewport before it is returned
+// (in-page-program.js `visibleClip`), so a label past the edge measures as
+// ending exactly at it -- an assertion on it could never go red. The
+// scroll-width reading that would see it belongs to the harness, not here.
+test(
+  "w233: no Settings control is clipped out of reach at 360, 620, 900 and 1440",
+  async (t) => {
+    const server = await startSurfaceServer();
+    t.after(async () => server.close());
+
+    for (const width of [360, 620, 900, 1440]) {
+      const surface = await measureSurface(server, {
+        surfaceId: `w233-control-reach-${width}`,
+        query: "?surface=settings",
+        readySelector: ".settings",
+        viewport: { width, height: viewportHeight },
+      });
+      const settings = extent(surface, ".settings").rect!;
+      const inner = extent(surface, ".settings-inner").rect!;
+      assert.ok(
+        inner.left >= settings.left - 0.5 &&
+          inner.left + inner.width <= settings.left + settings.width + 0.5,
+        `the Settings column leaves the Settings overlay at ${width}px`,
+      );
+      assert.deepEqual(
+        surface.clippedControls,
+        [],
+        `a Settings control is clipped out of reach at ${width}px: ` +
+          surface.clippedControls
+            .map((entry) => `${entry.label} lost ${entry.hiddenTotal}px to ${entry.clipper}`)
+            .join("; "),
+      );
+    }
+  },
+);

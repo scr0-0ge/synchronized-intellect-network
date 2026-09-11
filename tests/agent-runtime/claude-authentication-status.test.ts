@@ -276,9 +276,11 @@ test("repeated exit-1 subscription reads move Settings from Unknown / Re-check s
     const initialPresentation = settingsSubscriptionAuthenticationPresentation(
       initial["claude-code-desktop"]!,
     );
+    // The renderer's verb is "Check sign-in" since w233 (one verb root on the
+    // page); the coordinator's model-level card below keeps its own label.
     assert.deepEqual(
       [initialPresentation.label, initialPresentation.actionLabel],
-      ["Unknown", "Re-check sign-in"],
+      ["Unknown", "Check sign-in"],
     );
     const initialCard = coordinator.renderSettings().cards[1];
     assert.deepEqual(

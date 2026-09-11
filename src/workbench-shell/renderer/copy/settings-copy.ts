@@ -2,7 +2,6 @@ import {
   createLocaleCopy,
   currentLocaleCopy,
   defineCopyLocaleDictionaries,
-  subscribeLocale,
   type LocalizedShape,
 } from "../locale.ts";
 
@@ -11,20 +10,20 @@ const englishCopy = {
   settingsCopy: {
     title: "Settings",
     closeAria: "Close Settings",
-    lede: "Inspect the sanitized status reported by existing Agent Runtime endpoints and adjust this Workbench installation’s settings.",
+    lede: "Providers, tools and appearance for this Workbench.",
     providersHeading: "Providers",
-    readingCatalogs: "Reading catalogs…",
-    readCatalogs: "Read catalogs",
-    recheckAll: "Re-check all",
-    credentialHeading: "Subscription credentials never pass through the Workbench",
+    readingCatalogs: "Checking…",
+    readCatalogs: "Check",
+    recheckAll: "Check all",
+    /* One line under the Providers heading; the full policy sits behind
+       "Details" so the page does not open with a paragraph of it. */
+    credentialHeading:
+      "Subscription sign-in stays in each provider's own app; API keys are stored encrypted on this device.",
     credentialSentence:
       "Subscription sign-in happens in each provider's own app. This page never asks for a subscription password or token, never reads a subscription credential file, and never stores subscription credentials. The exceptions — the API keys of the API-key endpoints — are each disclosed in that provider's API key section below.",
-    catalogAvailableHeading: "Catalog available",
-    catalogUnavailableHeading: "Catalog unavailable",
-    notCheckedHeading: "Not checked",
-    otherProvidersHeading: "Other providers",
-    otherProvidersSentence: "No other providers are configured in this build.",
-    statusMeaningsHeading: "Status meanings",
+    detailsSummary: "Details",
+    /* The page-foot line for a machine with nothing to recover. */
+    recoveryFootLabel: "Data recovery",
     claudePermissionsHeading: "Claude permissions",
     permissionHandlingLabel: "Permission handling",
     permissionHandlingHint:
@@ -70,6 +69,14 @@ const englishCopy = {
     catalogUnavailableValue: "Unavailable",
     modelsFactLabel: "Models",
     subscriptionSignIn: "Subscription sign-in",
+    /* w233. Every state word a person actually reads on a card. The internal
+       discovery categories stay in the collapsed details. */
+    badgeReady: "Ready",
+    badgeSignInNeeded: "Sign-in needed",
+    badgeApiKeyNeeded: "API key needed",
+    badgeCliMissing: "CLI missing",
+    badgeCheckFailed: "Check failed",
+    badgeNotChecked: "Not checked",
     confirmationSentence:
       "Recorded conversations stay in the Workbench. Resumable Sessions for this provider will no longer be resumable when this authentication action begins.",
     confirmLogout: "Ask the provider CLI to log out",
@@ -127,7 +134,7 @@ const englishCopy = {
       revealAction: "Reveal key",
       hideRevealAction: "Hide key",
       removeAction: "Remove key",
-      probeAction: "Test connection",
+      probeAction: "Check connection",
       statusLoadingLabel: "Checking stored key…",
       notConfiguredLabel: "No key saved",
       configuredLabel: "Key saved",
@@ -202,6 +209,26 @@ const englishCopy = {
     segmentsLabel: (runtimeFamilyLabel: string): string =>
       `${runtimeFamilyLabel} backend`,
   },
+  /**
+   * w233 step 2: the Tools section. One row per CLI the Workbench drives --
+   * version, where it is, Install, Update and the custom-path escape hatch --
+   * so no provider card repeats them. The version is only ever what a report
+   * or an install actually returned; "unknown" is the honest default.
+   */
+  toolsCopy: {
+    heading: "Tools",
+    claudeName: "Claude Code CLI",
+    codexName: "Codex CLI",
+    versionLabel: "Version",
+    versionUnknown: "unknown",
+    found: "Found",
+    notFound: "Not found",
+    notChecked: "Not checked",
+    checkFailed: "Check failed",
+    customPathSummary: "Custom path",
+    providerHint: (cliName: string): string =>
+      `Install or locate the ${cliName} under Tools.`,
+  },
   bindingStatusAriaCopy: (
     runtimeFamilyLabel: string,
     stateLabel: string,
@@ -244,7 +271,7 @@ const englishCopy = {
       currentVersion: string,
       availableVersion: string,
     ): string => `A new version is available: ${currentVersion} → ${availableVersion}.`,
-    checkAndUpdateAction: "Check and update",
+    checkAndUpdateAction: "Update",
     updateAction: "Update",
     runningAction: "Updating…",
     succeededSentence:
@@ -256,7 +283,7 @@ const englishCopy = {
       "The app could not restart itself. You can keep using it; new sessions will use the new version.",
     checkFailedSentence:
       "Could not check whether a newer version is available. Check again for current version information.",
-    checkAgainAction: "Check for updates again",
+    checkAgainAction: "Check updates again",
     checkingAction: "Checking…",
     failedTimeoutSentence:
       "The update did not finish in time. Nothing was changed.",
@@ -305,44 +332,11 @@ const englishCopy = {
     projectCount: number,
   ): string =>
     `Resumable Sessions: ${resumableSessionCount}; Projects: ${projectCount}`,
-  settingsOtherProvidersCopy:
-    "No other providers are configured in this build.",
-  providerGroupHeadingCopy: {
-    catalogAvailable: "Catalog available",
-    catalogUnavailable: "Catalog unavailable",
-    notChecked: "Not checked",
-  },
   settingsTopLevelSectionLabels: [
-    "Providers",
-    "Claude permissions",
     "Appearance",
-  ],
-  settingsProviderStatusMeaningsData: [
-    {
-      category: "catalog-ready",
-      label: "Connected",
-      detail: "Catalog available.",
-    },
-    {
-      category: "authentication-required",
-      label: "Sign-in required",
-      detail: "The runtime requires its official sign-in flow.",
-    },
-    {
-      category: "inspection-failed",
-      label: "Inspection failed",
-      detail: "The catalog could not be read.",
-    },
-    {
-      category: "runtime-not-located",
-      label: "Not found",
-      detail: "The runtime was not located on this device.",
-    },
-    {
-      category: "not-inspected",
-      label: "Not checked",
-      detail: "The endpoint has not been inspected yet.",
-    },
+    "Providers",
+    "Tools",
+    "Claude permissions",
   ],
   appearancePersistenceLabels: {
     hydrating: "Loading · This user on this device",
@@ -358,10 +352,10 @@ const englishCopy = {
     signInRequiredDetail:
       "The provider CLI reports that subscription sign-in is required.",
     unknownDetail:
-      "Subscription sign-in could not be verified. Re-check before taking an authentication action.",
+      "Subscription sign-in could not be verified. Check sign-in before logging in or out.",
     logoutAction: "Log out",
     loginAction: "Login",
-    recheckAction: "Re-check sign-in",
+    recheckAction: "Check sign-in",
     loginBlocked: "Login is blocked.",
     blockerAccepted: "Accepted",
     blockerStarting: "Starting",
@@ -369,7 +363,7 @@ const englishCopy = {
     blockerRecoveryRequired: "Recovery required",
     blockerUnknown: "Unknown",
     inspectingFeedback:
-      "Asking the provider CLI to re-check subscription sign-in...",
+      "Asking the provider CLI to check subscription sign-in...",
     preparingLogoutFeedback: "Checking whether Log out can begin...",
     preparingLoginFeedback: "Checking whether Login can begin...",
     actingLogoutFeedback: "Asking the provider CLI to log out...",
@@ -393,20 +387,16 @@ const simplifiedChineseCopy = {
   settingsCopy: {
     title: "设置",
     closeAria: "关闭设置",
-    lede: "查看现有智能体运行时端点报告的净化状态，并调整此 Workbench 安装的设置。",
+    lede: "此 Workbench 的提供方、工具与外观。",
     providersHeading: "提供方",
-    readingCatalogs: "正在读取目录…",
-    readCatalogs: "读取目录",
-    recheckAll: "全部重新检查",
-    credentialHeading: "订阅凭据绝不经过 Workbench",
+    readingCatalogs: "正在检查…",
+    readCatalogs: "检查",
+    recheckAll: "全部检查",
+    credentialHeading: "订阅登录在各提供方自己的应用中完成；API 密钥加密保存在本机。",
     credentialSentence:
       "订阅登录在各提供方自己的应用中完成。此页面绝不会索取订阅密码或令牌，不会读取订阅凭据文件，也不会存储订阅凭据。例外——各 API 密钥端点的 API 密钥——在下文对应提供方的 API 密钥区块中如实说明。",
-    catalogAvailableHeading: "目录可用",
-    catalogUnavailableHeading: "目录不可用",
-    notCheckedHeading: "尚未检查",
-    otherProvidersHeading: "其他提供方",
-    otherProvidersSentence: "此版本未配置其他提供方。",
-    statusMeaningsHeading: "状态说明",
+    detailsSummary: "详情",
+    recoveryFootLabel: "数据恢复",
     claudePermissionsHeading: "Claude 权限",
     permissionHandlingLabel: "权限确认方式",
     permissionHandlingHint:
@@ -451,6 +441,12 @@ const simplifiedChineseCopy = {
     catalogUnavailableValue: "不可用",
     modelsFactLabel: "模型",
     subscriptionSignIn: "订阅登录",
+    badgeReady: "可用",
+    badgeSignInNeeded: "需要登录",
+    badgeApiKeyNeeded: "需要 API 密钥",
+    badgeCliMissing: "没装 CLI",
+    badgeCheckFailed: "检查失败",
+    badgeNotChecked: "尚未检查",
     confirmationSentence:
       "已记录的对话会保留在 Workbench 中。开始此身份验证操作后，此提供方的可继续会话将无法继续。",
     confirmLogout: "要求提供方 CLI 退出登录",
@@ -495,7 +491,7 @@ const simplifiedChineseCopy = {
       revealAction: "显示密钥",
       hideRevealAction: "隐藏密钥",
       removeAction: "删除密钥",
-      probeAction: "测试连接",
+      probeAction: "检查连接",
       statusLoadingLabel: "正在检查已存密钥…",
       notConfiguredLabel: "未保存密钥",
       configuredLabel: "已保存密钥",
@@ -564,6 +560,19 @@ const simplifiedChineseCopy = {
     segmentsLabel: (runtimeFamilyLabel: string): string =>
       `${runtimeFamilyLabel} 后端`,
   },
+  toolsCopy: {
+    heading: "工具",
+    claudeName: "Claude Code CLI",
+    codexName: "Codex CLI",
+    versionLabel: "版本",
+    versionUnknown: "未知",
+    found: "已找到",
+    notFound: "未找到",
+    notChecked: "尚未检查",
+    checkFailed: "检查失败",
+    customPathSummary: "自定义路径",
+    providerHint: (cliName: string): string => `请到“工具”安装或指定 ${cliName}。`,
+  },
   bindingStatusAriaCopy: (
     runtimeFamilyLabel: string,
     stateLabel: string,
@@ -590,7 +599,7 @@ const simplifiedChineseCopy = {
       currentVersion: string,
       availableVersion: string,
     ): string => `有新版本可用：${currentVersion} → ${availableVersion}。`,
-    checkAndUpdateAction: "检查并更新",
+    checkAndUpdateAction: "更新",
     updateAction: "更新",
     runningAction: "正在更新…",
     succeededSentence: "更新完成。下一个新会话将启动新版本；现有会话不会切换版本。",
@@ -600,7 +609,7 @@ const simplifiedChineseCopy = {
     relaunchFailedSentence:
       "应用无法自行重启。你可以继续使用它；新会话将使用新版本。",
     checkFailedSentence: "无法检查是否有更新版本。请重新检查以获取当前版本信息。",
-    checkAgainAction: "重新检查更新",
+    checkAgainAction: "检查更新",
     checkingAction: "正在检查…",
     failedTimeoutSentence: "更新超时未完成。没有任何更改。",
     failedLaunchSentence: "无法启动更新命令。没有任何更改。",
@@ -631,40 +640,7 @@ const simplifiedChineseCopy = {
     projectCount: number,
   ): string =>
     `可继续会话：${resumableSessionCount}；项目：${projectCount}`,
-  settingsOtherProvidersCopy: "此版本未配置其他提供方。",
-  providerGroupHeadingCopy: {
-    catalogAvailable: "目录可用",
-    catalogUnavailable: "目录不可用",
-    notChecked: "尚未检查",
-  },
-  settingsTopLevelSectionLabels: ["提供方", "Claude 权限", "外观"],
-  settingsProviderStatusMeaningsData: [
-    {
-      category: "catalog-ready",
-      label: "已连接",
-      detail: "目录可用。",
-    },
-    {
-      category: "authentication-required",
-      label: "需要登录",
-      detail: "运行时要求使用其官方登录流程。",
-    },
-    {
-      category: "inspection-failed",
-      label: "检查失败",
-      detail: "无法读取目录。",
-    },
-    {
-      category: "runtime-not-located",
-      label: "未找到",
-      detail: "在此设备上未找到运行时。",
-    },
-    {
-      category: "not-inspected",
-      label: "尚未检查",
-      detail: "尚未检查此端点。",
-    },
-  ],
+  settingsTopLevelSectionLabels: ["外观", "提供方", "工具", "Claude 权限"],
   appearancePersistenceLabels: {
     hydrating: "正在加载 · 此设备上的当前用户",
     saving: "正在保存 · 此设备上的当前用户",
@@ -677,17 +653,17 @@ const simplifiedChineseCopy = {
     unknownLabel: "未知",
     boundDetail: "提供方 CLI 报告已绑定订阅登录。",
     signInRequiredDetail: "提供方 CLI 报告需要订阅登录。",
-    unknownDetail: "无法验证订阅登录。执行身份验证操作前请重新检查。",
+    unknownDetail: "无法验证订阅登录。登录或退出前请先检查登录。",
     logoutAction: "退出登录",
     loginAction: "登录",
-    recheckAction: "重新检查登录",
+    recheckAction: "检查登录",
     loginBlocked: "登录已被阻止。",
     blockerAccepted: "已接受",
     blockerStarting: "正在启动",
     blockerRunning: "运行中",
     blockerRecoveryRequired: "需要恢复",
     blockerUnknown: "未知",
-    inspectingFeedback: "正在要求提供方 CLI 重新检查订阅登录...",
+    inspectingFeedback: "正在要求提供方 CLI 检查订阅登录...",
     preparingLogoutFeedback: "正在检查是否可以退出登录...",
     preparingLoginFeedback: "正在检查是否可以登录...",
     actingLogoutFeedback: "正在要求提供方 CLI 退出登录...",
@@ -742,26 +718,19 @@ export function authConsequencesCopy(
   );
 }
 
-export let settingsOtherProvidersCopy: string =
-  englishCopy.settingsOtherProvidersCopy;
-
-subscribeLocale((nextLocale) => {
-  settingsOtherProvidersCopy =
-    copyLocaleDictionaries[nextLocale].settingsOtherProvidersCopy;
-});
-
-export const providerGroupHeadingCopy = localizedCopy.providerGroupHeadingCopy;
-export type ProviderGroupHeading =
-  (typeof providerGroupHeadingCopy)[keyof typeof providerGroupHeadingCopy];
-
 export const settingsTopLevelSectionLabels =
   localizedCopy.settingsTopLevelSectionLabels;
 
-export const settingsProviderStatusMeaningsData =
-  localizedCopy.settingsProviderStatusMeaningsData;
-
-export type SettingsProviderStatusMeaningLabel =
-  (typeof settingsProviderStatusMeaningsData)[number]["label"];
+/** The card badge words (w233): the only state words a person reads on a card. */
+export type SettingsProviderBadgeLabel =
+  (typeof settingsCopy)[
+    | "badgeReady"
+    | "badgeSignInNeeded"
+    | "badgeApiKeyNeeded"
+    | "badgeCliMissing"
+    | "badgeCheckFailed"
+    | "badgeNotChecked"
+  ];
 
 export const appearancePersistenceLabels =
   localizedCopy.appearancePersistenceLabels;
@@ -833,6 +802,9 @@ export function workbenchBaseUrlCopy(endpointId: WorkbenchBaseUrlCopyEndpointId)
 
 /** Copy for the merged family settings cards' backend segment switch. */
 export const familyFacadeCopy = localizedCopy.familyFacadeCopy;
+
+/** The Tools section (w233 step 2). */
+export const toolsCopy = localizedCopy.toolsCopy;
 
 export const endpointCatalogFreshnessCopy =
   localizedCopy.endpointCatalogFreshnessCopy;

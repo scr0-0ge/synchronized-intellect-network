@@ -23,7 +23,7 @@ export function installWorkbenchSubscriptionUsageIpc(options: {
     on(event: "closed", listener: Listener): void;
     removeListener(event: "closed", listener: Listener): void;
   };
-  readonly source: Pick<WorkbenchAppearancePreferenceStore, "readClaudeSubscriptionUsage">;
+  readonly source: Pick<WorkbenchAppearancePreferenceStore, "readClaudeSubscriptionUsage" | "readUsageObservations">;
 }) {
   let active = true;
   let disposed = false;
@@ -36,9 +36,12 @@ export function installWorkbenchSubscriptionUsageIpc(options: {
       return { ok: false };
     }
     try {
-      const observation = await options.source.readClaudeSubscriptionUsage();
+      const [observation, usage] = await Promise.all([
+        options.source.readClaudeSubscriptionUsage(),
+        options.source.readUsageObservations(),
+      ]);
       return !active || sender.isDestroyed() ? { ok: false } :
-        sanitizeWorkbenchSubscriptionUsageResult({ ok: true, observation });
+        sanitizeWorkbenchSubscriptionUsageResult({ ok: true, observation, usage });
     } catch { return { ok: false }; }
   });
   sender.on("render-process-gone", close);

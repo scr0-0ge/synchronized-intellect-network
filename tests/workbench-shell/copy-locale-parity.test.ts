@@ -122,7 +122,7 @@ test("English copy stays byte-exact and zh-CN selection is immediate", () => {
       "Confirm removal",
       "Preparing the selected Project and its durable Agent Sessions.",
       "Single agent",
-      "Read catalogs",
+      "Check",
       "2 of 5 turns",
       "The current appearance remains active in this window, but this change is not durable. Try another appearance change to retry.",
     ],

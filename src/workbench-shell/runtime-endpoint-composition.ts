@@ -10,6 +10,7 @@ import type {
   RuntimeModel,
   RuntimeResume,
   RuntimeStart,
+  RuntimeUsageObserver,
   SessionProfile,
 } from "../agent-runtime/index.ts";
 import { RuntimeAdapterError } from "../agent-runtime/index.ts";
@@ -189,6 +190,8 @@ export function createProductionGlmRuntimeAdapter(options: {
   readonly resolveGlmBaseUrl?: () => string | undefined;
   readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
   readonly createSessionTransport?: ClaudeSessionTransportFactory;
+  /** Provider-agnostic usage sink (w234); tagged with endpointKey "glm". */
+  readonly observeUsage?: RuntimeUsageObserver;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   const endpointContext = createGlmEndpointContext({
@@ -217,6 +220,9 @@ export function createProductionGlmRuntimeAdapter(options: {
           resolveStaticCatalogAugmentation:
             options.resolveStaticCatalogAugmentation,
         }),
+    undefined,
+    options.observeUsage,
+    "glm",
   );
 }
 
@@ -246,6 +252,8 @@ export function createProductionKimiRuntimeAdapter(options: {
   /** Live preference-backed Kimi Code base URL resolver (w232 Settings field). */
   readonly resolveKimiBaseUrl?: () => string | undefined;
   readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
+  /** Provider-agnostic usage sink (w234); tagged with endpointKey "kimi". */
+  readonly observeUsage?: RuntimeUsageObserver;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   const endpointContext = createKimiEndpointContext({
@@ -273,6 +281,9 @@ export function createProductionKimiRuntimeAdapter(options: {
           resolveStaticCatalogAugmentation:
             options.resolveStaticCatalogAugmentation,
         }),
+    undefined,
+    options.observeUsage,
+    "kimi",
   );
 }
 
@@ -295,6 +306,8 @@ export function createProductionDeepseekRuntimeAdapter(options: {
   /** Live preference-backed DeepSeek base URL resolver (w232 Settings field). */
   readonly resolveDeepseekBaseUrl?: () => string | undefined;
   readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
+  /** Provider-agnostic usage sink (w234); tagged with endpointKey "deepseek". */
+  readonly observeUsage?: RuntimeUsageObserver;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   const endpointContext = createDeepseekEndpointContext({
@@ -322,6 +335,9 @@ export function createProductionDeepseekRuntimeAdapter(options: {
           resolveStaticCatalogAugmentation:
             options.resolveStaticCatalogAugmentation,
         }),
+    undefined,
+    options.observeUsage,
+    "deepseek",
   );
 }
 
@@ -483,6 +499,8 @@ export async function createProductionRuntimeEndpointAdapter(options: {
   readonly codexApiAdapter?: ResumableAgentRuntimeAdapter;
   readonly blockedProjectDirectory?: string;
   readonly observeClaudeSubscriptionUsage?: import("../agent-runtime/index.ts").RuntimeSubscriptionUsageObserver;
+  /** Provider-agnostic usage sink (w234); wired into the GLM/Kimi/DeepSeek adapters only. */
+  readonly observeUsage?: RuntimeUsageObserver;
   readonly decorateDirectoryAdapter?: (
     adapter: ResumableAgentRuntimeAdapter,
   ) => ResumableAgentRuntimeAdapter;
@@ -564,6 +582,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.glmEnvironment,
       configDirectory: options.glmConfigDirectory,
       resolveGlmAuthToken: options.resolveGlmAuthToken,
+      observeUsage: options.observeUsage,
       resolveGlmBaseUrl: options.resolveGlmBaseUrl,
       ...(options.catalogAugmentation === undefined
         ? {}
@@ -581,6 +600,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.kimiEnvironment,
       configDirectory: options.kimiConfigDirectory,
       resolveKimiAuthToken: options.resolveKimiAuthToken,
+      observeUsage: options.observeUsage,
       resolveKimiBaseUrl: options.resolveKimiBaseUrl,
       ...(options.catalogAugmentation === undefined
         ? {}
@@ -598,6 +618,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.deepseekEnvironment,
       configDirectory: options.deepseekConfigDirectory,
       resolveDeepseekAuthToken: options.resolveDeepseekAuthToken,
+      observeUsage: options.observeUsage,
       resolveDeepseekBaseUrl: options.resolveDeepseekBaseUrl,
       ...(options.catalogAugmentation === undefined
         ? {}

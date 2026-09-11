@@ -4,8 +4,8 @@ import test from "node:test";
 import type { WorkbenchRuntimeEndpointDiscoveryCategory } from "../../src/workbench-shell/contract.ts";
 import {
   appearancePersistencePresentation,
-  groupSettingsProviderRows,
-  settingsProviderAvailabilityPresentation,
+  orderSettingsProviderRows,
+  settingsProviderBadgePresentation,
   settingsRailPresentation,
 } from "../../src/workbench-shell/renderer/settings-view-model.ts";
 import {
@@ -14,10 +14,10 @@ import {
   deepseekEndpointKeyCopy,
   glmEndpointKeyCopy,
   kimiEndpointKeyCopy,
-  settingsOtherProvidersCopy,
-  settingsProviderStatusMeaningsData as settingsProviderStatusMeanings,
+  settingsCopy,
   settingsTopLevelSectionLabels,
 } from "../../src/workbench-shell/renderer/copy/settings-copy.ts";
+import { setLocale } from "../../src/workbench-shell/renderer/locale.ts";
 import {
   newSessionRailAccessibleLabel,
   newSessionRailLabel,
@@ -31,15 +31,18 @@ const categories: readonly WorkbenchRuntimeEndpointDiscoveryCategory[] = [
   "not-inspected",
 ];
 
-test("Settings English copy exposes Providers, Claude permissions, and Appearance without invented provider capability", () => {
+test("Settings English copy exposes Appearance, Providers, Tools and Claude permissions in page order without invented provider capability", () => {
+  // w233: Appearance moved to the top of the page; there is no "Other
+  // providers" group and no "Status meanings" legend any more.
   assert.deepEqual(settingsTopLevelSectionLabels, [
-    "Providers",
-    "Claude permissions",
     "Appearance",
+    "Providers",
+    "Tools",
+    "Claude permissions",
   ]);
   assert.deepEqual(
     settingsCopyLocaleDictionaries.en.settingsTopLevelSectionLabels,
-    ["Providers", "Claude permissions", "Appearance"],
+    ["Appearance", "Providers", "Tools", "Claude permissions"],
   );
   assert.equal(
     Object.isFrozen(
@@ -47,15 +50,26 @@ test("Settings English copy exposes Providers, Claude permissions, and Appearanc
     ),
     true,
   );
-  assert.equal(
-    settingsOtherProvidersCopy,
-    "No other providers are configured in this build.",
-  );
+  for (const dictionary of [
+    settingsCopyLocaleDictionaries.en,
+    settingsCopyLocaleDictionaries["zh-CN"],
+  ]) {
+    const keys = Object.keys(dictionary.settingsCopy);
+    assert.equal(keys.includes("statusMeaningsHeading"), false);
+    assert.equal(keys.includes("otherProvidersHeading"), false);
+    assert.equal(keys.includes("catalogAvailableHeading"), false);
+  }
 
   const serialized = JSON.stringify({
     sections: settingsTopLevelSectionLabels,
-    otherProviders: settingsOtherProvidersCopy,
-    meanings: settingsProviderStatusMeanings,
+    lede: settingsCopy.lede,
+    badges: [
+      settingsCopy.badgeReady,
+      settingsCopy.badgeSignInNeeded,
+      settingsCopy.badgeCliMissing,
+      settingsCopy.badgeCheckFailed,
+      settingsCopy.badgeNotChecked,
+    ],
   });
   assert.doesNotMatch(
     serialized,
@@ -63,11 +77,11 @@ test("Settings English copy exposes Providers, Claude permissions, and Appearanc
   );
 });
 
-test("credential promise is narrowed to the subscription path and the GLM key block states the full DPAPI truth (ADR 0022)", () => {
+test("credential promise is one line under Providers with the full subscription-path sentence behind Details, and the GLM key block states the full DPAPI truth (ADR 0022)", () => {
   const englishSettings = settingsCopyLocaleDictionaries.en.settingsCopy;
   assert.equal(
     englishSettings.credentialHeading,
-    "Subscription credentials never pass through the Workbench",
+    "Subscription sign-in stays in each provider's own app; API keys are stored encrypted on this device.",
   );
   assert.equal(
     englishSettings.credentialSentence,
@@ -75,7 +89,12 @@ test("credential promise is narrowed to the subscription path and the GLM key bl
   );
   assert.equal(
     settingsCopyLocaleDictionaries["zh-CN"].settingsCopy.credentialHeading,
-    "订阅凭据绝不经过 Workbench",
+    "订阅登录在各提供方自己的应用中完成；API 密钥加密保存在本机。",
+  );
+  assert.equal(englishSettings.detailsSummary, "Details");
+  assert.equal(
+    settingsCopyLocaleDictionaries["zh-CN"].settingsCopy.detailsSummary,
+    "详情",
   );
   assert.equal(
     glmEndpointKeyCopy.heading,
@@ -150,94 +169,90 @@ test("credential promise is narrowed to the subscription path and the GLM key bl
   assert.doesNotMatch(serialized, /never handles credentials/iu);
 });
 
-test("all exact endpoint categories keep not-inspected distinct from unavailable", () => {
+test("every discovery category maps to one plain-words badge, and authentication-required reads as a key on API-key faces and a login on subscription faces", () => {
+  // The badge is the only state word a person reads on a card; the internal
+  // category names stay in the collapsed details.
   const expected = [
-    [
-      "catalog-ready",
-      "catalog-available",
-      "Catalog available",
-      "ok",
-      "Connected",
-    ],
-    [
-      "authentication-required",
-      "catalog-unavailable",
-      "Catalog unavailable",
-      "warn",
-      "Sign-in required",
-    ],
-    [
-      "inspection-failed",
-      "catalog-unavailable",
-      "Catalog unavailable",
-      "warn",
-      "Inspection failed",
-    ],
-    [
-      "runtime-not-located",
-      "catalog-unavailable",
-      "Catalog unavailable",
-      "off",
-      "Not found",
-    ],
-    [
-      "not-inspected",
-      "not-inspected",
-      "Not checked",
-      "off",
-      "Not checked",
-    ],
+    ["catalog-ready", "codex-desktop", "ready", "Ready", "ok"],
+    ["catalog-ready", "glm-coding-plan", "ready", "Ready", "ok"],
+    ["authentication-required", "codex-desktop", "sign-in-needed", "Sign-in needed", "warn"],
+    ["authentication-required", "claude-code-desktop", "sign-in-needed", "Sign-in needed", "warn"],
+    ["authentication-required", "glm-coding-plan", "api-key-needed", "API key needed", "warn"],
+    ["authentication-required", "deepseek-api", "api-key-needed", "API key needed", "warn"],
+    ["authentication-required", "kimi-platform", "api-key-needed", "API key needed", "warn"],
+    ["authentication-required", "codex-api", "api-key-needed", "API key needed", "warn"],
+    ["inspection-failed", "codex-desktop", "check-failed", "Check failed", "warn"],
+    ["runtime-not-located", "claude-code-desktop", "cli-missing", "CLI missing", "warn"],
+    ["runtime-not-located", "glm-coding-plan", "cli-missing", "CLI missing", "warn"],
+    ["not-inspected", "codex-desktop", "not-checked", "Not checked", "off"],
+    ["not-inspected", "kimi-code", "not-checked", "Not checked", "off"],
   ] as const;
-
   assert.deepEqual(
-    categories.map((category) => {
-      const availability = settingsProviderAvailabilityPresentation(category);
-      const meaning = settingsProviderStatusMeanings.find(
-        (candidate) => candidate.category === category,
-      );
-      assert.ok(meaning);
-      assert.equal(Object.isFrozen(availability), true);
-      assert.equal(Object.isFrozen(meaning), true);
-      return [
-        category,
-        availability.group,
-        availability.label,
-        availability.tone,
-        meaning.label,
-      ];
+    expected.map(([category, endpointId]) => {
+      const badge = settingsProviderBadgePresentation(category, endpointId);
+      assert.equal(Object.isFrozen(badge), true);
+      return [category, endpointId, badge.kind, badge.label, badge.tone];
     }),
     expected,
   );
+  for (const category of categories) {
+    const label = settingsProviderBadgePresentation(category, "codex-desktop").label;
+    assert.doesNotMatch(
+      label,
+      /catalog|inspect|runtime|located/iu,
+      `${category}: the badge must not use an internal status word`,
+    );
+  }
+  try {
+    setLocale("zh-CN");
+    assert.deepEqual(
+      [
+        settingsProviderBadgePresentation("catalog-ready", "codex-desktop").label,
+        settingsProviderBadgePresentation("authentication-required", "codex-desktop").label,
+        settingsProviderBadgePresentation("authentication-required", "glm-coding-plan").label,
+        settingsProviderBadgePresentation("runtime-not-located", "codex-desktop").label,
+        settingsProviderBadgePresentation("inspection-failed", "codex-desktop").label,
+        settingsProviderBadgePresentation("not-inspected", "codex-desktop").label,
+      ],
+      ["可用", "需要登录", "需要 API 密钥", "没装 CLI", "检查失败", "尚未检查"],
+    );
+  } finally {
+    setLocale("en");
+  }
 });
 
-test("provider grouping is exact, ordered, frozen, and does not clone or expose another shape", () => {
-  const rows = categories.map((category, index) =>
-    Object.freeze({ category, endpointId: `endpoint-${index + 1}` }),
-  );
-  const groups = groupSettingsProviderRows(rows);
-
+test("provider cards keep the owner's fixed order whatever their status is", () => {
+  // Roster order is codex, claude, glm, kimi, deepseek; the page order is
+  // Codex, Claude, GLM, DeepSeek, Kimi, and a status never moves a card.
+  const rows = (
+    [
+      ["kimi-code", "catalog-ready"],
+      ["deepseek-api", "not-inspected"],
+      ["claude-code-desktop", "runtime-not-located"],
+      ["glm-coding-plan", "authentication-required"],
+      ["codex-desktop", "inspection-failed"],
+    ] as const
+  ).map(([endpointId, category]) => Object.freeze({ endpointId, category }));
+  const ordered = orderSettingsProviderRows(rows);
   assert.deepEqual(
-    groups.catalogAvailable.map((row) => row.endpointId),
-    ["endpoint-1"],
+    ordered.map((row) => row.endpointId),
+    ["codex-desktop", "claude-code-desktop", "glm-coding-plan", "deepseek-api", "kimi-code"],
   );
+  assert.equal(ordered[0], rows[4]);
+  assert.equal(Object.isFrozen(ordered), true);
   assert.deepEqual(
-    groups.catalogUnavailable.map((row) => row.endpointId),
-    ["endpoint-2", "endpoint-3", "endpoint-4"],
+    rows.map((row) => row.endpointId),
+    ["kimi-code", "deepseek-api", "claude-code-desktop", "glm-coding-plan", "codex-desktop"],
+    "ordering must not mutate its input",
   );
+  // A facade card resolved to its API side sits where its family sits.
   assert.deepEqual(
-    groups.notInspected.map((row) => row.endpointId),
-    ["endpoint-5"],
+    orderSettingsProviderRows([
+      Object.freeze({ endpointId: "kimi-platform" as const }),
+      Object.freeze({ endpointId: "codex-api" as const }),
+    ]).map((row) => row.endpointId),
+    ["codex-api", "kimi-platform"],
   );
-  assert.equal(groups.catalogAvailable[0], rows[0]);
-  assert.equal(Object.isFrozen(groups), true);
-  assert.equal(Object.isFrozen(groups.catalogAvailable), true);
-  assert.equal(Object.isFrozen(groups.catalogUnavailable), true);
-  assert.equal(Object.isFrozen(groups.notInspected), true);
-  assert.deepEqual(Object.keys(groups), [
-    "catalogAvailable",
-    "catalogUnavailable",
-    "notInspected",
-  ]);
 });
 
 test("rail presentation defines the single shortened Settings-foot entry and attention state", () => {

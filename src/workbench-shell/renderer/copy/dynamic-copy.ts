@@ -82,7 +82,7 @@ const englishCopy = {
     // window; the service re-inspects the provider CLI when that child exits
     // and publishes the result onto this card.
     loginRequested:
-      "The Workbench asked the provider CLI to log in. The sign-in itself happens in the provider CLI, which runs here with no window and no console, so the Workbench cannot show anything it prints or asks. This card reports the sign-in state once that CLI exits. If you are still not signed in, run the provider CLI's own sign-in command in a terminal, then use Re-check sign-in.",
+      "The Workbench asked the provider CLI to log in. The sign-in itself happens in the provider CLI, which runs here with no window and no console, so the Workbench cannot show anything it prints or asks. This card reports the sign-in state once that CLI exits. If you are still not signed in, run the provider CLI's own sign-in command in a terminal, then use Check sign-in.",
     loginNotRequested: "The Workbench could not ask the provider CLI to log in.",
     loginPartiallyCompleted:
       "The Workbench asked the provider CLI to log in but could not record the sign-in change. Sessions started before this login can no longer be resumed, even where the Workbench still offers to resume them.",
@@ -200,7 +200,7 @@ const simplifiedChineseCopy = {
     logoutNotRequested: "Workbench 无法要求提供方 CLI 退出登录。未做任何更改，每个会话的可恢复性保持不变。",
     logoutPartiallyCompleted: "Workbench 已要求提供方 CLI 退出登录，但无法记录这次退出。在这次退出前启动的会话已无法恢复，即使 Workbench 仍显示恢复选项。",
     loginRequested:
-      "Workbench 已要求提供方 CLI 登录。登录本身在提供方 CLI 中完成，而它在这里运行时没有窗口、也没有控制台，所以 Workbench 无法显示它打印或询问的任何内容。该 CLI 退出后，此卡片会报告登录状态。如果你仍未登录，请在终端里运行该提供方 CLI 自己的登录命令，然后使用“重新检查登录”。",
+      "Workbench 已要求提供方 CLI 登录。登录本身在提供方 CLI 中完成，而它在这里运行时没有窗口、也没有控制台，所以 Workbench 无法显示它打印或询问的任何内容。该 CLI 退出后，此卡片会报告登录状态。如果你仍未登录，请在终端里运行该提供方 CLI 自己的登录命令，然后使用“检查登录”。",
     loginNotRequested: "Workbench 无法要求提供方 CLI 登录。",
     loginPartiallyCompleted: "Workbench 已要求提供方 CLI 登录，但无法记录登录状态变化。在这次登录前启动的会话已无法恢复，即使 Workbench 仍显示恢复选项。",
     logoutBlocked: "退出登录已被阻止。",

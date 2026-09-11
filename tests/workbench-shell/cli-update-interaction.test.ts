@@ -68,6 +68,12 @@ const noCheck = { cliId: "codex", status: "no-check" } as const;
    shows up as a number before it shows up as a red. */
 const PAGE_ACTION_TIMEOUT_MS = 60_000;
 
+/* w233: codex's button reads "Update" too (it asks before it acts), and both
+   update blocks live on the Tools rows (step 2), so every press below is
+   scoped to its row. */
+const claudeCardSelector = "section.tool-claude";
+const codexRowSelector = "section.tool-codex";
+
 async function openSettings(
   t: TestContext,
   bridge: WorkbenchCliUpdateBridge,
@@ -104,13 +110,15 @@ test("Chinese Claude retry buttons name the sign-in and update checks", async t 
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),
   }, "zh-CN");
   try {
+    // Sign-in stays on the Claude provider card; the update check moved to
+    // the Claude Tools row (w233 step 2). Neither is a bare "检查".
     const claudeCard = page.locator("section.provider-claude");
-    await claudeCard.locator("button").filter({ hasText: /^重新检查登录$/u }).waitFor();
-    await claudeCard.locator("button").filter({ hasText: /^重新检查更新$/u }).waitFor();
-    assert.equal(
-      await claudeCard.getByRole("button", { name: "重新检查", exact: true }).count(),
-      0,
-    );
+    const claudeTool = page.locator(claudeCardSelector);
+    await claudeCard.locator("button").filter({ hasText: /^检查登录$/u }).waitFor();
+    await claudeTool.locator("button").filter({ hasText: /^检查更新$/u }).waitFor();
+    for (const scope of [claudeCard, claudeTool]) {
+      assert.equal(await scope.getByRole("button", { name: "检查", exact: true }).count(), 0);
+    }
   } finally { await page.close(); }
 });
 
@@ -125,7 +133,7 @@ test("Settings restart button invokes relaunchApp and waits for the queued resta
     relaunchApp: async () => { restarts++; return publicCliUpdateRelaunchQueued(); },
   });
   try {
-    await page.getByRole("button", { name: "Update", exact: true }).click();
+    await page.locator(claudeCardSelector).getByRole("button", { name: "Update", exact: true }).click();
     await page.getByText("The update finished.", { exact: false }).waitFor();
     const restart = page.getByRole("button", { name: "Restart now", exact: true });
     assert.equal(await restart.count(), 1, "successful update must offer Restart now");
@@ -162,10 +170,10 @@ test("Settings replaces a failed post-run check with an actionable retry and fre
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),
   });
   try {
-    await page.getByRole("button", { name: "Update", exact: true }).click();
+    await page.locator(claudeCardSelector).getByRole("button", { name: "Update", exact: true }).click();
     await page.getByText("The update did not complete.", { exact: false }).waitFor();
     await page.waitForFunction(() => !document.querySelector('[aria-busy="true"]'));
-    const retry = page.getByRole("button", { name: "Check for updates again", exact: true });
+    const retry = page.getByRole("button", { name: "Check updates again", exact: true });
     assert.equal(await retry.count(), 1, "failed post-run check must leave Check for updates again visible");
     assert.equal(await page.getByText("Could not check whether", { exact: false }).count(), 1);
     assert.equal(await page.getByText("A new version is available:", { exact: false }).count(), 0, "failed check must remove the stale version claim");
@@ -173,7 +181,7 @@ test("Settings replaces a failed post-run check with an actionable retry and fre
     sourceAvailable = true;
     current = "2.1.240";
     await retry.click();
-    await page.getByRole("button", { name: "Update", exact: true }).waitFor();
+    await page.locator(claudeCardSelector).getByRole("button", { name: "Update", exact: true }).waitFor();
     assert.equal(checks, beforeRetry + 1, "retry must perform a new read-only query");
     assert.equal(await page.getByText("A new version is available: 2.1.240 → 2.1.258.", { exact: true }).count(), 1);
     assert.equal(await retry.count(), 0);
@@ -193,11 +201,11 @@ test("Settings discards stale versions when the post-run check IPC is unavailabl
       relaunchApp: async () => publicCliUpdateRelaunchQueued(),
     });
     try {
-      await page.getByRole("button", { name: "Update", exact: true }).click();
+      await page.locator(claudeCardSelector).getByRole("button", { name: "Update", exact: true }).click();
       await page.getByText("The update finished.", { exact: false }).waitFor();
       await page.waitForFunction(() => !document.querySelector('[aria-busy="true"]'));
       assert.equal(await page.getByText("A new version is available:", { exact: false }).count(), 0, `${failure}: failed refresh must discard stale version claims`);
-      assert.equal(await page.getByRole("button", { name: "Check for updates again", exact: true }).count(), 1, `${failure}: failed refresh must offer retry`);
+      assert.equal(await page.getByRole("button", { name: "Check updates again", exact: true }).count(), 1, `${failure}: failed refresh must offer retry`);
     } finally { await page.close(); }
   }
 });
@@ -212,11 +220,11 @@ test("Settings offers Update after Not now and a successful retry finds a newer 
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),
   });
   try {
-    await page.getByRole("button", { name: "Update", exact: true }).click();
+    await page.locator(claudeCardSelector).getByRole("button", { name: "Update", exact: true }).click();
     await page.getByRole("button", { name: "Not now", exact: true }).click();
-    await page.getByRole("button", { name: "Check for updates again", exact: true }).click();
+    await page.getByRole("button", { name: "Check updates again", exact: true }).click();
     await page.getByText("A new version is available:", { exact: false }).waitFor();
-    assert.equal(await page.getByRole("button", { name: "Update", exact: true }).count(), 1, "successful retry must restore Update even after Not now");
+    assert.equal(await page.locator(claudeCardSelector).getByRole("button", { name: "Update", exact: true }).count(), 1, "successful retry must restore Update even after Not now");
   } finally { await page.close(); }
 });
 
@@ -225,17 +233,27 @@ test("Settings offers Update after Not now and a successful retry finds a newer 
  * sentence of any kind, and one press started a non-interactive install in
  * the background. Two things are asserted here and they are separate: that the
  * row SAYS what pressing it will do, and that pressing it once does NOT do it.
+ * w233 moved the two sentences to the confirmation moment: the first press
+ * asks, and the sentences stand beside the question, before the press that
+ * installs. The idle row is a button, not two paragraphs in front of one.
  */
-test("w120: the codex row states what the update will do before it is pressed", async t => {
+test("w120: the codex row states what the update will do before the press that installs", async t => {
+  let runs = 0;
   const page = await openSettings(t, {
     checkCliUpdates: async () => publicCliUpdateCheckCompleted([available, noCheck]),
-    runCliUpdate: async (cliId) => publicCliUpdateRunUpdated(cliId),
+    runCliUpdate: async (cliId) => { runs += 1; return publicCliUpdateRunUpdated(cliId); },
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),
   });
   try {
-    const codexCard = page.locator("section.provider").filter({
-      has: page.locator(".ph-name", { hasText: "Codex" }),
-    });
+    const codexCard = page.locator(codexRowSelector);
+    assert.equal(
+      await codexCard.getByText("asks the channel that installed this CLI", { exact: false }).count(),
+      0,
+      "the idle row is a button, not an explanation in front of one",
+    );
+    await codexCard.getByRole("button", { name: "Update", exact: true }).click();
+    await codexCard.getByText("Update this CLI now?", { exact: true }).waitFor();
+    assert.equal(runs, 0, "the sentences are read before anything is installed");
     await codexCard
       .getByText("asks the channel that installed this CLI", { exact: false })
       .waitFor();
@@ -259,19 +277,17 @@ test("w120: a codex update does not start until it is confirmed", async t => {
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),
   });
   try {
-    const codexCard = page.locator("section.provider").filter({
-      has: page.locator(".ph-name", { hasText: "Codex" }),
-    });
-    await codexCard.getByRole("button", { name: "Check and update", exact: true }).click();
+    const codexCard = page.locator(codexRowSelector);
+    await codexCard.getByRole("button", { name: "Update", exact: true }).click();
     await codexCard.getByText("Update this CLI now?", { exact: true }).waitFor();
     assert.equal(runs, 0, "the first press must ask, not install");
 
     // Cancel leaves the machine alone and restores the original action.
     await codexCard.getByRole("button", { name: "Cancel", exact: true }).click();
-    await codexCard.getByRole("button", { name: "Check and update", exact: true }).waitFor();
+    await codexCard.getByRole("button", { name: "Update", exact: true }).waitFor();
     assert.equal(runs, 0, "cancelling must not install anything");
 
-    await codexCard.getByRole("button", { name: "Check and update", exact: true }).click();
+    await codexCard.getByRole("button", { name: "Update", exact: true }).click();
     await codexCard.getByRole("button", { name: "Yes, update", exact: true }).click();
     await codexCard.getByText("The update finished.", { exact: false }).waitFor();
     assert.equal(runs, 1, "confirming must run the update exactly once");

@@ -1,4 +1,4 @@
-import { SettingsSubscriptionUsage } from "./settings-subscription-usage.tsx";
+import { SettingsUsage } from "./settings-usage.tsx";
 import {
   For,
   Show,
@@ -48,10 +48,9 @@ import {
 } from "./view-model.ts";
 import {
   appearancePersistencePresentation,
-  groupSettingsProviderRows,
   initialSettingsSubscriptionAuthenticationState,
-  settingsProviderAvailabilityPresentation,
-  settingsProviderStatusMeanings,
+  orderSettingsProviderRows,
+  settingsProviderBadgePresentation,
   settingsSubscriptionAuthenticationPresentation,
   isPrivateCliInstallPath,
   type SettingsRuntimeExecutablePhase,
@@ -83,11 +82,12 @@ import {
   endpointCatalogFreshnessCopy,
   cliUpdateCopy,
   familyFacadeCopy,
+  toolsCopy,
   workbenchEndpointKeyCopy,
   workbenchBaseUrlCopy,
-  type ProviderGroupHeading,
   type WorkbenchEndpointKeyCopyEndpointId,
 } from "./copy/settings-copy.ts";
+import { dynamicCopy } from "./copy/dynamic-copy.ts";
 import { defaultWorkbenchFamilyEndpointPreferences } from "../contract.ts";
 import { WorkbenchRendererBridgeContext } from "./view-types.ts";
 
@@ -232,6 +232,28 @@ function cliIdForEndpoint(
   return undefined;
 }
 
+
+/**
+ * The family cards' segment labels: the two sides of Codex, Claude and Kimi.
+ * Read from the same identity copy the status rows use, so a segment can never
+ * name a backend differently from its own row.
+ */
+const FAMILY_SEGMENT_COPY_KEY: Readonly<
+  Partial<Record<WorkbenchRuntimeEndpointId, keyof typeof endpointIdentityCopy>>
+> = Object.freeze({
+  "codex-desktop": "codex",
+  "codex-api": "codexApi",
+  "claude-code-desktop": "claude",
+  "claude-api": "claudeApi",
+  "kimi-code": "kimi",
+  "kimi-platform": "kimiPlatform",
+});
+
+function segmentLabel(endpointId: WorkbenchRuntimeEndpointId): string {
+  const key = FAMILY_SEGMENT_COPY_KEY[endpointId];
+  return key === undefined ? endpointId : endpointIdentityCopy[key].endpointLabel;
+}
+
 export const SettingsScreen: Component<{
   readonly onClose: () => void;
   readonly profile: WorkbenchDirectProfileState;
@@ -334,24 +356,19 @@ export const SettingsScreen: Component<{
   });
   const endpointPreferences = () =>
     props.endpointPreferences ?? defaultWorkbenchFamilyEndpointPreferences;
+  // One card per provider in the owner's fixed order (w233): Codex, Claude,
+  // GLM, DeepSeek, Kimi. A status change recolours a badge; it never moves a
+  // card.
   const endpointRows = () =>
-    directFacadeEndpointStatusRows(
-      props.profile,
-      endpointPreferences(),
-      props.subscriptionAuthentication,
+    orderSettingsProviderRows(
+      directFacadeEndpointStatusRows(
+        props.profile,
+        endpointPreferences(),
+        props.subscriptionAuthentication,
+      ),
     );
-  const endpointGroups = () => groupSettingsProviderRows(endpointRows());
   /** Raw per-backend rows feeding each merged family card's two sides. */
-  const familySideRows = (): Readonly<
-    Record<
-      WorkbenchEndpointFamilyId,
-      Readonly<
-        Partial<
-          Record<WorkbenchRuntimeEndpointId, WorkbenchRuntimeEndpointStatusRow>
-        >
-      >
-    >
-  > => {
+  const familySideRows = (): FamilySideRows => {
     const rows = directEndpointStatusRows(props.profile);
     const pick = (endpointId: WorkbenchRuntimeEndpointId) =>
       rows.find((row) => row.endpointId === endpointId);
@@ -381,6 +398,30 @@ export const SettingsScreen: Component<{
     initialSettingsSubscriptionAuthenticationState(
       props.profile.result?.endpointDiscovery,
     );
+  /**
+   * The Tools section (w233 step 2) describes the two CLIs, not the
+   * providers: each row reads the desktop endpoint's discovery row for what
+   * the lookup found, and the CLI update report for the version.
+   */
+  const toolRow = (
+    endpointId: "claude-code-desktop" | "codex-desktop",
+  ): WorkbenchRuntimeEndpointStatusRow | undefined =>
+    directEndpointStatusRows(props.profile).find(
+      (row) => row.endpointId === endpointId,
+    );
+  // Where the Data recovery card goes (w233): above Providers only while there
+  // is something to review or act on. A machine whose recovery could not be
+  // prepared -- every fresh install -- gets one muted line at the foot instead
+  // of a red alert as the first thing on the page. The card's own visibility
+  // gate and its logic are untouched.
+  const recoveryUnavailable = () =>
+    props.historyRecoveryResult?.status === "unavailable";
+  const recoveryFootSentence = (): string | null => {
+    const result = props.historyRecoveryResult;
+    return result?.status === "unavailable"
+      ? dynamicCopy.historyProblem[result.problem.code]
+      : null;
+  };
   // CLI updates (ticket 18): the preload bridge carries the surface as an
   // intersection (see preload-bridge.ts), so the renderer bridge narrows
   // back to it here — present only when both channels exist.
@@ -590,225 +631,9 @@ export const SettingsScreen: Component<{
             {settingsCopy.lede}
           </p>
 
-          <HistoryRecoverySettingsCard
-            bridge={props.historyRecoveryBridge ?? Object.freeze({})}
-            result={props.historyRecoveryResult ?? null}
-            onSnapshot={
-              props.onHistoryRecoverySnapshot ?? (() => undefined)
-            }
-            onRefresh={props.onRefreshHistoryRecovery ?? (() => undefined)}
-          />
-
-          <div class="section-head providers-section-head">
-            <h2 id="providers-title">{settingsCopy.providersHeading}</h2>
-            <button
-              type="button"
-              class="btn ghost sm providers-recheck"
-              disabled={!props.canRead}
-              aria-busy={props.profile.phase === "loading"}
-              onClick={props.onRead}
-            >
-              {props.profile.phase === "loading"
-                ? settingsCopy.readingCatalogs
-                : props.profile.phase === "idle"
-                  ? settingsCopy.readCatalogs
-                  : settingsCopy.recheckAll}
-            </button>
-          </div>
-          <section
-            class="provider-settings"
-            aria-labelledby="providers-title"
-          >
-            <div class="guard">
-              <span class="g-glyph" aria-hidden="true">
-                🔒
-              </span>
-              <div>
-                <b>{settingsCopy.credentialHeading}</b>
-                <p>
-                  {settingsCopy.credentialSentence}
-                </p>
-              </div>
-            </div>
-
-            <Show when={endpointGroups().catalogAvailable.length > 0}>
-              <ProviderGroup
-                heading={settingsCopy.catalogAvailableHeading}
-                rows={endpointGroups().catalogAvailable}
-                authentication={authentication()}
-                endpointKeyPanels={props.endpointKeyPanels}
-                endpointBaseUrlPanels={props.endpointBaseUrlPanels}
-                catalogFreshness={props.catalogFreshness}
-                cliUpdate={cliUpdatePanel()}
-                familySideRows={familySideRows()}
-                endpointPreferences={props.endpointPreferences}
-                onEndpointPreference={props.onEndpointPreference}
-                runtimeExecutables={props.runtimeExecutables}
-                runtimeExecutablePhases={props.runtimeExecutablePhases}
-                onSaveExecutablePath={props.onSaveRuntimeExecutable}
-                runtimeInstallPhases={props.runtimeInstallPhases}
-                onInstallExecutable={props.onInstallRuntimeExecutable}
-                onBind={props.onBindSubscriptionAuthentication}
-                onBegin={props.onBeginSubscriptionAuthentication}
-                onCancel={props.onCancelSubscriptionAuthentication}
-              />
-            </Show>
-            <Show when={endpointGroups().catalogUnavailable.length > 0}>
-              <ProviderGroup
-                heading={settingsCopy.catalogUnavailableHeading}
-                rows={endpointGroups().catalogUnavailable}
-                authentication={authentication()}
-                endpointKeyPanels={props.endpointKeyPanels}
-                endpointBaseUrlPanels={props.endpointBaseUrlPanels}
-                catalogFreshness={props.catalogFreshness}
-                cliUpdate={cliUpdatePanel()}
-                familySideRows={familySideRows()}
-                endpointPreferences={props.endpointPreferences}
-                onEndpointPreference={props.onEndpointPreference}
-                runtimeExecutables={props.runtimeExecutables}
-                runtimeExecutablePhases={props.runtimeExecutablePhases}
-                onSaveExecutablePath={props.onSaveRuntimeExecutable}
-                runtimeInstallPhases={props.runtimeInstallPhases}
-                onInstallExecutable={props.onInstallRuntimeExecutable}
-                onBind={props.onBindSubscriptionAuthentication}
-                onBegin={props.onBeginSubscriptionAuthentication}
-                onCancel={props.onCancelSubscriptionAuthentication}
-              />
-            </Show>
-            <Show when={endpointGroups().notInspected.length > 0}>
-              <ProviderGroup
-                heading={settingsCopy.notCheckedHeading}
-                rows={endpointGroups().notInspected}
-                authentication={authentication()}
-                endpointKeyPanels={props.endpointKeyPanels}
-                endpointBaseUrlPanels={props.endpointBaseUrlPanels}
-                catalogFreshness={props.catalogFreshness}
-                cliUpdate={cliUpdatePanel()}
-                familySideRows={familySideRows()}
-                endpointPreferences={props.endpointPreferences}
-                onEndpointPreference={props.onEndpointPreference}
-                runtimeExecutables={props.runtimeExecutables}
-                runtimeExecutablePhases={props.runtimeExecutablePhases}
-                onSaveExecutablePath={props.onSaveRuntimeExecutable}
-                runtimeInstallPhases={props.runtimeInstallPhases}
-                onInstallExecutable={props.onInstallRuntimeExecutable}
-                onBind={props.onBindSubscriptionAuthentication}
-                onBegin={props.onBeginSubscriptionAuthentication}
-                onCancel={props.onCancelSubscriptionAuthentication}
-              />
-            </Show>
-
-            <section
-              class="provider-group other-providers"
-              aria-labelledby="other-providers-title"
-            >
-              <h3 id="other-providers-title">{settingsCopy.otherProvidersHeading}</h3>
-              <p>{settingsCopy.otherProvidersSentence}</p>
-            </section>
-
-            <section
-              class="provider-status-key"
-              aria-labelledby="provider-status-key-title"
-            >
-              <h3 id="provider-status-key-title">{settingsCopy.statusMeaningsHeading}</h3>
-              <dl>
-                <For each={settingsProviderStatusMeanings}>
-                  {(meaning) => (
-                    <div>
-                      <dt>{meaning.label}</dt>
-                      <dd>{meaning.detail}</dd>
-                    </div>
-                  )}
-                </For>
-              </dl>
-            </section>
-          </section>
-
-          <SettingsSubscriptionUsage bridge={props.historyRecoveryBridge} />
-
-          <div class="section-head permission-section-head">
-            <h2 id="claude-permissions-title">
-              {settingsCopy.claudePermissionsHeading}
-            </h2>
-            <span
-              class={`settings-scope ${
-                permissionPersistence().error ? "error" : ""
-              }`.trim()}
-            >
-              {permissionPersistence().label}
-            </span>
-          </div>
-          <section
-            class="appearance-settings"
-            aria-labelledby="claude-permissions-title"
-          >
-            <div class="appearance-row">
-              <span class="appearance-copy">
-                <b id="claude-permission-handling-label">
-                  {settingsCopy.permissionHandlingLabel}
-                </b>
-                <span id="claude-permission-handling-hint">
-                  {settingsCopy.permissionHandlingHint}
-                </span>
-              </span>
-              <span
-                class="appearance-options"
-                role="group"
-                aria-labelledby="claude-permission-handling-label"
-                aria-describedby="claude-permission-handling-hint"
-              >
-                <button
-                  type="button"
-                  class="appearance-option"
-                  aria-pressed={
-                    props.claudePermissionHandling === "without-asking"
-                  }
-                  disabled={
-                    props.claudePermissionHandlingPersistencePhase === "saving"
-                  }
-                  onClick={() =>
-                    props.onClaudePermissionHandling("without-asking")
-                  }
-                >
-                  {settingsCopy.withoutAskingPermissionOption}
-                </button>
-                <button
-                  type="button"
-                  class="appearance-option"
-                  aria-pressed={
-                    props.claudePermissionHandling === "ask-when-needed"
-                  }
-                  disabled={
-                    props.claudePermissionHandlingPersistencePhase === "saving"
-                  }
-                  onClick={() =>
-                    props.onClaudePermissionHandling("ask-when-needed")
-                  }
-                >
-                  {settingsCopy.askWhenNeededPermissionOption}
-                </button>
-              </span>
-            </div>
-          </section>
-          <Show
-            when={
-              props.claudePermissionHandlingPersistencePhase === "save-error"
-            }
-          >
-            <p class="appearance-persistence-error" role="alert">
-              {settingsCopy.permissionPersistenceErrorSentence}
-            </p>
-          </Show>
-          <Show
-            when={
-              props.claudePermissionHandlingPersistencePhase === "load-error"
-            }
-          >
-            <p class="appearance-persistence-error" role="alert">
-              {settingsCopy.permissionLoadErrorSentence}
-            </p>
-          </Show>
-
+          {/* Appearance first (w233): language and tone are the first thing a
+              new user changes, and putting them first costs no navigation
+              machinery -- the alternative was a sticky mini-nav. */}
           <div class="section-head appearance-section-head">
             <h2 id="appearance-title">{settingsCopy.appearanceHeading}</h2>
             <span
@@ -1052,6 +877,203 @@ export const SettingsScreen: Component<{
               {settingsCopy.persistenceErrorSentence}
             </p>
           </Show>
+
+          <Show when={!recoveryUnavailable()}>
+            <HistoryRecoverySettingsCard
+              bridge={props.historyRecoveryBridge ?? Object.freeze({})}
+              result={props.historyRecoveryResult ?? null}
+              onSnapshot={
+                props.onHistoryRecoverySnapshot ?? (() => undefined)
+              }
+              onRefresh={props.onRefreshHistoryRecovery ?? (() => undefined)}
+            />
+          </Show>
+
+          <div class="section-head providers-section-head">
+            <h2 id="providers-title">{settingsCopy.providersHeading}</h2>
+            <button
+              type="button"
+              class="btn ghost sm providers-recheck"
+              disabled={!props.canRead}
+              aria-busy={props.profile.phase === "loading"}
+              onClick={props.onRead}
+            >
+              {props.profile.phase === "loading"
+                ? settingsCopy.readingCatalogs
+                : props.profile.phase === "idle"
+                  ? settingsCopy.readCatalogs
+                  : settingsCopy.recheckAll}
+            </button>
+          </div>
+          <section
+            class="provider-settings"
+            aria-labelledby="providers-title"
+          >
+            <div class="providers-policy">
+              <p class="providers-policy-line">{settingsCopy.credentialHeading}</p>
+              <details class="settings-details">
+                <summary>{settingsCopy.detailsSummary}</summary>
+                <p>{settingsCopy.credentialSentence}</p>
+              </details>
+            </div>
+
+            <div class="provider-endpoint-list">
+              <For each={endpointRows()}>
+                {(row) => {
+                  const family = workbenchFacadeFamilyOfEndpointId(row.endpointId);
+                  return (
+                    <ProviderCard
+                      row={row}
+                      family={family}
+                      sides={family === undefined ? undefined : familySideRows()[family]}
+                      preference={
+                        family === undefined ? undefined : endpointPreferences()[family]
+                      }
+                      onPreference={props.onEndpointPreference}
+                      authentication={
+                        authentication()[
+                          family === "claude"
+                            ? "claude-code-desktop"
+                            : family === "codex"
+                              ? "codex-desktop"
+                              : row.endpointId
+                        ]
+                      }
+                      endpointKeyPanels={props.endpointKeyPanels}
+                      endpointBaseUrlPanels={props.endpointBaseUrlPanels}
+                      catalogFreshness={props.catalogFreshness}
+                      onBind={props.onBindSubscriptionAuthentication}
+                      onBegin={props.onBeginSubscriptionAuthentication}
+                      onCancel={props.onCancelSubscriptionAuthentication}
+                    />
+                  );
+                }}
+              </For>
+            </div>
+          </section>
+
+          <div class="section-head tools-section-head">
+            <h2 id="tools-title">{toolsCopy.heading}</h2>
+          </div>
+          <section class="tools-settings" aria-labelledby="tools-title">
+            <ToolRow
+              cliId="claude-code"
+              runtime="claude"
+              row={toolRow("claude-code-desktop")}
+              executablePath={props.runtimeExecutables?.claude}
+              executablePhase={props.runtimeExecutablePhases?.claude}
+              onSaveExecutablePath={props.onSaveRuntimeExecutable}
+              installPhase={props.runtimeInstallPhases?.claude}
+              onInstallExecutable={props.onInstallRuntimeExecutable}
+              cliUpdate={cliUpdatePanel()}
+            />
+            <ToolRow
+              cliId="codex"
+              runtime="codex"
+              row={toolRow("codex-desktop")}
+              executablePath={props.runtimeExecutables?.codex}
+              executablePhase={props.runtimeExecutablePhases?.codex}
+              onSaveExecutablePath={props.onSaveRuntimeExecutable}
+              installPhase={props.runtimeInstallPhases?.codex}
+              onInstallExecutable={props.onInstallRuntimeExecutable}
+              cliUpdate={cliUpdatePanel()}
+            />
+          </section>
+
+          {/* Usage slot: hangs after Providers and Tools. The component is
+              w234's; nothing here reaches inside it. */}
+          <SettingsUsage bridge={props.historyRecoveryBridge} />
+
+          <div class="section-head permission-section-head">
+            <h2 id="claude-permissions-title">
+              {settingsCopy.claudePermissionsHeading}
+            </h2>
+            <span
+              class={`settings-scope ${
+                permissionPersistence().error ? "error" : ""
+              }`.trim()}
+            >
+              {permissionPersistence().label}
+            </span>
+          </div>
+          <section
+            class="appearance-settings"
+            aria-labelledby="claude-permissions-title"
+          >
+            <div class="appearance-row">
+              <span class="appearance-copy">
+                <b id="claude-permission-handling-label">
+                  {settingsCopy.permissionHandlingLabel}
+                </b>
+                <span id="claude-permission-handling-hint">
+                  {settingsCopy.permissionHandlingHint}
+                </span>
+              </span>
+              <span
+                class="appearance-options"
+                role="group"
+                aria-labelledby="claude-permission-handling-label"
+                aria-describedby="claude-permission-handling-hint"
+              >
+                <button
+                  type="button"
+                  class="appearance-option"
+                  aria-pressed={
+                    props.claudePermissionHandling === "without-asking"
+                  }
+                  disabled={
+                    props.claudePermissionHandlingPersistencePhase === "saving"
+                  }
+                  onClick={() =>
+                    props.onClaudePermissionHandling("without-asking")
+                  }
+                >
+                  {settingsCopy.withoutAskingPermissionOption}
+                </button>
+                <button
+                  type="button"
+                  class="appearance-option"
+                  aria-pressed={
+                    props.claudePermissionHandling === "ask-when-needed"
+                  }
+                  disabled={
+                    props.claudePermissionHandlingPersistencePhase === "saving"
+                  }
+                  onClick={() =>
+                    props.onClaudePermissionHandling("ask-when-needed")
+                  }
+                >
+                  {settingsCopy.askWhenNeededPermissionOption}
+                </button>
+              </span>
+            </div>
+          </section>
+          <Show
+            when={
+              props.claudePermissionHandlingPersistencePhase === "save-error"
+            }
+          >
+            <p class="appearance-persistence-error" role="alert">
+              {settingsCopy.permissionPersistenceErrorSentence}
+            </p>
+          </Show>
+          <Show
+            when={
+              props.claudePermissionHandlingPersistencePhase === "load-error"
+            }
+          >
+            <p class="appearance-persistence-error" role="alert">
+              {settingsCopy.permissionLoadErrorSentence}
+            </p>
+          </Show>
+
+          <Show when={recoveryFootSentence()}>
+            {(sentence) => (
+              <p class="settings-foot-note">
+                {settingsCopy.recoveryFootLabel} · {sentence()}
+              </p>
+            )}
+          </Show>
       </div>
     </main>
   );
@@ -1068,10 +1090,37 @@ type FamilySideRows = Readonly<
   >
 >;
 
-const ProviderGroup: Component<{
-  readonly heading: ProviderGroupHeading;
-  readonly rows: readonly WorkbenchRuntimeEndpointStatusRow[];
-  readonly authentication: SettingsSubscriptionAuthenticationState;
+/**
+ * One provider card (w233): the same shape for all five providers. A family
+ * card (Codex, Claude, Kimi -- tickets 20/25) adds one segment switch for its
+ * two backends; the switch is also the persisted manual preference that
+ * orders the facade's automatic resolution. The head carries one plain-words
+ * badge for the side being shown; the discovery facts and the detail
+ * sentence sit behind "Details". The actions strip keeps the subscription
+ * login controls, the API-key block, the codex-api base URL and the catalog
+ * freshness controls exactly as before. Everything about the CLI itself --
+ * version, path, install, update -- lives in the Tools section (step 2); a
+ * card whose CLI is missing says so in one line and points there.
+ */
+const ProviderCard: Component<{
+  readonly row: WorkbenchRuntimeEndpointStatusRow;
+  readonly family?: WorkbenchEndpointFamilyId;
+  readonly sides?: Readonly<
+    Partial<
+      Record<WorkbenchRuntimeEndpointId, WorkbenchRuntimeEndpointStatusRow>
+    >
+  >;
+  readonly preference?: WorkbenchRuntimeEndpointId;
+  readonly onPreference?: (
+    preference: WorkbenchFamilyEndpointPreference,
+  ) => void;
+  /**
+   * Present only for subscription-authentication participants (the desktop
+   * side of Codex and Claude). Static-key endpoints carry no subscription
+   * binding: their card shows the API-key management surface in the same
+   * actions slot where subscription rows place login controls.
+   */
+  readonly authentication?: SettingsSubscriptionAuthenticationEntry;
   readonly endpointKeyPanels?: Partial<
     Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
   >;
@@ -1079,24 +1128,6 @@ const ProviderGroup: Component<{
     Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>
   >;
   readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
-  readonly cliUpdate?: WorkbenchCliUpdatePanel;
-  readonly familySideRows: FamilySideRows;
-  readonly endpointPreferences: WorkbenchFamilyEndpointPreferences;
-  readonly onEndpointPreference: (
-    preference: WorkbenchFamilyEndpointPreference,
-  ) => void;
-  readonly runtimeExecutables?: WorkbenchRuntimeExecutablePaths;
-  readonly runtimeExecutablePhases?: Readonly<
-    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
-  >;
-  readonly onSaveExecutablePath?: (
-    runtime: WorkbenchConfigurableRuntime,
-    executablePath: string,
-  ) => void;
-  readonly runtimeInstallPhases?: Readonly<
-    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
-  >;
-  readonly onInstallExecutable?: (runtime: WorkbenchConfigurableRuntime) => void;
   readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
   readonly onBegin?: (
     endpointId: WorkbenchRuntimeEndpointId,
@@ -1109,128 +1140,42 @@ const ProviderGroup: Component<{
   ) => void;
 }> = (props) => {
   const headingId = () =>
-    props.heading === settingsCopy.catalogAvailableHeading
-      ? "available-catalogs-title"
-      : props.heading === settingsCopy.catalogUnavailableHeading
-        ? "unavailable-catalogs-title"
-        : "unchecked-catalogs-title";
-  const rowFamily = (endpointId: WorkbenchRuntimeEndpointId) =>
-    workbenchFacadeFamilyOfEndpointId(endpointId);
-  const preferences = () =>
-    props.endpointPreferences ?? defaultWorkbenchFamilyEndpointPreferences;
-  return (
-    <section class="provider-group" aria-labelledby={headingId()}>
-      <h3 id={headingId()}>{props.heading}</h3>
-      <div class="provider-endpoint-list">
-        <For each={props.rows}>
-          {(row) => {
-            const family = rowFamily(row.endpointId);
-            return (
-              <Show
-                when={family !== undefined}
-                fallback={
-                  <ProviderCard
-                    row={row}
-                    authentication={props.authentication[row.endpointId]}
-                    endpointKeyPanels={props.endpointKeyPanels}
-                    endpointBaseUrlPanels={props.endpointBaseUrlPanels}
-                    catalogFreshness={props.catalogFreshness}
-                    cliUpdate={props.cliUpdate}
-                    executablePath={props.runtimeExecutables?.[row.runtime]}
-                    executablePhase={props.runtimeExecutablePhases?.[row.runtime]}
-                    onSaveExecutablePath={props.onSaveExecutablePath}
-                    installPhase={props.runtimeInstallPhases?.[row.runtime]}
-                    onInstallExecutable={props.onInstallExecutable}
-                    onBind={props.onBind}
-                    onBegin={props.onBegin}
-                    onCancel={props.onCancel}
-                  />
-                }
-              >
-                <Show
-                  when={family === "kimi"}
-                  fallback={
-                    <SubscriptionFacadeProviderCard
-                      row={row}
-                      family={family === "claude" ? "claude" : "codex"}
-                      sides={props.familySideRows[family === "claude" ? "claude" : "codex"]}
-                      preference={preferences()[family === "claude" ? "claude" : "codex"]}
-                      onPreference={props.onEndpointPreference}
-                      authentication={props.authentication}
-                      endpointKeyPanels={props.endpointKeyPanels}
-                      endpointBaseUrlPanel={
-                        family === "codex"
-                          ? props.endpointBaseUrlPanels?.["codex-api"]
-                          : undefined
-                      }
-                      catalogFreshness={props.catalogFreshness}
-                      cliUpdate={props.cliUpdate}
-                      executablePath={props.runtimeExecutables}
-                      executablePhases={props.runtimeExecutablePhases}
-                      onSaveExecutablePath={props.onSaveExecutablePath}
-                      runtimeInstallPhases={props.runtimeInstallPhases}
-                      onInstallExecutable={props.onInstallExecutable}
-                      onBind={props.onBind}
-                      onBegin={props.onBegin}
-                      onCancel={props.onCancel}
-                    />
-                  }
-                >
-                  <KimiFacadeProviderCard
-                    row={row}
-                    sides={props.familySideRows.kimi}
-                    preference={preferences().kimi}
-                    onPreference={props.onEndpointPreference}
-                    endpointKeyPanels={props.endpointKeyPanels}
-                    endpointBaseUrlPanel={props.endpointBaseUrlPanels?.["kimi-code"]}
-                    catalogFreshness={props.catalogFreshness}
-                  />
-                </Show>
-              </Show>
-            );
-          }}
-        </For>
-      </div>
-    </section>
-  );
-};
-
-/**
- * The merged Kimi card (ticket 20): one "Kimi" presentation for the two
- * genuinely different Kimi endpoints. The badge and the group placement
- * follow the facade row — the backend the selector would resolve to — while
- * the body shows the active segment's own honest status and its complete
- * key management. The segment switch doubles as the persisted manual
- * preference that orders the facade's automatic resolution.
- */
-const KimiFacadeProviderCard: Component<{
-  readonly row: WorkbenchRuntimeEndpointStatusRow;
-  readonly sides: Readonly<
-    Partial<
-      Record<"kimi-code" | "kimi-platform", WorkbenchRuntimeEndpointStatusRow>
-    >
-  >;
-  readonly preference: WorkbenchFamilyEndpointPreferences["kimi"];
-  readonly onPreference: (
-    preference: WorkbenchFamilyEndpointPreference,
-  ) => void;
-  readonly endpointKeyPanels?: Partial<
-    Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
-  >;
-  /** Kimi Code side only (w232); never shown on the Kimi Platform side. */
-  readonly endpointBaseUrlPanel?: WorkbenchEndpointBaseUrlPanel;
-  readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
-}> = (props) => {
-  const headingId = "provider-kimi-heading";
-  const availability = () =>
-    settingsProviderAvailabilityPresentation(props.row.category);
-  const activeRow = () => props.sides[props.preference];
-  const segmentLabel = (
-    backend: WorkbenchFamilyEndpointPreferences["kimi"],
-  ): string =>
-    backend === "kimi-code"
-      ? endpointIdentityCopy.kimi.endpointLabel
-      : endpointIdentityCopy.kimiPlatform.endpointLabel;
+    props.family === undefined
+      ? `provider-${props.row.endpointId}-heading`
+      : `provider-${props.family}-heading`;
+  const segments = (): readonly WorkbenchFamilyEndpointPreference[] =>
+    props.family === "claude"
+      ? ["claude-code-desktop", "claude-api"]
+      : props.family === "codex"
+        ? ["codex-desktop", "codex-api"]
+        : props.family === "kimi"
+          ? ["kimi-code", "kimi-platform"]
+          : [];
+  /** The side on screen: the family preference, or the row itself. */
+  const activeEndpointId = (): WorkbenchRuntimeEndpointId =>
+    props.family === undefined
+      ? props.row.endpointId
+      : (props.preference ?? segments()[0]!);
+  const activeRow = (): WorkbenchRuntimeEndpointStatusRow =>
+    props.sides?.[activeEndpointId()] ?? props.row;
+  const subscriptionSide = () => cliIdForEndpoint(activeEndpointId()) !== undefined;
+  const badge = () =>
+    settingsProviderBadgePresentation(activeRow().category, activeEndpointId());
+  /** The CLI this side runs on is missing: one line, and Tools has the rest. */
+  const toolsHint = (): string | null =>
+    activeRow().category === "runtime-not-located"
+      ? toolsCopy.providerHint(
+          props.row.runtime === "codex" ? toolsCopy.codexName : toolsCopy.claudeName,
+        )
+      : null;
+  const authenticationEntry = () =>
+    subscriptionSide() ? props.authentication : undefined;
+  const binding = () => {
+    const entry = authenticationEntry();
+    return entry === undefined
+      ? undefined
+      : settingsSubscriptionAuthenticationPresentation(entry);
+  };
   const endpointKeyPanel = ():
     | {
         readonly endpointId: WorkbenchEndpointKeyCopyEndpointId;
@@ -1238,384 +1183,139 @@ const KimiFacadeProviderCard: Component<{
       }
     | undefined => {
     const panels = props.endpointKeyPanels;
-    if (panels === undefined) return undefined;
-    const endpointId = props.preference as WorkbenchEndpointKeyCopyEndpointId;
+    if (panels === undefined || subscriptionSide()) return undefined;
+    const endpointId = activeEndpointId() as WorkbenchEndpointKeyCopyEndpointId;
     const panel = panels[endpointId];
     return panel === undefined ? undefined : { endpointId, panel };
   };
+  // The base-URL field (w232) is keyed by the endpoint on screen: GLM,
+  // DeepSeek, Kimi Code and Codex · API carry one; the subscription sides,
+  // Claude · API and Kimi Platform have no entry and so render nothing.
+  const endpointBaseUrlPanel = (): WorkbenchEndpointBaseUrlPanel | undefined =>
+    props.endpointBaseUrlPanels?.[activeEndpointId() as WorkbenchBaseUrlEndpointId];
+  // Catalog freshness is enrolled only for GLM and DeepSeek; Kimi Code has no
+  // verified zero-inference models-list route, and claude-api/codex-api are not
+  // enrolled -- so the lookup simply finds nothing for those.
   const endpointFreshnessReport = ():
     | WorkbenchEndpointCatalogFreshnessReport
     | undefined =>
     props.catalogFreshness?.reports?.find(
-      (report) => report.endpointId === props.preference,
+      (report) => report.endpointId === activeEndpointId(),
     );
   return (
-    <section class="provider provider-kimi" aria-labelledby={headingId}>
-      <div class="provider-head">
-        <span class={"rt-dot " + runtimeClass(props.row.runtimeFamilyLabel)} aria-hidden="true" />
-        <div>
-          <div
-            id={headingId}
-            class={"ph-name " + runtimeClass(props.row.runtimeFamilyLabel)}
-          >
-            {props.row.runtimeFamilyLabel}
-          </div>
-          <div class="ph-sub">
-            {activeRow()?.endpointLabel ?? segmentLabel(props.preference)}
-          </div>
-        </div>
-        <span class={"badge " + availability().tone}>
-          {availability().label}
-        </span>
-      </div>
-      <div class="provider-body">
-        <div
-          class="kimi-segments"
-          role="group"
-          aria-label={familyFacadeCopy.segmentsLabel("Kimi")}
-        >
-          {(["kimi-code", "kimi-platform"] as const).map((backend) => (
-            <button
-              type="button"
-              class="btn sm kimi-segment"
-              classList={{ ghost: props.preference !== backend }}
-              aria-pressed={props.preference === backend}
-              onClick={() => props.onPreference(backend)}
-            >
-              {segmentLabel(backend)}
-            </button>
-          ))}
-        </div>
-        <dl class="kv">
-          <InspectorFact
-            label={settingsCopy.statusFactLabel}
-            value={activeRow()?.statusLabel ?? props.row.statusLabel}
-            tone={availability().tone}
-          />
-          <InspectorFact
-            label={settingsCopy.catalogFactLabel}
-            value={
-              activeRow()?.category === "catalog-ready"
-                ? settingsCopy.catalogReadyValue
-                : activeRow()?.category === "not-inspected"
-                  ? settingsCopy.notInspectedValue
-                  : settingsCopy.catalogUnavailableValue
-            }
-            tone={activeRow()?.category === "catalog-ready" ? "ok" : undefined}
-          />
-          <Show when={activeRow()?.endpoint}>
-            {(endpoint) => (
-              <InspectorFact
-                label={settingsCopy.modelsFactLabel}
-                value={String(endpoint().models.length)}
-                mono
-              />
-            )}
-          </Show>
-        </dl>
-        <p class="provider-status-detail">
-          {activeRow()?.detail ?? props.row.detail}
-        </p>
-      </div>
-      <div class="provider-actions">
-        <Show when={endpointKeyPanel()}>
-          {(entry) => (
-            <EndpointKeyControls
-              endpointId={entry().endpointId}
-              panel={entry().panel}
-            />
-          )}
-        </Show>
-        <Show when={props.preference === "kimi-code" && props.endpointBaseUrlPanel}>
-          {(panel) => (
-            <EndpointBaseUrlControls endpointId="kimi-code" panel={panel()} />
-          )}
-        </Show>
-        <Show when={endpointFreshnessReport()}>
-          {(report) => (
-            <EndpointCatalogFreshnessControls
-              report={report()}
-              refreshing={props.catalogFreshness?.refreshing ?? false}
-              onRefresh={() => props.catalogFreshness?.onRefresh()}
-            />
-          )}
-        </Show>
-      </div>
-    </section>
-  );
-};
-
-/**
- * The merged subscription-family card (ticket 25): one "Claude" / "Codex"
- * presentation for the desktop-subscription and API endpoints. The badge and
- * the group placement follow the facade row — the backend the selector would
- * resolve to — while the body shows the active segment's own honest status.
- * The subscription face carries the existing login/logout/status controls
- * (plus the runtime lookup when the desktop CLI is missing); the API face
- * carries the existing generalized key controls. The segment switch doubles
- * as the persisted manual preference that orders the facade's automatic
- * (subscription-first) resolution.
- */
-const SubscriptionFacadeProviderCard: Component<{
-  readonly row: WorkbenchRuntimeEndpointStatusRow;
-  readonly family: "claude" | "codex";
-  readonly sides: Readonly<
-    Partial<
-      Record<WorkbenchRuntimeEndpointId, WorkbenchRuntimeEndpointStatusRow>
-    >
-  >;
-  readonly preference: WorkbenchFamilyEndpointPreferences[WorkbenchEndpointFamilyId];
-  readonly onPreference: (
-    preference: WorkbenchFamilyEndpointPreference,
-  ) => void;
-  readonly authentication: SettingsSubscriptionAuthenticationState;
-  readonly endpointKeyPanels?: Partial<
-    Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
-  >;
-  /** codex-api side only (w223/w232); never on the claude-api side. */
-  readonly endpointBaseUrlPanel?: WorkbenchEndpointBaseUrlPanel;
-  readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
-  readonly cliUpdate?: WorkbenchCliUpdatePanel;
-  readonly executablePath?: WorkbenchRuntimeExecutablePaths;
-  readonly executablePhases?: Readonly<
-    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
-  >;
-  readonly onSaveExecutablePath?: (
-    runtime: WorkbenchConfigurableRuntime,
-    executablePath: string,
-  ) => void;
-  readonly runtimeInstallPhases?: Readonly<
-    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
-  >;
-  readonly onInstallExecutable?: (runtime: WorkbenchConfigurableRuntime) => void;
-  readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
-  readonly onBegin?: (
-    endpointId: WorkbenchRuntimeEndpointId,
-    preparationKey: string,
-    action: WorkbenchSubscriptionAuthenticationAction,
-  ) => void;
-  readonly onCancel?: (
-    endpointId: WorkbenchRuntimeEndpointId,
-    preparationKey: string,
-  ) => void;
-}> = (props) => {
-  const subscriptionEndpointId: WorkbenchRuntimeEndpointId =
-    props.family === "claude" ? "claude-code-desktop" : "codex-desktop";
-  const apiEndpointId: WorkbenchRuntimeEndpointId =
-    props.family === "claude" ? "claude-api" : "codex-api";
-  const headingId = `provider-${props.family}-heading`;
-  const availability = () =>
-    settingsProviderAvailabilityPresentation(props.row.category);
-  const subscriptionRow = () => props.sides[subscriptionEndpointId];
-  const apiRow = () => props.sides[apiEndpointId];
-  const onSubscriptionSide = () => props.preference === subscriptionEndpointId;
-  const runtimeLookup = () => subscriptionRow()?.lookup ?? undefined;
-  const configuredExecutablePath = () =>
-    props.executablePath?.[props.family] ?? "";
-  const activeRow = () =>
-    onSubscriptionSide() ? subscriptionRow() : apiRow();
-  const segmentLabel = (backend: WorkbenchRuntimeEndpointId): string =>
-    backend === subscriptionEndpointId
-      ? (props.family === "claude"
-          ? endpointIdentityCopy.claude.endpointLabel
-          : endpointIdentityCopy.codex.endpointLabel)
-      : (props.family === "claude"
-          ? endpointIdentityCopy.claudeApi.endpointLabel
-          : endpointIdentityCopy.codexApi.endpointLabel);
-  const authenticationEntry = () =>
-    props.authentication[subscriptionEndpointId];
-  const binding = () =>
-    authenticationEntry() === undefined
-      ? undefined
-      : settingsSubscriptionAuthenticationPresentation(authenticationEntry()!);
-  const endpointKeyPanel = ():
-    | {
-        readonly endpointId: WorkbenchEndpointKeyCopyEndpointId;
-        readonly panel: WorkbenchEndpointKeyPanel;
-      }
-    | undefined => {
-    if (!onSubscriptionSide()) {
-      const panels = props.endpointKeyPanels;
-      if (panels === undefined) return undefined;
-      const endpointId =
-        apiEndpointId as WorkbenchEndpointKeyCopyEndpointId;
-      const panel = panels[endpointId];
-      return panel === undefined ? undefined : { endpointId, panel };
-    }
-    return undefined;
-  };
-  // codex-api only, same slot as the API key row -- never on the desktop
-  // subscription side, and never for the Claude · API card.
-  const codexApiBaseUrlPanel = (): WorkbenchEndpointBaseUrlPanel | undefined => {
-    if (onSubscriptionSide() || props.family !== "codex") return undefined;
-    return props.endpointBaseUrlPanel;
-  };
-  // Catalog freshness is enrolled only for GLM and DeepSeek; Kimi Code has no
-  // verified zero-inference models-list route, and claude-api/codex-api are not
-  // enrolled.
-  const cliUpdateEntry = ():
-    | {
-        readonly cliId: WorkbenchCliUpdateCliId;
-        readonly report: WorkbenchCliUpdateCheckReport | undefined;
-      }
-    | undefined => {
-    if (!onSubscriptionSide()) return undefined;
-    const panel = props.cliUpdate;
-    if (panel === undefined) return undefined;
-    const cliId = cliIdForEndpoint(subscriptionEndpointId);
-    if (cliId === undefined) return undefined;
-    return Object.freeze({
-      cliId,
-      report: panel.reports?.find((report) => report.cliId === cliId),
-    });
-  };
-  return (
     <section
-      class={`provider provider-${props.family}`}
-      aria-labelledby={headingId}
+      class={props.family === undefined ? "provider" : `provider provider-${props.family}`}
+      aria-labelledby={headingId()}
     >
       <div class="provider-head">
-        <span class={"rt-dot " + runtimeClass(props.row.runtimeFamilyLabel)} aria-hidden="true" />
+        <span
+          class={"rt-dot " + runtimeClass(props.row.runtimeFamilyLabel)}
+          aria-hidden="true"
+        />
         <div>
           <div
-            id={headingId}
+            id={headingId()}
             class={"ph-name " + runtimeClass(props.row.runtimeFamilyLabel)}
           >
             {props.row.runtimeFamilyLabel}
           </div>
-          <div class="ph-sub">
-            {activeRow()?.endpointLabel ?? segmentLabel(props.preference)}
-          </div>
+          <div class="ph-sub">{activeRow().endpointLabel}</div>
         </div>
-        <span class={"badge " + availability().tone}>
-          {availability().label}
+        <span class={"badge " + badge().tone} title={activeRow().statusLabel}>
+          {badge().label}
         </span>
       </div>
       <div class="provider-body">
-        <div
-          class="kimi-segments"
-          role="group"
-          aria-label={familyFacadeCopy.segmentsLabel(props.row.runtimeFamilyLabel)}
-        >
-          {[subscriptionEndpointId, apiEndpointId].map((backend) => (
-            <button
-              type="button"
-              class="btn sm kimi-segment"
-              classList={{ ghost: props.preference !== backend }}
-              aria-pressed={props.preference === backend}
-              onClick={() => props.onPreference(backend)}
-            >
-              {segmentLabel(backend)}
-            </button>
-          ))}
-        </div>
-        <dl class="kv">
-          <InspectorFact
-            label={settingsCopy.statusFactLabel}
-            value={activeRow()?.statusLabel ?? props.row.statusLabel}
-            tone={availability().tone}
-          />
-          <InspectorFact
-            label={settingsCopy.catalogFactLabel}
-            value={
-              activeRow()?.category === "catalog-ready"
-                ? settingsCopy.catalogReadyValue
-                : activeRow()?.category === "not-inspected"
-                  ? settingsCopy.notInspectedValue
-                  : settingsCopy.catalogUnavailableValue
-            }
-            tone={activeRow()?.category === "catalog-ready" ? "ok" : undefined}
-          />
-          <Show when={activeRow()?.endpoint}>
-            {(endpoint) => (
-              <InspectorFact
-                label={settingsCopy.modelsFactLabel}
-                value={String(endpoint().models.length)}
-                mono
-              />
-            )}
-          </Show>
-        </dl>
-        <p class="provider-status-detail">
-          {activeRow()?.detail ?? props.row.detail}
-        </p>
-        <Show
-          when={
-            onSubscriptionSide() &&
-            (runtimeLookup() !== undefined ||
-              configuredExecutablePath().trim().length > 0)
-          }
-        >
-          <div class="provider-lookup">
-            <Show when={runtimeLookup()}>
-              {(lookup) => (
-                <>
-                  <p class="provider-lookup-label">
-                    {runtimeLookupCopy.lookedForLabel}
-                  </p>
-                  <ul class="provider-lookup-list">
-                    <For each={lookup().places}>
-                      {(place) => (
-                        <li>{runtimeLookupPlaceCopy(place.names, place.location)}</li>
-                      )}
-                    </For>
-                  </ul>
-                  <p class="provider-lookup-get">
-                    <span class="provider-lookup-get-label">
-                      {runtimeLookupCopy.getItLabel}
-                    </span>{" "}
-                    <span class="provider-lookup-url">{lookup().installUrl}</span>
-                  </p>
-                </>
+        <Show when={props.family !== undefined}>
+          <div
+            class="provider-segments"
+            role="group"
+            aria-label={familyFacadeCopy.segmentsLabel(props.row.runtimeFamilyLabel)}
+          >
+            <For each={segments()}>
+              {(backend) => (
+                <button
+                  type="button"
+                  class="btn sm provider-segment"
+                  classList={{ ghost: activeEndpointId() !== backend }}
+                  aria-pressed={activeEndpointId() === backend}
+                  onClick={() => props.onPreference?.(backend)}
+                >
+                  {segmentLabel(backend)}
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+        <details class="settings-details provider-details">
+          <summary>{settingsCopy.detailsSummary}</summary>
+          <dl class="kv">
+            <InspectorFact
+              label={settingsCopy.statusFactLabel}
+              value={activeRow().statusLabel}
+              tone={badge().tone}
+            />
+            <InspectorFact
+              label={settingsCopy.catalogFactLabel}
+              value={
+                activeRow().category === "catalog-ready"
+                  ? settingsCopy.catalogReadyValue
+                  : activeRow().category === "not-inspected"
+                    ? settingsCopy.notInspectedValue
+                    : settingsCopy.catalogUnavailableValue
+              }
+              tone={activeRow().category === "catalog-ready" ? "ok" : undefined}
+            />
+            <Show when={activeRow().endpoint}>
+              {(endpoint) => (
+                <InspectorFact
+                  label={settingsCopy.modelsFactLabel}
+                  value={String(endpoint().models.length)}
+                  mono
+                />
               )}
             </Show>
-            <RuntimeExecutableField
-              runtime={props.family}
-              fieldScope={`${props.family}-family`}
-              value={configuredExecutablePath()}
-              phase={props.executablePhases?.[props.family]}
-              catalogReady={activeRow()?.category === "catalog-ready"}
-              onSave={props.onSaveExecutablePath}
-              installPhase={props.runtimeInstallPhases?.[props.family]}
-              onInstall={props.onInstallExecutable}
-            />
-          </div>
+          </dl>
+          <p class="provider-status-detail">{activeRow().detail}</p>
+        </details>
+        <Show when={toolsHint()}>
+          {(hint) => <p class="provider-tools-hint">{hint()}</p>}
         </Show>
       </div>
       <div class="provider-actions">
-        <Show when={onSubscriptionSide() && binding() !== undefined}>
-          {(_binding) => {
-            const bindingValue = binding()!;
+        <Show when={binding()}>
+          {(bindingValue) => {
+            const entry = () => authenticationEntry()!;
             return (
               <div class="provider-binding-copy">
                 <span
-                  class={`provider-binding-status ${bindingValue.tone}`}
+                  class={`provider-binding-status ${bindingValue().tone}`}
                   role="status"
                   aria-label={bindingStatusAriaCopy(
                     props.row.runtimeFamilyLabel,
-                    bindingValue.label,
+                    bindingValue().label,
                   )}
                 >
                   <span>{settingsCopy.subscriptionSignIn}</span>
-                  <strong>{bindingValue.label}</strong>
+                  <strong>{bindingValue().label}</strong>
                 </span>
-                <p>{bindingValue.detail}</p>
-                <Show when={bindingValue.feedback}>
+                <p>{bindingValue().detail}</p>
+                <Show when={bindingValue().feedback}>
                   {(feedback) => (
                     <p class="provider-binding-feedback" role="status" aria-live="polite">
                       {feedback()}
                     </p>
                   )}
                 </Show>
-                <Show when={authenticationEntry()!.signInUrl}>
+                <Show when={entry().signInUrl}>
                   {(url) => <SubscriptionSignInLink url={url()} />}
                 </Show>
-                <Show when={bindingValue.blockedStatement}>
+                <Show when={bindingValue().blockedStatement}>
                   {(statement) => (
                     <div class="provider-auth-blockers" role="alert">
                       <p>{statement()}</p>
                       <ul>
-                        <For each={bindingValue.blockers}>
+                        <For each={bindingValue().blockers}>
                           {(blocker) => (
                             <li>
                               {blocker.label}: {blocker.count}
@@ -1626,7 +1326,7 @@ const SubscriptionFacadeProviderCard: Component<{
                     </div>
                   )}
                 </Show>
-                <Show when={authenticationEntry()!.confirmation}>
+                <Show when={entry().confirmation}>
                   {(confirmation) => (
                     <div class="provider-auth-confirmation" role="group">
                       <p>
@@ -1645,7 +1345,7 @@ const SubscriptionFacadeProviderCard: Component<{
                           disabled={props.onBegin === undefined}
                           onClick={() =>
                             props.onBegin?.(
-                              subscriptionEndpointId,
+                              activeEndpointId(),
                               confirmation().preparationKey,
                               confirmation().action,
                             )
@@ -1661,7 +1361,7 @@ const SubscriptionFacadeProviderCard: Component<{
                           disabled={props.onCancel === undefined}
                           onClick={() =>
                             props.onCancel?.(
-                              subscriptionEndpointId,
+                              activeEndpointId(),
                               confirmation().preparationKey,
                             )
                           }
@@ -1673,26 +1373,26 @@ const SubscriptionFacadeProviderCard: Component<{
                   )}
                 </Show>
                 <div class="provider-binding-actions">
-                  <Show when={authenticationEntry()!.confirmation === null}>
+                  <Show when={entry().confirmation === null}>
                     <button
                       type="button"
                       class="btn sm"
                       disabled={
                         props.onBind === undefined ||
-                        bindingValue.pending ||
-                        bindingValue.inspectionPending ||
-                        bindingValue.blockedStatement !== null
+                        bindingValue().pending ||
+                        bindingValue().inspectionPending ||
+                        bindingValue().blockedStatement !== null
                       }
                       aria-busy={
-                        bindingValue.pending || bindingValue.inspectionPending
+                        bindingValue().pending || bindingValue().inspectionPending
                       }
                       aria-label={bindActionAriaCopy(
-                        bindingValue.actionLabel,
+                        bindingValue().actionLabel,
                         props.row.runtimeFamilyLabel,
                       )}
-                      onClick={() => props.onBind?.(subscriptionEndpointId)}
+                      onClick={() => props.onBind?.(activeEndpointId())}
                     >
-                      {bindingValue.actionLabel}
+                      {bindingValue().actionLabel}
                     </button>
                   </Show>
                 </div>
@@ -1708,31 +1408,171 @@ const SubscriptionFacadeProviderCard: Component<{
             />
           )}
         </Show>
-        <Show when={codexApiBaseUrlPanel()}>
+        <Show when={endpointBaseUrlPanel()}>
           {(panel) => (
-            <EndpointBaseUrlControls endpointId="codex-api" panel={panel()} />
+            <EndpointBaseUrlControls
+              endpointId={activeEndpointId() as WorkbenchBaseUrlEndpointId}
+              panel={panel()}
+            />
           )}
         </Show>
-        <Show when={cliUpdateEntry()}>
-          {(entry) => (
-            <CliUpdateControls
-              cliId={entry().cliId}
-              report={entry().report}
-              phase={props.cliUpdate?.runPhase(entry().cliId) ?? idleCliUpdateRunPhase}
-              checking={props.cliUpdate?.checking ?? false}
-              relaunchPhase={
-                props.cliUpdate?.relaunchPhase ?? idleCliUpdateRelaunchPhase
-              }
-              onUpdate={() => props.cliUpdate?.onUpdate(entry().cliId)}
-              onRecheck={() => props.cliUpdate?.onRecheck()}
-              onRestartNow={() => props.cliUpdate?.onRestartNow()}
-              onAcknowledgeRestart={() =>
-                props.cliUpdate?.onAcknowledgeRestart(entry().cliId)
-              }
+        <Show when={endpointFreshnessReport()}>
+          {(report) => (
+            <EndpointCatalogFreshnessControls
+              report={report()}
+              refreshing={props.catalogFreshness?.refreshing ?? false}
+              onRefresh={() => props.catalogFreshness?.onRefresh()}
             />
           )}
         </Show>
       </div>
+    </section>
+  );
+};
+
+/**
+ * One CLI in the Tools section (w233 step 2): what the lookup found, the
+ * version when something actually reported one, the product's own install,
+ * the update block (ticket 18 semantics unchanged) and, behind "Custom path",
+ * the typed-path escape hatch. This is the only place these render; the
+ * provider cards point here.
+ */
+const ToolRow: Component<{
+  readonly cliId: WorkbenchCliUpdateCliId;
+  readonly runtime: WorkbenchConfigurableRuntime;
+  /** The desktop endpoint's discovery row; absent when the roster lacks it. */
+  readonly row?: WorkbenchRuntimeEndpointStatusRow;
+  readonly executablePath?: string;
+  readonly executablePhase?: SettingsRuntimeExecutablePhase;
+  readonly onSaveExecutablePath?: (
+    runtime: WorkbenchConfigurableRuntime,
+    executablePath: string,
+  ) => void;
+  readonly installPhase?: SettingsRuntimeInstallPhase;
+  readonly onInstallExecutable?: (runtime: WorkbenchConfigurableRuntime) => void;
+  readonly cliUpdate?: WorkbenchCliUpdatePanel;
+}> = (props) => {
+  const name = () =>
+    props.runtime === "codex" ? toolsCopy.codexName : toolsCopy.claudeName;
+  const familyLabel = () => (props.runtime === "codex" ? "Codex" : "Claude");
+  const headingId = () => `tool-${props.runtime}-heading`;
+  const configuredPath = () => props.executablePath ?? "";
+  const report = () =>
+    props.cliUpdate?.reports?.find((entry) => entry.cliId === props.cliId);
+  // Only a value somebody actually returned: the update check's current
+  // version, or the version the product's own install read back.
+  const version = (): string => {
+    const installed = props.installPhase;
+    if (installed?.status === "installed") return installed.version;
+    const checked = report();
+    if (checked?.status === "update-available") return checked.currentVersion;
+    return toolsCopy.versionUnknown;
+  };
+  const presence = (): { readonly label: string; readonly tone: "ok" | "warn" | "off" } => {
+    if (props.installPhase?.status === "installed" || isPrivateCliInstallPath(configuredPath())) {
+      return { label: toolsCopy.found, tone: "ok" };
+    }
+    switch (props.row?.category) {
+      case "runtime-not-located":
+        return { label: toolsCopy.notFound, tone: "warn" };
+      case "inspection-failed":
+        return { label: toolsCopy.checkFailed, tone: "warn" };
+      case "not-inspected":
+      case undefined:
+        return { label: toolsCopy.notChecked, tone: "off" };
+      default:
+        return { label: toolsCopy.found, tone: "ok" };
+    }
+  };
+  const lookup = () => props.row?.lookup ?? undefined;
+  const saving = () => props.executablePhase?.status === "saving";
+  const installing = () => props.installPhase?.status === "installing";
+  return (
+    <section
+      class={`provider tool-row tool-${props.runtime}`}
+      aria-labelledby={headingId()}
+    >
+      <div class="provider-head">
+        <span class={"rt-dot " + runtimeClass(familyLabel())} aria-hidden="true" />
+        <div>
+          <div id={headingId()} class={"ph-name " + runtimeClass(familyLabel())}>
+            {name()}
+          </div>
+          <div class="ph-sub">
+            {toolsCopy.versionLabel} {version()}
+            <Show when={configuredPath().trim().length > 0}>
+              {" · "}
+              <span class="tool-path">{configuredPath()}</span>
+            </Show>
+          </div>
+        </div>
+        <span class={"badge " + presence().tone} title={props.row?.statusLabel}>
+          {presence().label}
+        </span>
+      </div>
+      <div class="provider-body">
+        <Show when={props.onInstallExecutable}>
+          {(onInstall) => (
+            <RuntimeInstallControl
+              runtime={props.runtime}
+              configuredPath={configuredPath()}
+              phase={props.installPhase}
+              disabled={saving() || installing()}
+              onInstall={onInstall()}
+            />
+          )}
+        </Show>
+        <details class="settings-details tool-details">
+          <summary>{toolsCopy.customPathSummary}</summary>
+          <Show when={lookup()}>
+            {(places) => (
+              <>
+                <p class="provider-lookup-label">
+                  {runtimeLookupCopy.lookedForLabel}
+                </p>
+                <ul class="provider-lookup-list">
+                  <For each={places().places}>
+                    {(place) => (
+                      <li>{runtimeLookupPlaceCopy(place.names, place.location)}</li>
+                    )}
+                  </For>
+                </ul>
+                <p class="provider-lookup-get">
+                  <span class="provider-lookup-get-label">
+                    {runtimeLookupCopy.getItLabel}
+                  </span>{" "}
+                  <span class="provider-lookup-url">{places().installUrl}</span>
+                </p>
+              </>
+            )}
+          </Show>
+          <RuntimeExecutableField
+            runtime={props.runtime}
+            fieldScope={props.runtime}
+            value={configuredPath()}
+            phase={props.executablePhase}
+            catalogReady={props.row?.category === "catalog-ready"}
+            onSave={props.onSaveExecutablePath}
+          />
+        </details>
+      </div>
+      <Show when={props.cliUpdate}>
+        {(panel) => (
+          <div class="provider-actions">
+            <CliUpdateControls
+              cliId={props.cliId}
+              report={report()}
+              phase={panel().runPhase(props.cliId)}
+              checking={panel().checking}
+              relaunchPhase={panel().relaunchPhase}
+              onUpdate={() => panel().onUpdate(props.cliId)}
+              onRecheck={() => panel().onRecheck()}
+              onRestartNow={() => panel().onRestartNow()}
+              onAcknowledgeRestart={() => panel().onAcknowledgeRestart(props.cliId)}
+            />
+          </div>
+        )}
+      </Show>
     </section>
   );
 };
@@ -1751,10 +1591,11 @@ const SubscriptionFacadeProviderCard: Component<{
 const RuntimeExecutableField: Component<{
   readonly runtime: WorkbenchConfigurableRuntime;
   /**
-   * A card-unique key, folded into the field id. GLM piggybacks the same
-   * "claude" runtime as the Claude family card, so `runtime` alone is not
-   * unique: two cards would render the same id, and a `<label for>` only
-   * ever resolves to the first element carrying it.
+   * A page-unique key, folded into the field id. Since w233 step 2 the field
+   * renders once per runtime, in the Tools section, so the runtime name is
+   * enough -- but the key stays explicit because a `<label for>` only ever
+   * resolves to the first element carrying an id, and the w190 walkthrough
+   * found two cards sharing one.
    */
   readonly fieldScope: string;
   readonly value: string;
@@ -1770,8 +1611,6 @@ const RuntimeExecutableField: Component<{
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
   ) => void;
-  readonly installPhase?: SettingsRuntimeInstallPhase;
-  readonly onInstall?: (runtime: WorkbenchConfigurableRuntime) => void;
 }> = (props) => {
   const [draft, setDraft] = createSignal(props.value);
   // The stored value only changes when a save or an install has answered, and
@@ -1784,7 +1623,6 @@ const RuntimeExecutableField: Component<{
     return phase.status === "saved" && props.catalogReady ? undefined : phase;
   };
   const saving = () => props.phase?.status === "saving";
-  const installing = () => props.installPhase?.status === "installing";
   return (
     <form
       class="runtime-executable-form"
@@ -1856,15 +1694,6 @@ const RuntimeExecutableField: Component<{
                     : ""}
           </p>
         )}
-      </Show>
-      <Show when={props.onInstall}>
-        <RuntimeInstallControl
-          runtime={props.runtime}
-          configuredPath={props.value}
-          phase={props.installPhase}
-          disabled={saving() || installing()}
-          onInstall={props.onInstall!}
-        />
       </Show>
     </form>
   );
@@ -1949,345 +1778,6 @@ const RuntimeInstallControl: Component<{
         )}
       </Show>
     </div>
-  );
-};
-
-const ProviderCard: Component<{
-  readonly row: WorkbenchRuntimeEndpointStatusRow;
-  /**
-   * Present only for subscription-authentication participants. Static-key
-   * endpoints (GLM Coding Plan, Kimi Code, DeepSeek API) carry no
-   * subscription binding: their card shows endpoint-discovery truth plus the
-   * API-key management surface, in the same actions slot where subscription
-   * rows place login controls.
-   */
-  readonly authentication: SettingsSubscriptionAuthenticationEntry | undefined;
-  readonly endpointKeyPanels?: Partial<
-    Record<WorkbenchEndpointKeyCopyEndpointId, WorkbenchEndpointKeyPanel>
-  >;
-  /** GLM Coding Plan / DeepSeek API only (w232); other rows never match their id. */
-  readonly endpointBaseUrlPanels?: Partial<
-    Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>
-  >;
-  readonly catalogFreshness?: WorkbenchCatalogFreshnessPanel;
-  readonly cliUpdate?: WorkbenchCliUpdatePanel;
-  readonly executablePath?: string;
-  readonly executablePhase?: SettingsRuntimeExecutablePhase;
-  readonly onSaveExecutablePath?: (
-    runtime: WorkbenchConfigurableRuntime,
-    executablePath: string,
-  ) => void;
-  readonly installPhase?: SettingsRuntimeInstallPhase;
-  readonly onInstallExecutable?: (runtime: WorkbenchConfigurableRuntime) => void;
-  readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
-  readonly onBegin?: (
-    endpointId: WorkbenchRuntimeEndpointId,
-    preparationKey: string,
-    action: WorkbenchSubscriptionAuthenticationAction,
-  ) => void;
-  readonly onCancel?: (
-    endpointId: WorkbenchRuntimeEndpointId,
-    preparationKey: string,
-  ) => void;
-}> = (props) => {
-  const headingId = () => `provider-${props.row.endpointId}-heading`;
-  const availability = () =>
-    settingsProviderAvailabilityPresentation(props.row.category);
-  const endpointKeyPanel = ():
-    | {
-        readonly endpointId: WorkbenchEndpointKeyCopyEndpointId;
-        readonly panel: WorkbenchEndpointKeyPanel;
-      }
-    | undefined => {
-    const panels = props.endpointKeyPanels;
-    if (panels === undefined) return undefined;
-    const endpointId = props.row.endpointId as WorkbenchEndpointKeyCopyEndpointId;
-    const panel = panels[endpointId];
-    return panel === undefined ? undefined : { endpointId, panel };
-  };
-  const endpointBaseUrlPanel = (): WorkbenchEndpointBaseUrlPanel | undefined => {
-    const endpointId = props.row.endpointId;
-    if (
-      endpointId !== "glm-coding-plan" &&
-      endpointId !== "deepseek-api"
-    ) {
-      return undefined;
-    }
-    return props.endpointBaseUrlPanels?.[endpointId];
-  };
-  const endpointFreshnessReport = ():
-    | WorkbenchEndpointCatalogFreshnessReport
-    | undefined =>
-    props.catalogFreshness?.reports?.find(
-      (report) => report.endpointId === props.row.endpointId,
-    );
-  const cliUpdateEntry = ():
-    | {
-        readonly cliId: WorkbenchCliUpdateCliId;
-        readonly report: WorkbenchCliUpdateCheckReport | undefined;
-      }
-    | undefined => {
-    const panel = props.cliUpdate;
-    if (panel === undefined) return undefined;
-    const cliId = cliIdForEndpoint(props.row.endpointId);
-    if (cliId === undefined) return undefined;
-    return Object.freeze({
-      cliId,
-      report: panel.reports?.find((report) => report.cliId === cliId),
-    });
-  };
-  return (
-    <section class="provider" aria-labelledby={headingId()}>
-      <div class="provider-head">
-        <span
-          class={"rt-dot " + runtimeClass(props.row.runtimeFamilyLabel)}
-          aria-hidden="true"
-        />
-        <div>
-          <div
-            id={headingId()}
-            class={
-              "ph-name " + runtimeClass(props.row.runtimeFamilyLabel)
-            }
-          >
-            {props.row.runtimeFamilyLabel}
-          </div>
-          <div class="ph-sub">{props.row.endpointLabel}</div>
-        </div>
-        <span class={"badge " + availability().tone}>
-          {availability().label}
-        </span>
-      </div>
-      <div class="provider-body">
-        <dl class="kv">
-          <InspectorFact
-            label={settingsCopy.statusFactLabel}
-            value={props.row.statusLabel}
-            tone={availability().tone}
-          />
-          <InspectorFact
-            label={settingsCopy.catalogFactLabel}
-            value={
-              props.row.category === "catalog-ready"
-                ? settingsCopy.catalogReadyValue
-                : props.row.category === "not-inspected"
-                  ? settingsCopy.notInspectedValue
-                  : settingsCopy.catalogUnavailableValue
-            }
-            tone={props.row.category === "catalog-ready" ? "ok" : undefined}
-          />
-          <Show when={props.row.endpoint}>
-            {(endpoint) => (
-              <InspectorFact
-                label={settingsCopy.modelsFactLabel}
-                value={String(endpoint().models.length)}
-                mono
-              />
-            )}
-          </Show>
-        </dl>
-        <p class="provider-status-detail">{props.row.detail}</p>
-        <Show when={props.row.lookup}>
-          {(lookup) => (
-            <div class="provider-lookup">
-              <p class="provider-lookup-label">
-                {runtimeLookupCopy.lookedForLabel}
-              </p>
-              <ul class="provider-lookup-list">
-                <For each={lookup().places}>
-                  {(place) => (
-                    <li>{runtimeLookupPlaceCopy(place.names, place.location)}</li>
-                  )}
-                </For>
-              </ul>
-              <p class="provider-lookup-get">
-                <span class="provider-lookup-get-label">
-                  {runtimeLookupCopy.getItLabel}
-                </span>{" "}
-                <span class="provider-lookup-url">{lookup().installUrl}</span>
-              </p>
-              <RuntimeExecutableField
-                runtime={props.row.runtime}
-                fieldScope={props.row.endpointId}
-                value={props.executablePath ?? ""}
-                phase={props.executablePhase}
-                catalogReady={props.row.category === "catalog-ready"}
-                onSave={props.onSaveExecutablePath}
-                installPhase={props.installPhase}
-                onInstall={props.onInstallExecutable}
-              />
-            </div>
-          )}
-        </Show>
-      </div>
-      <div class="provider-actions">
-        <Show when={props.authentication}>
-          {(auth) => {
-            const binding = () =>
-              settingsSubscriptionAuthenticationPresentation(auth());
-            return (
-              <div class="provider-binding-copy">
-                <span
-                  class={`provider-binding-status ${binding().tone}`}
-                  role="status"
-                  aria-label={bindingStatusAriaCopy(props.row.runtimeFamilyLabel, binding().label)}
-                >
-                  <span>{settingsCopy.subscriptionSignIn}</span>
-                  <strong>{binding().label}</strong>
-                </span>
-                <p>{binding().detail}</p>
-                <Show when={binding().feedback}>
-                  {(feedback) => (
-                    <p class="provider-binding-feedback" role="status" aria-live="polite">
-                      {feedback()}
-                    </p>
-                  )}
-                </Show>
-                <Show when={auth().signInUrl}>
-                  {(url) => <SubscriptionSignInLink url={url()} />}
-                </Show>
-                <Show when={binding().blockedStatement}>
-                  {(statement) => (
-                    <div class="provider-auth-blockers" role="alert">
-                      <p>{statement()}</p>
-                      <ul>
-                        <For each={binding().blockers}>
-                          {(blocker) => (
-                            <li>
-                              {blocker.label}: {blocker.count}
-                            </li>
-                          )}
-                        </For>
-                      </ul>
-                    </div>
-                  )}
-                </Show>
-                <Show when={auth().confirmation}>
-                  {(confirmation) => (
-                    <div class="provider-auth-confirmation" role="group">
-                      <p>
-                        {settingsCopy.confirmationSentence}
-                      </p>
-                      <p>
-                        {authConsequencesCopy(
-                          confirmation().resumableSessionCount,
-                          confirmation().projectCount,
-                        )}
-                      </p>
-                      <div class="provider-auth-confirmation-actions">
-                        <button
-                          type="button"
-                          class="btn sm"
-                          disabled={props.onBegin === undefined}
-                          onClick={() =>
-                            props.onBegin?.(
-                              props.row.endpointId,
-                              confirmation().preparationKey,
-                              confirmation().action,
-                            )
-                          }
-                        >
-                          {confirmation().action === "logout"
-                            ? settingsCopy.confirmLogout
-                            : settingsCopy.continueWithLogin}
-                        </button>
-                        <button
-                          type="button"
-                          class="btn ghost sm"
-                          disabled={props.onCancel === undefined}
-                          onClick={() =>
-                            props.onCancel?.(
-                              props.row.endpointId,
-                              confirmation().preparationKey,
-                            )
-                          }
-                        >
-                          {commonCopy.cancel}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </Show>
-              </div>
-            );
-          }}
-        </Show>
-        <Show when={endpointKeyPanel()}>
-          {(entry) => (
-            <EndpointKeyControls
-              endpointId={entry().endpointId}
-              panel={entry().panel}
-            />
-          )}
-        </Show>
-        <Show when={endpointBaseUrlPanel()}>
-          {(panel) => (
-            <EndpointBaseUrlControls
-              endpointId={props.row.endpointId as WorkbenchBaseUrlEndpointId}
-              panel={panel()}
-            />
-          )}
-        </Show>
-        <Show when={endpointFreshnessReport()}>
-          {(report) => (
-            <EndpointCatalogFreshnessControls
-              report={report()}
-              refreshing={props.catalogFreshness?.refreshing ?? false}
-              onRefresh={() => props.catalogFreshness?.onRefresh()}
-            />
-          )}
-        </Show>
-        <Show when={cliUpdateEntry()}>
-          {(entry) => (
-            <CliUpdateControls
-              cliId={entry().cliId}
-              report={entry().report}
-              phase={props.cliUpdate?.runPhase(entry().cliId) ?? idleCliUpdateRunPhase}
-              checking={props.cliUpdate?.checking ?? false}
-              relaunchPhase={
-                props.cliUpdate?.relaunchPhase ?? idleCliUpdateRelaunchPhase
-              }
-              onUpdate={() => props.cliUpdate?.onUpdate(entry().cliId)}
-              onRecheck={() => props.cliUpdate?.onRecheck()}
-              onRestartNow={() => props.cliUpdate?.onRestartNow()}
-              onAcknowledgeRestart={() =>
-                props.cliUpdate?.onAcknowledgeRestart(entry().cliId)
-              }
-            />
-          )}
-        </Show>
-        <div class="provider-binding-actions">
-          <Show when={props.authentication}>
-            {(auth) => {
-              const binding = () =>
-                settingsSubscriptionAuthenticationPresentation(auth());
-              return (
-                <Show when={auth().confirmation === null}>
-                  <button
-                    type="button"
-                    class="btn sm"
-                    disabled={
-                      props.onBind === undefined ||
-                      binding().pending ||
-                      binding().inspectionPending ||
-                      binding().blockedStatement !== null
-                    }
-                    aria-busy={binding().pending || binding().inspectionPending}
-                    aria-label={bindActionAriaCopy(
-                      binding().actionLabel,
-                      props.row.runtimeFamilyLabel,
-                    )}
-                    onClick={() => props.onBind?.(props.row.endpointId)}
-                  >
-                    {binding().actionLabel}
-                  </button>
-                </Show>
-              );
-            }}
-          </Show>
-        </div>
-      </div>
-    </section>
   );
 };
 
@@ -2427,8 +1917,11 @@ const CliUpdateControls: Component<{
    */
   const [confirming, setConfirming] = createSignal(false);
   const needsConfirmation = (): boolean => props.cliId === "codex";
+  // w233. They are read at the moment that matters -- beside the question,
+  // before the second press that installs -- instead of standing in front of
+  // the button on every visit.
   const beforeSentences = (): readonly string[] =>
-    props.cliId === "codex" && props.phase.kind === "idle"
+    props.cliId === "codex" && confirming()
       ? [copy.codexActionSentence, copy.codexVersionUnknownSentence]
       : [];
   return (
@@ -2556,11 +2049,11 @@ const CliUpdateControls: Component<{
  * same structure). Rendered only inside its provider row's provider-actions
  * slot, in the position where subscription rows place their binding copy and
  * login controls: the key entry occupies the login-control position, and the
- * DPAPI disclosure sentences travel with it. The row head names the provider,
- * so this block carries no heading of its own — but both halves of the
- * protection truth stay (offline disk inspection / same-account processes),
- * and a provider with special key-handling rules (Kimi: shown once, at most 5
- * keys) states them here.
+ * DPAPI disclosure sentences travel with it (behind Details since w233). The
+ * row head names the provider, so this block carries no heading of its own —
+ * but both halves of the protection truth stay (offline disk inspection /
+ * same-account processes), and a provider with special key-handling rules
+ * (Kimi: shown once, at most 5 keys) states them here.
  */
 const EndpointKeyControls: Component<{
   readonly endpointId: WorkbenchEndpointKeyCopyEndpointId;
@@ -2630,18 +2123,25 @@ const EndpointKeyControls: Component<{
           <span>{copy().keyValueLabel}</span>
           <strong>{statusLabel()}</strong>
         </span>
-        <p>{copy().lede}</p>
-        <p>{copy().storageSentence}</p>
-        <p>{copy().protectionSentence}</p>
-        <Show when={keyHandlingWarning()}>
-          {(warning) => <p class="endpoint-key-handling-warning">{warning()}</p>}
-        </Show>
+        {/* w233. The storage and protection truths (ADR 0022 §4) and the
+            provider's key-handling rule stay on the card, behind Details; a
+            degraded (session-only) store is a warning and stays in view. */}
+        <details class="settings-details">
+          <summary>{settingsCopy.detailsSummary}</summary>
+          <p>{copy().lede}</p>
+          <p>{copy().storageSentence}</p>
+          <p>{copy().protectionSentence}</p>
+          <Show when={keyHandlingWarning()}>
+            {(warning) => <p class="endpoint-key-handling-warning">{warning()}</p>}
+          </Show>
+          <Show when={ready() && status()!.isPersistent}>
+            <p class="endpoint-key-persistence">{copy().persistentLabel}</p>
+          </Show>
+        </details>
         <Show when={ready()}>
-          <p class="endpoint-key-persistence">
-            {status()!.isPersistent
-              ? copy().persistentLabel
-              : copy().sessionOnlyLabel}
-          </p>
+          <Show when={!status()!.isPersistent}>
+            <p class="endpoint-key-persistence">{copy().sessionOnlyLabel}</p>
+          </Show>
           <Show when={status()!.environmentFallback}>
             <p class="endpoint-key-fallback">
               {copy().environmentFallbackLabel}

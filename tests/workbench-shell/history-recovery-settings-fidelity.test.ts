@@ -65,7 +65,7 @@ test("Historical Recovery stays inside Settings and WorkbenchSurface remains exa
   const settingsScreen = sourceSection(
     settings,
     "export const SettingsScreen:",
-    "const ProviderGroup:",
+    "const ProviderCard:",
   );
   assert.match(settingsScreen, /<HistoryRecoverySettingsCard/u);
   assert.match(settingsScreen, /<h1>\{settingsCopy\.title\}<\/h1>/u);

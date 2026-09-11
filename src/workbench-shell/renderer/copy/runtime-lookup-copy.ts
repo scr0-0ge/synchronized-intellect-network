@@ -45,7 +45,7 @@ const englishCopy = {
     saveAction: "Use this path",
     savingAction: "Checking",
     clearAction: "Clear",
-    savedSentence: "Saved. Re-check to start the runtime.",
+    savedSentence: "Saved. Press Check all to start the runtime.",
     clearedSentence: "Cleared. The Workbench will look in the usual places again.",
     unavailableSentence:
       "The executable path could not be saved. Try again.",
@@ -110,7 +110,7 @@ const simplifiedChineseCopy = {
     saveAction: "使用此路径",
     savingAction: "检查中",
     clearAction: "清除",
-    savedSentence: "已保存。重新检查即可启动运行时。",
+    savedSentence: "已保存。点“全部检查”即可启动运行时。",
     clearedSentence: "已清除。Workbench 将重新在常规位置查找。",
     unavailableSentence: "无法保存可执行文件路径。请重试。",
     rejectionSentences: {

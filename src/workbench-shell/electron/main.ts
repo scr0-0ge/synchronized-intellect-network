@@ -297,6 +297,26 @@ let appearancePreferenceStore: WorkbenchAppearancePreferenceStore | null =
 let createProjectController: WorkbenchCreateProjectController | undefined;
 let backendInitialization: Promise<void> = Promise.resolve();
 let shutdownRequested = false;
+
+/**
+ * w234 follow-up: re-reads both usage slots (Claude's own field, everyone
+ * else's endpointKey-keyed map) and republishes the combined snapshot. Every
+ * provider's turn calls this after saving its own slot so the renderer's one
+ * bridge channel always carries the current union, not just the endpoint
+ * that just changed.
+ */
+async function publishUsageSnapshot(): Promise<void> {
+  if (appearancePreferenceStore === null) return;
+  try {
+    const [observation, usage] = await Promise.all([
+      appearancePreferenceStore.readClaudeSubscriptionUsage(),
+      appearancePreferenceStore.readUsageObservations(),
+    ]);
+    subscriptionUsageIpc?.publish({ ok: true, observation, usage });
+  } catch {
+    subscriptionUsageIpc?.publish({ ok: false });
+  }
+}
 let startupFailurePresented = false;
 
 function disposeNotificationIpcBinding(): void {
@@ -974,11 +994,15 @@ function startPrimaryWorkbench(): void {
                 claudeSessionCapabilityStore,
                 async observeClaudeSubscriptionUsage(observation) {
                   try {
-                    const stored = await appearancePreferenceStore!.saveClaudeSubscriptionUsage(observation);
-                    subscriptionUsageIpc?.publish({ ok: true, observation: stored });
-                  } catch {
-                    subscriptionUsageIpc?.publish({ ok: false });
-                  }
+                    await appearancePreferenceStore!.saveClaudeSubscriptionUsage(observation);
+                  } catch { /* publishUsageSnapshot below re-reads and reports ok:false on its own failure. */ }
+                  await publishUsageSnapshot();
+                },
+                async observeUsage(observation) {
+                  try {
+                    await appearancePreferenceStore!.saveUsageObservation(observation);
+                  } catch { /* publishUsageSnapshot below re-reads and reports ok:false on its own failure. */ }
+                  await publishUsageSnapshot();
                 },
                 resolveGlmAuthToken: () => glmEndpointKeySource?.resolve(),
                 resolveGlmBaseUrl: () => baseUrlOverrides["glm-coding-plan"],
