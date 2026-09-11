@@ -30,6 +30,7 @@ import {
   publicProjectHistorySelectionRequired,
   publicProjectSelected,
   publicProjectSelectedWithExistingHistory,
+  publicProjectDriveRootRefused,
   publicProjectSwitchUnavailable,
   publicProjectUnavailable,
   publicUnavailableSubmission,
@@ -1073,6 +1074,13 @@ function createHostController(options: {
       } catch {
         return publicProjectSwitchUnavailable();
       }
+      // Refused HERE, before ledger discovery, before the registry is
+      // prepared, and before `openBackend` creates a SQLite file for the
+      // directory: a refusal must leave nothing on disk. This is the explicit
+      // boundary; the empty-label throw in `deriveProjectLabel` that used to
+      // stand in for it was an accident of `basename`, and a boundary that
+      // exists by accident stops existing the day the accident is fixed.
+      if (isDriveRoot(canonical)) return publicProjectDriveRootRefused();
       const current = selectedRecord(registry);
       const alreadyRegistered = registry.records.some((record) =>
         sameDirectory(record.canonicalDirectory, canonical),
@@ -2182,6 +2190,15 @@ function canonicalDirectory(directory: string): string {
   return sameDirectory(canonical, root)
     ? canonical
     : canonical.replace(/[\\/]+$/u, "");
+}
+
+/**
+ * `C:\`, `/`, or the root of a UNC share -- a path that is its own
+ * `parse().root`. The same notion of "root" `canonicalDirectory` already
+ * uses, so the two cannot disagree about which paths are roots.
+ */
+function isDriveRoot(canonical: string): boolean {
+  return sameDirectory(canonical, parse(canonical).root);
 }
 
 function sameDirectory(left: string, right: string): boolean {

@@ -221,18 +221,30 @@ export async function createWorkbenchBackend(options: {
     endpointIds: [...WORKBENCH_RUNTIME_ENDPOINT_IDS],
   });
   const channel = await coordinator.openProject(options.projectDirectory);
-  const liveView = createWorkbenchLiveView({
-    channel,
-    projectDirectory: options.projectDirectory,
-  });
-  return createBackend(
-    liveView,
-    channel,
-    adapter,
-    options.projectDirectory,
-    preferenceStore,
-    options.directEndpointPresentation ?? productionEndpointPresentation,
-  );
+  try {
+    const liveView = createWorkbenchLiveView({
+      channel,
+      projectDirectory: options.projectDirectory,
+    });
+    return createBackend(
+      liveView,
+      channel,
+      adapter,
+      options.projectDirectory,
+      preferenceStore,
+      options.directEndpointPresentation ?? productionEndpointPresentation,
+    );
+  } catch (error) {
+    // `openProject` has already opened -- and created -- the SQLite ledger for
+    // this directory, and the caller only ever sees the rejection, so nothing
+    // downstream holds the channel to close it. Every construction step after
+    // this point can still throw: `createWorkbenchLiveView` does exactly that
+    // for a directory whose label cannot be derived (a drive root, F-w187 /
+    // public issue #5), and each failed attempt used to leave one more open
+    // handle on the ledger file for the lifetime of the process.
+    await channel.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 function toResumableAdapter(

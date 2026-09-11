@@ -65,6 +65,9 @@ import {
   publicProjectOpenCancelled,
   publicOpenProjectHistorySelectionRequired,
   publicProjectOpenUnavailable,
+  publicProjectDriveRootRefused,
+  publicOpenProjectDriveRootRefused,
+  WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL,
   publicProjectHistorySelectionRequired,
   publicProjectSelected,
   publicProjectSelectedWithExistingHistory,
@@ -1133,10 +1136,52 @@ export function sanitizeSubscriptionAuthenticationPublicResponse(
         Object.freeze({ kind: value.kind, action: value.action }),
       );
     }
+    if (
+      isStrictDataRecord(value, ["kind", "url"]) &&
+      value.kind === "authentication-sign-in-url" &&
+      isSubscriptionSignInUrl(value.url)
+    ) {
+      return acceptedSubscriptionAuthenticationBoundaryValue(
+        Object.freeze({ kind: value.kind, url: value.url }),
+      );
+    }
   } catch {
     // Accessors, Proxies, and failing key authorities remain outside the seam.
   }
   return Object.freeze({ accepted: false as const });
+}
+
+const maximumSubscriptionSignInUrlLength = 2_048;
+/** Whitespace, C0/C1 controls, and the bidirectional overrides. */
+const subscriptionSignInUrlRejectedCharacters =
+  /[\s\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+
+/**
+ * Admit only what can be shown as a sign-in link and nothing else.
+ *
+ * `https:` alone: the CLI's own `http://localhost:PORT` callback server is not
+ * a sign-in destination, and a renderer that will put this into an anchor must
+ * never be handed a `javascript:` or `data:` scheme. Whitespace and control
+ * characters are refused rather than trimmed -- a URL that needed repairing is
+ * not the URL the CLI printed, and displaying a repaired one would be this
+ * product's headline defect (saying a thing that did not happen).
+ */
+function isSubscriptionSignInUrl(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maximumSubscriptionSignInUrlLength ||
+    subscriptionSignInUrlRejectedCharacters.test(value)
+  ) {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" && parsed.href.length <= maximumSubscriptionSignInUrlLength;
 }
 
 function acceptedSubscriptionAuthenticationBoundaryValue<Value>(
@@ -2634,6 +2679,14 @@ export function sanitizeWorkbenchProjectSelectionResult(
     ) {
       return publicProjectSwitchUnavailable();
     }
+    if (
+      value.error.category === "project-directory-is-drive-root" &&
+      value.error.message === WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL &&
+      hasExactKeys(value, ["error", "ok"]) &&
+      hasExactKeys(value.error, ["category", "message"])
+    ) {
+      return publicProjectDriveRootRefused();
+    }
   }
   return publicProjectSwitchUnavailable();
 }
@@ -2700,6 +2753,16 @@ export function sanitizeWorkbenchOpenProjectResult(
         ? publicProjectOpenUnavailable(failure) : publicProjectOpenUnavailable();
     }
     return publicProjectOpenUnavailable();
+  }
+  if (
+    value.ok === false &&
+    isRecord(value.error) &&
+    hasExactKeys(value, ["error", "ok"]) &&
+    hasExactKeys(value.error, ["category", "message"]) &&
+    value.error.category === "project-directory-is-drive-root" &&
+    value.error.message === WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL
+  ) {
+    return publicOpenProjectDriveRootRefused();
   }
   return publicProjectOpenUnavailable();
 }

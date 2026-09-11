@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 
 import {
+  observeSubscriptionSignInUrl,
   ownSubscriptionAuthenticationProcess,
   waitForSubscriptionAuthenticationProcessSpawn,
   type SubscriptionAuthenticationProvider,
@@ -17,6 +18,20 @@ import {
 import type { WindowsRuntimeLaunch } from "../windows-executable-admission.ts";
 import type { ProviderRequestBudget } from "../provider-request-budget.ts";
 import { ProviderRequestBudgetError } from "../provider-request-budget.ts";
+
+/**
+ * How the launched authentication process's streams are wired.
+ *
+ * `logout` keeps `"ignore"`. `login` is read, because `claude auth login`
+ * prints the authorisation URL ("If the browser did not open, visit:") as the
+ * fallback for a machine where the browser never appeared, and discarding that
+ * line is what public issue #4 is about. `windowsHide: true` is unchanged: the
+ * console it hides is the CLI's own, never the browser, which is a separate
+ * process the flag cannot reach.
+ */
+export type ClaudeSubscriptionLoginStdio =
+  | "ignore"
+  | ["ignore", "pipe", "pipe"];
 
 export interface ClaudeSubscriptionAuthenticationDependencies {
   discoverExecutable(): Promise<WindowsRuntimeLaunch>;
@@ -34,7 +49,7 @@ export interface ClaudeSubscriptionAuthenticationDependencies {
     options: {
       readonly env: NodeJS.ProcessEnv;
       readonly shell: false;
-      readonly stdio: "ignore";
+      readonly stdio: ClaudeSubscriptionLoginStdio;
       readonly windowsHide: true;
     },
   ): ChildProcess;
@@ -121,12 +136,24 @@ async function launchClaudeAuthenticationAction(
     Object.freeze({
       env: Object.freeze(createClaudeOAuthEnvironment(dependencies.environment)),
       shell: false as const,
-      stdio: "ignore" as const,
+      stdio:
+        action === "login"
+          ? (["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"])
+          : ("ignore" as const),
       windowsHide: true as const,
     }),
   );
+  // Attached before the spawn is awaited: the CLI prints its sign-in URL within
+  // a moment of starting, and a listener added afterwards can miss the chunk
+  // that carries it.
+  const signInUrl =
+    action === "login" ? observeSubscriptionSignInUrl(child) : undefined;
   await waitForSubscriptionAuthenticationProcessSpawn(child);
-  const owned = ownSubscriptionAuthenticationProcess(child);
+  const owned = ownSubscriptionAuthenticationProcess(
+    child,
+    undefined,
+    signInUrl,
+  );
   if (signal.aborted) {
     await owned.terminate();
     throw new Error("Subscription authentication launch was cancelled.");

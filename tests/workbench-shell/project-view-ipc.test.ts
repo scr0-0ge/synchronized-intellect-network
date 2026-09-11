@@ -2826,3 +2826,52 @@ test("Project IPC establishes an explicit snapshot base", () => {
     assert.equal((owner.packets[0] as { kind?: string }).kind, "snapshot");
   } finally { binding.dispose(); }
 });
+
+// F-w187 / public issue #5. Every registration failure used to collapse to
+// "Open Project could not be completed" at this seam. The drive-root refusal is
+// the one with a cause the reader can act on, and it keeps that cause.
+test("Open Project carries the drive-root refusal across the IPC seam and nothing else about it", async () => {
+  const ipcMain = new FakeIpcMain();
+  const owner = new FakeSender();
+  const source = new FakeProjectViewSource();
+  const chooser = new FakeProjectDirectoryChooser();
+  chooser.result = { canceled: false, filePaths: ["E:\\"] };
+  const binding = installWorkbenchProjectViewIpc({
+    ipcMain,
+    window: new FakeWindow(owner),
+    source,
+    directoryChooser: chooser,
+  });
+
+  source.trustedRegistrationResult = {
+    ok: false,
+    error: {
+      category: "project-directory-is-drive-root",
+      message: "A drive root cannot be a Project. Choose a folder inside the drive instead.",
+    },
+  };
+  const refused = await ipcMain.invoke(WORKBENCH_OPEN_PROJECT_CHANNEL, owner);
+  assert.deepEqual(refused, {
+    ok: false,
+    error: {
+      category: "project-directory-is-drive-root",
+      message: "A drive root cannot be a Project. Choose a folder inside the drive instead.",
+    },
+  });
+  assert.equal(JSON.stringify(refused).includes("E:\\"), false, "the chosen path never crosses");
+  assert.equal(Object.isFrozen(refused), true);
+
+  // Any other registration failure is still the fixed sentence.
+  source.trustedRegistrationResult = {
+    ok: false,
+    error: {
+      category: "project-switch-unavailable",
+      message: "The Project could not be opened. Keep the current Project and try again.",
+    },
+  };
+  assert.deepEqual(
+    await ipcMain.invoke(WORKBENCH_OPEN_PROJECT_CHANNEL, owner),
+    fixedOpenUnavailable(),
+  );
+  binding.dispose();
+});

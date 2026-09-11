@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { publicCreateProjectResult, publicProjectOpenUnavailable } from "../../src/workbench-shell/contract.ts";
-import { sanitizeWorkbenchCreateProjectResult, sanitizeWorkbenchOpenProjectResult } from "../../src/workbench-shell/result-sanitizer.ts";
+import {
+  publicCreateProjectResult,
+  publicOpenProjectDriveRootRefused,
+  publicProjectDriveRootRefused,
+  publicProjectOpenUnavailable,
+  WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL,
+} from "../../src/workbench-shell/contract.ts";
+import {
+  sanitizeWorkbenchCreateProjectResult,
+  sanitizeWorkbenchOpenProjectResult,
+  sanitizeWorkbenchProjectSelectionResult,
+} from "../../src/workbench-shell/result-sanitizer.ts";
 
 const reasons = ["selected-file", "directory-missing", "destination-exists", "parent-directory-missing", "parent-is-file",
   "parent-is-alias", "parent-is-reparse", "parent-unavailable", "create-denied", "unknown"] as const;
@@ -31,6 +41,8 @@ test("public factories freeze fresh diagnostic copies and preserve Windows drive
     assert.equal(create.outcome, "unavailable");
     assert.equal(open.ok, false);
     if (create.outcome !== "unavailable" || open.ok) throw new Error("wrong public discriminator");
+    // Narrow past the drive-root refusal, which carries no path detail.
+    if (open.error.category !== "project-open-unavailable") throw new Error("wrong open failure category");
     assert.notEqual(create.failure, detail);
     assert.notEqual(open.error.failure, detail);
     assert.ok(Object.isFrozen(create.failure));
@@ -51,4 +63,36 @@ test("malformed details, extra fields and diagnostics on successful/cancelled ou
   }
   assert.deepEqual(sanitizeWorkbenchOpenProjectResult({ ok: true, status: "opened", message: "Project was opened.", failure }), publicProjectOpenUnavailable());
   assert.deepEqual(sanitizeWorkbenchCreateProjectResult({ outcome: "unavailable", failure, rawError: "private" }), publicCreateProjectResult("unavailable"));
+});
+
+// F-w187 / public issue #5: the one refusal with a cause crosses both seams
+// intact, and anything that only looks like it still fails closed.
+test("the drive-root refusal round-trips through both project seams and nothing that merely resembles it does", () => {
+  const selection = publicProjectDriveRootRefused();
+  const open = publicOpenProjectDriveRootRefused();
+  assert.deepEqual(sanitizeWorkbenchProjectSelectionResult(selection), selection);
+  assert.deepEqual(sanitizeWorkbenchOpenProjectResult(open), open);
+  assert.equal(
+    WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL,
+    "A drive root cannot be a Project. Choose a folder inside the drive instead.",
+  );
+
+  for (const imposter of [
+    // Right category, invented wording.
+    { ok: false, error: { category: "project-directory-is-drive-root", message: "Drive roots are fine, actually." } },
+    // Right wording, wrong category.
+    { ok: false, error: { category: "project-switch-unavailable", message: WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL } },
+    // Extra field smuggled alongside.
+    { ok: false, error: { category: "project-directory-is-drive-root", message: WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL, targetPath: "C:\\" } },
+  ]) {
+    assert.equal(sanitizeWorkbenchProjectSelectionResult(imposter).ok, false);
+    assert.notEqual(
+      (sanitizeWorkbenchProjectSelectionResult(imposter) as { error: { category: string } }).error.category,
+      "project-directory-is-drive-root",
+      "selection imposter must fall to the generic failure",
+    );
+    const opened = sanitizeWorkbenchOpenProjectResult(imposter);
+    assert.equal(opened.ok, false);
+    assert.equal((opened as { error: { category: string } }).error.category, "project-open-unavailable");
+  }
 });

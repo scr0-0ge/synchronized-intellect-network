@@ -13,8 +13,10 @@ import { basename, join } from "node:path";
 import test from "node:test";
 
 import {
+  failureReport,
   packageWorkbenchWindowsApplication,
   stageWorkbenchWindowsApplication,
+  WorkbenchPackageError,
   type WorkbenchPackagerOptions,
 } from "../../scripts/package-workbench-windows.ts";
 
@@ -101,26 +103,86 @@ test("Windows packaging uses one ASAR-backed unpacked Windows x64 application an
   });
 });
 
-test("Windows packaging removes staging and returns a fixed failure when packaging fails", async (t) => {
+test("Windows packaging removes staging and names the step, path and reason when the packager fails", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "workbench-package-failure-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeAcceptedBuild(root);
   let stagingDirectory = "";
 
-  await assert.rejects(
+  const failure = await packagingFailure(
     packageWorkbenchWindowsApplication({
       workspaceDirectory: root,
       outputDirectory: join(root, "local-package"),
       temporaryDirectory: root,
       packageApplication: async ({ dir }) => {
         stagingDirectory = dir as string;
-        throw new Error("private packager detail");
+        throw new Error("the packager could not write the ASAR archive");
       },
     }),
-    { message: "workbench-package-failed" },
   );
+
+  assert.equal(failure.stage, "run-electron-packager");
+  assert.equal(failure.path, stagingDirectory);
+  assert.equal(
+    (failure.cause as Error).message,
+    "the packager could not write the ASAR archive",
+  );
+  assert.match(failure.message, /^workbench-package-failed: /);
+  assert.match(
+    failure.message,
+    /the packager could not write the ASAR archive$/,
+  );
+  assert.equal(failureReport(failure), [
+    "  Step:   run-electron-packager",
+    `  Path:   ${stagingDirectory}`,
+    "  Reason: the packager could not write the ASAR archive",
+    "  Next:   run `pnpm install --frozen-lockfile` to confirm @electron/packager 20.0.4 is installed, then run this command again.",
+    "",
+  ].join("\n"));
   await assert.rejects(access(stagingDirectory));
 });
+
+test("Windows packaging names the missing build directory rather than reporting one sentence", async (t) => {
+  // The most common real failure: `pnpm build` has not run, so there is no
+  // `dist/`. Before F-w187 every distinct failure -- this one included --
+  // arrived as the single word `workbench-package-failed`.
+  const root = await mkdtemp(join(tmpdir(), "workbench-package-nobuild-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const failure = await packagingFailure(
+    packageWorkbenchWindowsApplication({
+      workspaceDirectory: root,
+      outputDirectory: join(root, "local-package"),
+      temporaryDirectory: root,
+      packageApplication: async () => {
+        throw new Error("the packager must not be reached");
+      },
+    }),
+  );
+
+  assert.equal(failure.stage, "stage-build-output");
+  assert.equal(failure.path, join(root, "dist", "renderer", "assets"));
+  assert.match((failure.cause as Error).message, /ENOENT/);
+  assert.match(
+    failureReport(failure),
+    /Next: {3}run `pnpm build` first, then run this command again\.\n$/,
+  );
+});
+
+async function packagingFailure(
+  operation: Promise<unknown>,
+): Promise<WorkbenchPackageError> {
+  try {
+    await operation;
+  } catch (error) {
+    assert.ok(
+      error instanceof WorkbenchPackageError,
+      `expected a WorkbenchPackageError, got ${String(error)}`,
+    );
+    return error;
+  }
+  throw new assert.AssertionError({ message: "packaging was expected to fail" });
+}
 
 test("the local Windows package command and Electron-maintained packager are exact-pinned", async () => {
   const packageJson = JSON.parse(

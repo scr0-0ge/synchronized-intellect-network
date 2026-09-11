@@ -41,6 +41,14 @@ export const WORKBENCH_SUBSCRIPTION_AUTHENTICATION_COPY = Object.freeze({
     "The Workbench could not ask the provider CLI to log out. Nothing changed, and every Session stays exactly as resumable as it was.",
   logoutPartiallyCompleted:
     "The Workbench asked the provider CLI to log out but could not record the log out. Sessions started before this log out can no longer be resumed, even where the Workbench still offers to resume them.",
+  // Names where the sign-in actually happens. The Workbench spawns the provider
+  // CLI's own sign-in with no window and no stdio, so it can neither show the
+  // CLI's prompts nor answer them; what it CAN do -- and does -- is re-inspect
+  // that CLI when the child exits and publish the resulting state. Saying only
+  // that it "asked" left the reader with a control that appeared to lead
+  // nowhere.
+  loginRequested:
+    "The Workbench asked the provider CLI to log in. The sign-in itself happens in the provider CLI, which runs here with no window and no console, so the Workbench cannot show anything it prints or asks. This card reports the sign-in state once that CLI exits. If you are still not signed in, run the provider CLI's own sign-in command in a terminal, then use Re-check sign-in.",
   loginPartiallyCompleted:
     "The Workbench asked the provider CLI to log in but could not record the sign-in change. Sessions started before this login can no longer be resumed, even where the Workbench still offers to resume them.",
   logoutBlocked: "Log out is blocked.",
@@ -229,6 +237,16 @@ type EndpointPresentationState = {
   preparationPending: boolean;
   pendingAction: WorkbenchSubscriptionAuthenticationAction | null;
   actionCompletion: Promise<SubscriptionAuthenticationActionResult> | null;
+  /**
+   * The sign-in URL the running login process printed, once it has printed
+   * one, and whether it has already been handed to the renderer.
+   *
+   * Held for the lifetime of one action and cleared with it. A credential:
+   * it is never passed to `observe`, never reaches the ledger, and never
+   * appears in any log line.
+   */
+  signInUrl: Promise<string | undefined> | null;
+  signInUrlReported: boolean;
   outcome: WorkbenchSubscriptionAuthenticationActionOutcome | null;
   feedback: string | null;
   blockers: Extract<
@@ -299,6 +317,8 @@ export function createWorkbenchSubscriptionAuthenticationCoordinator(options: {
       preparationPending: false,
       pendingAction: null,
       actionCompletion: null,
+      signInUrl: null,
+      signInUrlReported: false,
       outcome: null,
       feedback: null,
       blockers: null,
@@ -452,6 +472,12 @@ export function createWorkbenchSubscriptionAuthenticationCoordinator(options: {
         }
         const completion = start.completion;
         state.actionCompletion = completion;
+        // Held, not awaited. The launch must not wait on output that may never
+        // arrive; the inspection the renderer already has in flight collects it
+        // if and when the CLI prints one.
+        state.signInUrl =
+          preparation.action === "login" ? (start.signInUrl ?? null) : null;
+        state.signInUrlReported = false;
         void completion.then((result) => {
           finishAction(state, operation, completion);
           // A completed login or logout is the other place the Workbench learns
@@ -512,6 +538,33 @@ export function createWorkbenchSubscriptionAuthenticationCoordinator(options: {
           const actionOperation = state.operation;
           if (actionCompletion === null) {
             return Object.freeze({ accepted: false as const });
+          }
+          // This inspection is the renderer's standing question during a login:
+          // it is issued the moment the action is accepted and, until now, only
+          // ever came back when the CLI exited. A sign-in URL is worth
+          // answering it early -- that line is the whole way back for a reader
+          // whose browser did not open, and it is useless once the run is over.
+          // Nothing is invented when there is no URL: the wait simply continues
+          // exactly as it did before.
+          const pendingSignInUrl = state.signInUrl;
+          if (pendingSignInUrl !== null && !state.signInUrlReported) {
+            const reported = await Promise.race([
+              pendingSignInUrl.catch(() => undefined),
+              actionCompletion.then(() => undefined),
+            ]);
+            if (
+              !closed &&
+              state.operation === actionOperation &&
+              state.signInUrl === pendingSignInUrl &&
+              !state.signInUrlReported &&
+              typeof reported === "string"
+            ) {
+              state.signInUrlReported = true;
+              return acceptedResponse({
+                kind: "authentication-sign-in-url",
+                url: reported,
+              });
+            }
           }
           await actionCompletion;
           if (
@@ -695,6 +748,10 @@ function finishAction(
   if (state.operation !== operation) return;
   state.pendingAction = null;
   if (state.actionCompletion === completion) state.actionCompletion = null;
+  // The URL dies with the process that printed it. A single-use authorisation
+  // code from a finished run is not something to keep offering.
+  state.signInUrl = null;
+  state.signInUrlReported = false;
 }
 
 function renderCard(
@@ -794,7 +851,9 @@ export function actionFeedback(
       : WORKBENCH_SUBSCRIPTION_AUTHENTICATION_COPY.logoutPartiallyCompleted;
   }
   if (outcome === "requested") {
-    return "The Workbench asked the provider CLI to log in.";
+    // Kept identical to `dynamicCopy.authentication.loginRequested`; see the
+    // note there for why "asked" alone was not an honest stopping point.
+    return WORKBENCH_SUBSCRIPTION_AUTHENTICATION_COPY.loginRequested;
   }
   return outcome === "not-requested"
     ? "The Workbench could not ask the provider CLI to log in."

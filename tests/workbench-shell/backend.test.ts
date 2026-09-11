@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 
@@ -3534,3 +3534,30 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
   assert.fail("Timed out waiting for public Workbench state.");
 }
+
+test("a project directory the Workbench cannot label leaves no open handle on the ledger it just created", async (t) => {
+  // F-w187 / public issue #5. A drive root reaches `openProject`, which creates
+  // and opens the SQLite ledger, and only then does label derivation refuse it.
+  // The caller sees a rejection and never receives the channel, so before the
+  // fix every attempt left one more open handle on that file.
+  const temporaryDirectory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-backend-unlabelled-"),
+  );
+  const databasePath = join(temporaryDirectory, "unlabelled.sqlite");
+  const driveRoot = parse(temporaryDirectory).root;
+
+  await assert.rejects(
+    createWorkbenchBackend({
+      projectDirectory: driveRoot,
+      databasePath,
+      preferencePath: join(temporaryDirectory, "preferences.json"),
+    }),
+    { message: "invalid-project-label" },
+  );
+
+  // Windows refuses to unlink a file SQLite still holds open, so a successful
+  // delete is the observation that the channel was closed on the way out.
+  await rm(databasePath);
+  await assert.rejects(access(databasePath));
+});

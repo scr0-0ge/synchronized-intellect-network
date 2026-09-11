@@ -67,6 +67,12 @@ export interface SubscriptionAuthenticationActionStart {
   /** `started` only once the provider process exists; see the interface note. */
   readonly request: SubscriptionAuthenticationRequestEffect;
   readonly completion: Promise<SubscriptionAuthenticationActionResult>;
+  /**
+   * The sign-in URL the launched CLI printed, or `undefined` if it ended
+   * without printing one. Always resolves; it never outlives the process.
+   * A credential -- see {@link observeSubscriptionSignInUrl}.
+   */
+  readonly signInUrl?: Promise<string | undefined>;
 }
 
 export interface SubscriptionAuthenticationSnapshot {
@@ -76,7 +82,121 @@ export interface SubscriptionAuthenticationSnapshot {
 
 export interface SubscriptionAuthenticationChild {
   readonly finished: Promise<void>;
+  /**
+   * The sign-in URL the provider CLI printed, once it has printed one.
+   *
+   * Resolves `undefined` when the process ends without printing one, so a
+   * caller can wait on it without waiting forever. It is deliberately NOT a
+   * promise of "the sign-in is waiting for you": both vendor CLIs print this
+   * URL whether or not they also managed to open a browser, and the product
+   * cannot tell those two cases apart from out here. See
+   * {@link observeSubscriptionSignInUrl}.
+   */
+  readonly signInUrl?: Promise<string | undefined>;
   terminate(): Promise<void>;
+}
+
+// The sign-in URL, and why the product reads the login process at all.
+//
+// Both vendor CLIs run an OAuth sign-in: they start a local callback server,
+// try to open the user's default browser, and PRINT the authorisation URL as
+// the fallback for when that does not happen. Verified against the shipped
+// binaries on this machine -- codex 0.153.4 carries "If your browser did not
+// open, navigate to this URL to authenticate:", claude 2.1.267 carries "If the
+// browser did not open, visit:". The browser is a separate process, so
+// `windowsHide: true` never suppressed it; what it suppresses is the CLI's own
+// console, which is correct and stays. What was wrong is `stdio: "ignore"`:
+// the one line that rescues a user whose browser did not open went to the null
+// device, so a product that had the answer showed nothing.
+//
+// The product does not try to decide whether the browser opened -- it cannot
+// see that, and guessing would put a fake state on the card. It reports exactly
+// what it received: a URL if the CLI printed one, nothing otherwise.
+//
+// THIS VALUE IS A CREDENTIAL. An OAuth authorisation URL generally carries a
+// single-use code in its query string. It is held in memory, handed to the
+// renderer for display, and that is all: it is never logged, never written to
+// the ledger or any other durable store, and never captured into a test
+// fixture. Tests use synthetic URLs.
+
+const maximumSignInUrlLength = 2_048;
+const maximumSignInScanCharacters = 65_536;
+/** Only `https`. The `http://localhost:PORT` callback server is not the sign-in. */
+const signInUrlPattern = /https:\/\/[^\s"'<>`]{1,2047}/u;
+
+/**
+ * Watch a login process's output for the sign-in URL it prints.
+ *
+ * Scans COMPLETE LINES only, so a URL split across two chunk boundaries is
+ * never reported truncated; whatever is left unterminated when the streams end
+ * is scanned once at that point. Accumulation is bounded, but both streams keep
+ * being drained afterwards regardless -- a pipe nobody reads fills up and stops
+ * the child, which would turn a display feature into a hang.
+ */
+export function observeSubscriptionSignInUrl(
+  child: ChildProcess,
+): Promise<string | undefined> {
+  // A child spawned with a stream ignored exposes `null`; a child that is not
+  // a real ChildProcess at all can expose nothing. Both mean "no output to
+  // read", and neither may become a crash inside a login.
+  const streams = [child.stdout, child.stderr].filter(
+    (stream): stream is NonNullable<typeof stream> =>
+      stream !== null &&
+      stream !== undefined &&
+      typeof stream.on === "function" &&
+      typeof stream.setEncoding === "function",
+  );
+  if (streams.length === 0) return Promise.resolve(undefined);
+
+  return new Promise<string | undefined>((resolve) => {
+    let settled = false;
+    let pending = streams.length;
+    let buffer = "";
+    let scanned = 0;
+
+    const settle = (url: string | undefined): void => {
+      if (settled) return;
+      settled = true;
+      resolve(url);
+    };
+    const scan = (text: string): string | undefined => {
+      const match = signInUrlPattern.exec(text);
+      if (match === null) return undefined;
+      const candidate = match[0];
+      return candidate.length > 0 && candidate.length <= maximumSignInUrlLength
+        ? candidate
+        : undefined;
+    };
+
+    for (const stream of streams) {
+      stream.setEncoding("utf8");
+      stream.on("data", (chunk: string) => {
+        if (settled || scanned >= maximumSignInScanCharacters) return;
+        scanned += chunk.length;
+        buffer += chunk;
+        const lastBreak = buffer.lastIndexOf("\n");
+        if (lastBreak < 0) return;
+        const complete = buffer.slice(0, lastBreak);
+        buffer = buffer.slice(lastBreak + 1);
+        const url = scan(complete);
+        if (url !== undefined) settle(url);
+      });
+      // `end`, `close` and `error` can all arrive for one stream; only the
+      // first counts, or two streams would look like four and the promise
+      // would settle before the other one had spoken.
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        pending -= 1;
+        if (pending > 0 || settled) return;
+        settle(scan(buffer));
+      };
+      stream.on("end", finish);
+      stream.on("close", finish);
+      stream.on("error", finish);
+    }
+  });
 }
 
 export async function waitForSubscriptionAuthenticationProcessSpawn(
@@ -100,6 +220,7 @@ export async function waitForSubscriptionAuthenticationProcessSpawn(
 export function ownSubscriptionAuthenticationProcess(
   child: ChildProcess,
   cleanup: () => Promise<void> = async () => undefined,
+  signInUrl?: Promise<string | undefined>,
 ): SubscriptionAuthenticationChild {
   let cleaned: Promise<void> | undefined;
   const cleanOnce = (): Promise<void> => (cleaned ??= cleanup());
@@ -111,6 +232,7 @@ export function ownSubscriptionAuthenticationProcess(
   let termination: Promise<void> | undefined;
   return Object.freeze({
     finished: exited,
+    ...(signInUrl === undefined ? {} : { signInUrl }),
     terminate() {
       termination ??= terminateOwnedProcess(child, exited);
       return termination;
@@ -586,6 +708,10 @@ class NativeSubscriptionAuthenticationService
         record.action,
         request,
         record.result,
+        // Only a started process can have printed anything. The child's own
+        // promise already resolves `undefined` when the process ends silent,
+        // so the caller never waits on something that cannot arrive.
+        record.child?.signInUrl,
       ),
     );
   }
@@ -701,8 +827,17 @@ function fixedActionStart(
   action: SubscriptionAuthenticationAction,
   request: SubscriptionAuthenticationRequestEffect,
   completion: Promise<SubscriptionAuthenticationActionResult>,
+  signInUrl: Promise<string | undefined> = Promise.resolve(undefined),
 ): SubscriptionAuthenticationActionStart {
-  return Object.freeze({ endpointId, action, request, completion });
+  return Object.freeze({
+    endpointId,
+    action,
+    request,
+    completion,
+    // A start that never launched a process has no output to have read, so the
+    // absent URL here is a fact rather than a default.
+    signInUrl,
+  });
 }
 
 function legacyActionResult(

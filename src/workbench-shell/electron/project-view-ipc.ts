@@ -36,6 +36,7 @@ import {
   publicProjectOpenedWithExistingHistory,
   publicProjectOpenCancelled,
   publicProjectOpenUnavailable,
+  publicOpenProjectDriveRootRefused,
   publicProfileUnavailable,
   publicPreferenceUnavailable,
   publicProjectSwitchUnavailable,
@@ -793,7 +794,13 @@ export function installWorkbenchProjectViewIpc(options: {
         sanitizeWorkbenchProjectSelectionResult(registered);
       if (!sanitizedRegistration.ok) {
         abandonRecoveryAttempt();
-        return publicProjectOpenUnavailable();
+        // The one refusal that has a cause the reader can act on keeps it
+        // across this seam. Every other failure still collapses to the fixed
+        // "could not be completed" result, exactly as before.
+        return sanitizedRegistration.error.category ===
+          "project-directory-is-drive-root"
+          ? sanitizeWorkbenchOpenProjectResult(publicOpenProjectDriveRootRefused())
+          : publicProjectOpenUnavailable();
       }
       if (sanitizedRegistration.status === "history-selection-required") {
         abandonRecoveryAttempt();

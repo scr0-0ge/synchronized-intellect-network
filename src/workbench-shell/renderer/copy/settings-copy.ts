@@ -339,6 +339,18 @@ const englishCopy = {
     preparingLoginFeedback: "Checking whether Login can begin...",
     actingLogoutFeedback: "Asking the provider CLI to log out...",
     actingLoginFeedback: "Asking the provider CLI to log in...",
+    // Shown only when the provider CLI actually printed a URL. There is no
+    // "waiting for sign-in" text and no placeholder link: the Workbench cannot
+    // see whether the browser opened, so it says what it received and nothing
+    // else.
+    signInUrlHeading: "Sign-in link from the provider CLI",
+    signInUrlSentence:
+      "The provider CLI printed this sign-in link. If a browser opened, finish there and ignore this. If none opened, open this link yourself.",
+    signInUrlCopyAction: "Copy link",
+    signInUrlCopyingAction: "Copying...",
+    signInUrlCopiedAction: "Copied",
+    signInUrlCopyFailedAction: "Copy failed",
+    signInUrlCopyAria: "Copy the provider sign-in link",
   },
 } as const;
 
@@ -617,6 +629,14 @@ const simplifiedChineseCopy = {
     preparingLoginFeedback: "正在检查是否可以登录...",
     actingLogoutFeedback: "正在要求提供方 CLI 退出登录...",
     actingLoginFeedback: "正在要求提供方 CLI 登录...",
+    signInUrlHeading: "提供方 CLI 给出的登录链接",
+    signInUrlSentence:
+      "提供方 CLI 打印了这个登录链接。如果浏览器已经打开，请在那里完成登录，忽略此处；如果没有打开，请自行打开此链接。",
+    signInUrlCopyAction: "复制链接",
+    signInUrlCopyingAction: "正在复制...",
+    signInUrlCopiedAction: "已复制",
+    signInUrlCopyFailedAction: "复制失败",
+    signInUrlCopyAria: "复制提供方登录链接",
   },
 } as const satisfies LocalizedShape<typeof englishCopy>;
 

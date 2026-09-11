@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   mkdir,
+  readdir,
   readFile,
   rename,
   rm,
@@ -8,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { hostedProjectView } from "./w26-hosted-project-view.ts";
@@ -2516,5 +2517,48 @@ test("Project removal rejects stale, malformed, and widened selection requests",
       { status: "invalid-selection" },
     );
   }
+  await host.close();
+});
+
+// F-w187 / public issue #5. A drive root used to fail by accident: `basename`
+// of `C:\` is empty, label derivation threw, and by then `openProject` had
+// already created and opened a SQLite ledger for it. The reader saw "try
+// again". The refusal is now deliberate, named, and happens before anything
+// touches disk. The real backend factory is used here on purpose: the claim
+// "no ledger on disk" has to be measured against the code that writes ledgers.
+test("a drive root is refused by name before any ledger is created for it", async (t) => {
+  const root = await createTestDirectory(t, join(tmpdir(), "workbench-project-host-drive-root-"));
+  const projectDirectory = join(root, "Real Project");
+  const dataDirectory = join(root, "private-data");
+  await mkdir(projectDirectory, { recursive: true });
+  const host = await createRegisteredWorkbenchProjectHost(t, {
+    dataDirectory,
+    fallbackProjectDirectory: projectDirectory,
+  });
+  const observation = observeHost(host);
+  await observation.waitFor((result) => result.ok && "view" in result);
+  const ledgerDirectory = join(dataDirectory, "project-ledgers");
+  const ledgersBefore = (await readdir(ledgerDirectory)).filter((name) => name.endsWith(".sqlite"));
+  assert.equal(ledgersBefore.length, 1, "only the fallback Project's ledger exists");
+
+  const driveRoot = parse(root).root;
+  const refusal = await host.registerTrustedProject(driveRoot);
+
+  assert.deepEqual(refusal, {
+    ok: false,
+    error: {
+      category: "project-directory-is-drive-root",
+      message: "A drive root cannot be a Project. Choose a folder inside the drive instead.",
+    },
+  });
+  // Nothing on disk changed: no ledger was created for the refused root, and
+  // the registry still lists exactly the one Project it listed before.
+  const ledgersAfter = (await readdir(ledgerDirectory)).filter((name) => name.endsWith(".sqlite"));
+  assert.deepEqual(ledgersAfter, ledgersBefore);
+  const published = observation.results.at(-1);
+  assert.equal(published?.ok, true);
+  if (!published?.ok || !("view" in published)) assert.fail("Expected the prior Project view to stand.");
+  assert.equal(published.view.projectSelection.projects.length, 1);
+  observation.dispose();
   await host.close();
 });
