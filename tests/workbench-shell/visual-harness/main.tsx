@@ -47,6 +47,8 @@ import {
   publicAppearancePreferenceSaved,
   publicClaudePermissionHandlingLoaded,
   publicClaudePermissionHandlingSaved,
+  publicCodexApiBaseUrlLoaded,
+  publicCodexApiBaseUrlSaved,
   publicEndpointProbed,
   publicEndpointKeySaved,
   publicEndpointKeyStatusLoaded,
@@ -263,6 +265,14 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
   },
   saveClaudePermissionHandling() {
     return Promise.resolve(publicClaudePermissionHandlingSaved());
+  },
+  // Visual QA fake for the Codex · API card's optional Base URL field (w223).
+  // No real base URL ever appears here.
+  loadCodexApiBaseUrl() {
+    return Promise.resolve(publicCodexApiBaseUrlLoaded(""));
+  },
+  saveCodexApiBaseUrl(baseUrl: string) {
+    return Promise.resolve(publicCodexApiBaseUrlSaved(baseUrl));
   },
   // Visual QA fakes for the endpoint-key blocks (ADR 0022; one per static-key
   // endpoint). The default shows a configured durable key so every state of

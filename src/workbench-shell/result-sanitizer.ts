@@ -30,6 +30,11 @@ import {
   WORKBENCH_RUNTIME_INSTALL_VERSION_MAX_LENGTH,
   publicClaudePermissionHandlingSaved,
   publicClaudePermissionHandlingUnavailable,
+  publicCodexApiBaseUrlLoaded,
+  publicCodexApiBaseUrlSaved,
+  publicCodexApiBaseUrlRejected,
+  publicCodexApiBaseUrlUnavailable,
+  WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH,
   publicEndpointPreferencesLoaded,
   publicEndpointPreferenceSaved,
   publicEndpointPreferenceUnavailable,
@@ -91,6 +96,8 @@ import {
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchClaudePermissionHandlingLoadResult,
+  type WorkbenchCodexApiBaseUrlLoadResult,
+  type WorkbenchCodexApiBaseUrlSaveResult,
   type WorkbenchRuntimeExecutablePaths,
   type WorkbenchRuntimeExecutableRejection,
   type WorkbenchRuntimeExecutableSaveRequest,
@@ -357,6 +364,82 @@ function isClaudePermissionHandlingFailureResult(value: unknown): boolean {
     value.error.category === "claude-permission-handling-unavailable" &&
     value.error.message ===
       "Claude permission handling could not be loaded or saved. Keep the current choice and try again."
+  );
+}
+
+export function reconstructWorkbenchCodexApiBaseUrl(
+  value: unknown,
+): { readonly ok: true; readonly baseUrl: string } | { readonly ok: false } {
+  return typeof value === "string" &&
+    value.length <= WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH
+    ? Object.freeze({ ok: true, baseUrl: value })
+    : Object.freeze({ ok: false });
+}
+
+export function sanitizeWorkbenchCodexApiBaseUrlLoadResult(
+  value: unknown,
+): WorkbenchCodexApiBaseUrlLoadResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["baseUrl", "ok", "status"]) &&
+      value.ok === true &&
+      value.status === "loaded"
+    ) {
+      const reconstructed = reconstructWorkbenchCodexApiBaseUrl(value.baseUrl);
+      if (reconstructed.ok) {
+        return publicCodexApiBaseUrlLoaded(reconstructed.baseUrl);
+      }
+    }
+    if (isCodexApiBaseUrlUnavailableResult(value)) {
+      return publicCodexApiBaseUrlUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicCodexApiBaseUrlUnavailable();
+}
+
+export function sanitizeWorkbenchCodexApiBaseUrlSaveResult(
+  value: unknown,
+): WorkbenchCodexApiBaseUrlSaveResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["baseUrl", "ok", "status"]) &&
+      value.ok === true &&
+      value.status === "saved"
+    ) {
+      const reconstructed = reconstructWorkbenchCodexApiBaseUrl(value.baseUrl);
+      if (reconstructed.ok) {
+        return publicCodexApiBaseUrlSaved(reconstructed.baseUrl);
+      }
+    }
+    if (
+      isStrictDataRecord(value, ["error", "ok"]) &&
+      value.ok === false &&
+      isStrictDataRecord(value.error, ["category", "message", "reason"]) &&
+      value.error.category === "codex-api-base-url-rejected" &&
+      value.error.message === "That base URL cannot be used." &&
+      value.error.reason === "invalid-url"
+    ) {
+      return publicCodexApiBaseUrlRejected("invalid-url");
+    }
+    if (isCodexApiBaseUrlUnavailableResult(value)) {
+      return publicCodexApiBaseUrlUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicCodexApiBaseUrlUnavailable();
+}
+
+function isCodexApiBaseUrlUnavailableResult(value: unknown): boolean {
+  return (
+    isStrictDataRecord(value, ["error", "ok"]) &&
+    value.ok === false &&
+    isStrictDataRecord(value.error, ["category", "message"]) &&
+    value.error.category === "codex-api-base-url-unavailable" &&
+    value.error.message ===
+      "The Codex · API base URL could not be loaded or saved. Keep the current value and try again."
   );
 }
 

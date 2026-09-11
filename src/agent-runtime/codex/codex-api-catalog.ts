@@ -44,6 +44,15 @@ export interface CodexApiEndpointConfiguration {
   /** Explicit provider base URL; env override / contract default otherwise. */
   readonly baseUrl?: string;
   /**
+   * Live base URL resolver (w223: the Settings "Base URL (optional)" field
+   * on the Codex · API card). Invoked once per `prepareEndpoint()` call --
+   * the same per-spawn cadence as `resolveApiKey` -- so a save takes effect
+   * on the next operation without recomposing the adapter. Its result wins
+   * over `baseUrl` when present; an empty/undefined result falls through to
+   * `baseUrl`, then the env override, then the contract default.
+   */
+  readonly resolveBaseUrl?: () => string | undefined | Promise<string | undefined>;
+  /**
    * Live key resolver for the endpoint secret envelope store (ADR 0022).
    * Invoked once per spawn environment resolution; `undefined` falls back to
    * the `CODEX_API_KEY` source environment variable.
@@ -91,17 +100,16 @@ export function createCodexApiEndpointContext(
     ...(configuration.sourceEnvironment === undefined
       ? {}
       : { sourceEnvironment: configuration.sourceEnvironment }),
-    prepareEndpoint: () => {
+    prepareEndpoint: async () => {
+      const resolved = await configuration.resolveBaseUrl?.();
+      const liveBaseUrl = isNonEmpty(resolved) ? resolved : configuration.baseUrl;
       ensureCodexApiCodexHome({
         homeDirectory: configuration.codexHome,
-        ...(isNonEmpty(configuration.baseUrl)
-          ? { baseUrl: configuration.baseUrl }
-          : {}),
+        ...(isNonEmpty(liveBaseUrl) ? { baseUrl: liveBaseUrl } : {}),
         ...(configuration.sourceEnvironment === undefined
           ? {}
           : { sourceEnvironment: configuration.sourceEnvironment }),
       });
-      return Promise.resolve();
     },
     staticCatalog: CODEX_API_STATIC_CATALOG,
   });

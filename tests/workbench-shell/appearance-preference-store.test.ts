@@ -155,7 +155,7 @@ test("Ask when needed survives a clean restart without resetting appearance and 
     "ask-when-needed",
   );
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 7,
+    schemaVersion: 8,
     appearance: {
       tone: "dark",
       crt: "blocks",
@@ -170,6 +170,7 @@ test("Ask when needed survives a clean restart without resetting appearance and 
       kimi: "kimi-code",
     },
     runtimeExecutables: { codex: "", claude: "" },
+    codexApiBaseUrl: "",
   });
   await reopened.close();
 });
@@ -245,7 +246,7 @@ test("family endpoint preferences round-trip per family, default from a v4 docum
     kimi: "kimi-platform",
   });
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 7,
+    schemaVersion: 8,
     appearance: {
       tone: "light",
       crt: "full",
@@ -260,6 +261,7 @@ test("family endpoint preferences round-trip per family, default from a v4 docum
       kimi: "kimi-platform",
     },
     runtimeExecutables: { codex: "", claude: "" },
+    codexApiBaseUrl: "",
   });
   await store.close();
 
@@ -333,7 +335,7 @@ test("a v6 document's kimiEndpointPreference migrates into the endpointPreferenc
   // The next write upgrades the document to the v7 family record.
   await store.saveEndpointPreference("codex-api");
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 7,
+    schemaVersion: 8,
     appearance: {
       tone: "light",
       crt: "full",
@@ -348,6 +350,7 @@ test("a v6 document's kimiEndpointPreference migrates into the endpointPreferenc
       kimi: "kimi-platform",
     },
     runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
+    codexApiBaseUrl: "",
   });
   await store.close();
 });
@@ -460,7 +463,7 @@ test("one exact non-default appearance survives a clean store restart and cannot
   assert.equal(
     await readFile(appearancePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 7,
+      schemaVersion: 8,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
       endpointPreference: {
@@ -469,6 +472,7 @@ test("one exact non-default appearance survives a clean store restart and cannot
         kimi: "kimi-code",
       },
       runtimeExecutables: { codex: "", claude: "" },
+      codexApiBaseUrl: "",
     })}\n`,
   );
   assert.equal(await readFile(directProfilePath, "utf8"), directProfileBytes);
@@ -675,7 +679,7 @@ test("close flushes an in-flight appearance save and rejects every later operati
   assert.equal(
     await readFile(filePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 7,
+      schemaVersion: 8,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
       endpointPreference: {
@@ -684,8 +688,96 @@ test("close flushes an in-flight appearance save and rejects every later operati
         kimi: "kimi-code",
       },
       runtimeExecutables: { codex: "", claude: "" },
+      codexApiBaseUrl: "",
     })}\n`,
   );
+});
+
+test("codex-api base URL defaults empty, round-trips, and survives an unrelated save", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const store = createRegisteredAppearancePreferenceStore(t, {
+    filePath: join(directory, "codex-api-base-url.json"),
+  });
+
+  assert.equal(await store.readCodexApiBaseUrl(), "");
+  assert.equal(
+    await store.saveCodexApiBaseUrl("https://gateway.example.com/v1"),
+    "https://gateway.example.com/v1",
+  );
+  assert.equal(
+    await store.readCodexApiBaseUrl(),
+    "https://gateway.example.com/v1",
+  );
+
+  // An unrelated save (Claude permission handling) must not clobber it.
+  await store.saveClaudePermissionHandling("ask-when-needed");
+  assert.equal(
+    await store.readCodexApiBaseUrl(),
+    "https://gateway.example.com/v1",
+  );
+
+  // Clearing it back to "" (the escape hatch) also round-trips.
+  assert.equal(await store.saveCodexApiBaseUrl(""), "");
+  assert.equal(await store.readCodexApiBaseUrl(), "");
+  await store.close();
+});
+
+test("a v7 document migrates to v8 with codexApiBaseUrl defaulted empty, and a save upgrades the bytes on disk", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const filePath = join(directory, "v7-migration.json");
+  const v7Bytes = `${JSON.stringify({
+    schemaVersion: 7,
+    appearance: defaultWorkbenchAppearancePreference,
+    claudePermissionHandling: "without-asking",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-desktop",
+      kimi: "kimi-code",
+    },
+    runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
+  })}\n`;
+  await writeFile(filePath, v7Bytes, "utf8");
+  const store = createRegisteredAppearancePreferenceStore(t, { filePath });
+
+  assert.equal(await store.readCodexApiBaseUrl(), "");
+  assert.equal(await readFile(filePath, "utf8"), v7Bytes);
+
+  await store.saveCodexApiBaseUrl("https://gateway.example.com/v1");
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
+    schemaVersion: 8,
+    appearance: defaultWorkbenchAppearancePreference,
+    claudePermissionHandling: "without-asking",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-desktop",
+      kimi: "kimi-code",
+    },
+    runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
+    codexApiBaseUrl: "https://gateway.example.com/v1",
+  });
+  await store.close();
+});
+
+test("a codex-api base URL with a control character fails closed without rewrite", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  const store = createRegisteredAppearancePreferenceStore(t, {
+    filePath: join(directory, "codex-api-base-url-invalid.json"),
+  });
+  const saveUnknown = store.saveCodexApiBaseUrl as unknown as (
+    value: unknown,
+  ) => Promise<unknown>;
+  await rejectsAppearance(saveUnknown("https://example.com/\u0000"), "preferences-invalid");
+  assert.equal(await store.readCodexApiBaseUrl(), "");
+  await store.close();
 });
 
 async function rejectsAppearance(

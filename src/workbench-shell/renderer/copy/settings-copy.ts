@@ -74,6 +74,16 @@ const englishCopy = {
       "Recorded conversations stay in the Workbench. Resumable Sessions for this provider will no longer be resumable when this authentication action begins.",
     confirmLogout: "Ask the provider CLI to log out",
     continueWithLogin: "Continue with Login",
+    codexApiBaseUrlLabel: "Base URL (optional)",
+    codexApiBaseUrlPlaceholder: "https://your-openai-compatible-gateway/v1",
+    codexApiBaseUrlHint:
+      "For an OpenAI-compatible gateway. Leave blank to use the OpenAI default.",
+    codexApiBaseUrlSaveAction: "Save base URL",
+    codexApiBaseUrlSavedLabel: "Base URL",
+    codexApiBaseUrlNotSetLabel: "Using the OpenAI default",
+    codexApiBaseUrlInvalidSentence: "That must be an http(s):// address.",
+    codexApiBaseUrlSaveFailedSentence:
+      "The base URL could not be saved. Keep the current value and try again.",
   },
   /**
    * One API-key management block per static-key endpoint (WO16 Part 1
@@ -420,6 +430,14 @@ const simplifiedChineseCopy = {
       "已记录的对话会保留在 Workbench 中。开始此身份验证操作后，此提供方的可继续会话将无法继续。",
     confirmLogout: "要求提供方 CLI 退出登录",
     continueWithLogin: "继续登录",
+    codexApiBaseUrlLabel: "Base URL(可选)",
+    codexApiBaseUrlPlaceholder: "https://你的-openai-兼容网关/v1",
+    codexApiBaseUrlHint: "用于接入 OpenAI 兼容网关。留空则使用 OpenAI 官方默认地址。",
+    codexApiBaseUrlSaveAction: "保存 Base URL",
+    codexApiBaseUrlSavedLabel: "Base URL",
+    codexApiBaseUrlNotSetLabel: "使用 OpenAI 官方默认地址",
+    codexApiBaseUrlInvalidSentence: "必须是 http(s):// 开头的地址。",
+    codexApiBaseUrlSaveFailedSentence: "Base URL 未能保存,请保留当前值并重试。",
   },
   endpointKeyCopy: {
     shared: {

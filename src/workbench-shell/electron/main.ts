@@ -57,6 +57,7 @@ import {
   createWorkbenchCodexApiEndpointKeySource,
   CODEX_API_ENDPOINT_KEY_SUBJECT,
 } from "../codex-api-endpoint-key.ts";
+import { CODEX_API_ENDPOINT_ENV_CONTRACT } from "../../agent-runtime/codex/endpoint-env-factory.ts";
 import {
   createEndpointCatalogFreshnessService,
   type EndpointCatalogFreshnessService,
@@ -116,6 +117,10 @@ import {
   installWorkbenchClaudePermissionHandlingIpc,
   type WorkbenchClaudePermissionHandlingIpcBinding,
 } from "./claude-permission-handling-ipc.ts";
+import {
+  installWorkbenchCodexApiBaseUrlIpc,
+  type WorkbenchCodexApiBaseUrlIpcBinding,
+} from "./codex-api-base-url-ipc.ts";
 import {
   installWorkbenchEndpointPreferenceIpc,
   type WorkbenchEndpointPreferenceIpcBinding,
@@ -252,6 +257,7 @@ let appearancePreferenceIpc: WorkbenchAppearancePreferenceIpcBinding | null =
   null;
 let claudePermissionHandlingIpc: WorkbenchClaudePermissionHandlingIpcBinding | null =
   null;
+let codexApiBaseUrlIpc: WorkbenchCodexApiBaseUrlIpcBinding | null = null;
 let subscriptionUsageIpc: ReturnType<typeof installWorkbenchSubscriptionUsageIpc> | null = null;
 let endpointPreferenceIpc: WorkbenchEndpointPreferenceIpcBinding | null =
   null;
@@ -268,6 +274,12 @@ let deepseekEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let kimiPlatformEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let claudeApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let codexApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
+// In-memory mirror of the preference store's codex-api base URL (w223), kept
+// current by hydration at startup and every successful save. Sync reads let
+// the codex-api key source's "Test connection" probe use the saved override
+// without giving the probe's base-URL resolver a disk read on every call --
+// the store itself stays the single source of truth; this is a read cache.
+let codexApiBaseUrlOverride = "";
 let endpointCatalogFreshnessService: EndpointCatalogFreshnessService | null =
   null;
 let runtimeExecutableIpc: WorkbenchRuntimeExecutableIpcBinding | null = null;
@@ -340,6 +352,14 @@ function disposeWindowScopedBindings(): void {
         run() {
           const closing = claudePermissionHandlingIpc;
           claudePermissionHandlingIpc = null;
+          closing?.dispose();
+        },
+      },
+      {
+        name: "codexApiBaseUrlIpc",
+        run() {
+          const closing = codexApiBaseUrlIpc;
+          codexApiBaseUrlIpc = null;
           closing?.dispose();
         },
       },
@@ -808,6 +828,8 @@ function startPrimaryWorkbench(): void {
             "workbench-appearance-preferences-v1.json",
           ),
         });
+        codexApiBaseUrlOverride =
+          await appearancePreferenceStore.readCodexApiBaseUrl();
         // One shared secret-envelope store FILE for every API-transport
         // endpoint key (ADR 0022 multi-subject shape), platform-encrypted via
         // Electron safeStorage, beside the other userData stores. Each
@@ -875,6 +897,13 @@ function startPrimaryWorkbench(): void {
         codexApiEndpointKeySource = createWorkbenchCodexApiEndpointKeySource({
           store: codexApiEndpointSecretEnvelopeStore,
           environment: process.env,
+          // "Test connection" honors the saved override (w223) over the
+          // env-var / contract default, same precedence prepareEndpoint uses.
+          probeBaseUrl: (environment) =>
+            codexApiBaseUrlOverride.trim().length > 0
+              ? codexApiBaseUrlOverride
+              : (environment[CODEX_API_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar]
+                  ?.trim() || CODEX_API_ENDPOINT_ENV_CONTRACT.defaultBaseUrl),
         });
         // Catalog freshness (ticket 14 / WO16 Part 3): zero-inference
         // /models pulls over the same key sources; enrollment persists
@@ -949,6 +978,7 @@ function startPrimaryWorkbench(): void {
                   kimiPlatformEndpointKeySource?.resolve(),
                 resolveClaudeApiKey: () => claudeApiEndpointKeySource?.resolve(),
                 resolveCodexApiKey: () => codexApiEndpointKeySource?.resolve(),
+                resolveCodexApiBaseUrl: () => codexApiBaseUrlOverride,
                 catalogAugmentation: (endpointId) =>
                   endpointId === "kimi-code"
                     ? []
@@ -1079,6 +1109,24 @@ function startPrimaryWorkbench(): void {
       ipcMain,
       window: createdWindow,
       source: initializedAppearancePreferenceStore,
+    });
+    codexApiBaseUrlIpc = installWorkbenchCodexApiBaseUrlIpc({
+      ipcMain,
+      window: createdWindow,
+      source: {
+        readCodexApiBaseUrl: () =>
+          initializedAppearancePreferenceStore.readCodexApiBaseUrl(),
+        async saveCodexApiBaseUrl(baseUrl: string): Promise<string> {
+          const saved =
+            await initializedAppearancePreferenceStore.saveCodexApiBaseUrl(
+              baseUrl,
+            );
+          // Keep the sync probe/prepare cache current the moment a save
+          // durably lands (w223); it is the only mirror they read from.
+          codexApiBaseUrlOverride = saved;
+          return saved;
+        },
+      },
     });
     subscriptionUsageIpc = installWorkbenchSubscriptionUsageIpc({
       ipcMain,
