@@ -49,9 +49,14 @@ export function createSessionContinuationPlan(
   let generation = 0;
   let closing = false;
   let cancelObserver: (() => void) | undefined;
+  // Belongs to whichever follow() is current; reused so a user-initiated
+  // cancel can report through the same path a natural stop would take.
+  let activeStop: ((reason: SessionContinuationStop["reason"]) => void) | undefined;
   const runs = new Set<Promise<void>>();
 
-  function cancel(): number {
+  /** Pass "interrupted-by-user" only for a real user action; a plan replacement or close must stay silent. */
+  function cancel(reason?: "interrupted-by-user"): number {
+    if (reason !== undefined) activeStop?.(reason);
     generation += 1;
     cancelObserver?.();
     cancelObserver = undefined;
@@ -78,6 +83,7 @@ export function createSessionContinuationPlan(
       channel.recordContinuationStop?.(current.commandId, stopped);
       console.warn("[coordinator] Automatic continuation stopped", stopped);
     };
+    activeStop = stop;
     try {
       while (active()) {
         unavailableReason = "observation-unavailable";
@@ -121,7 +127,10 @@ export function createSessionContinuationPlan(
     } finally {
       // Do not make a user's takeover wait for a pending Runtime event.
       void iterator.return?.().catch(() => undefined);
-      if (generation === intent) cancelObserver = undefined;
+      if (generation === intent) {
+        cancelObserver = undefined;
+        activeStop = undefined;
+      }
     }
   }
 

@@ -79,6 +79,8 @@ test("production host and sanitizer expose quota pause and accept only explicit 
   assert.ok(selectionKey);
   assert.equal(paused.commands[0].session?.resumable, true);
   assert.deepEqual(paused.commands[0].session?.timeline.at(-1), { kind: "turn-paused", reason: "quota-exhausted" });
+  // The captured fixture text names "2026-09-11 10:33:17" with no timezone; w211 reads it as UTC.
+  assert.equal(paused.commands[0].quotaPauseResetsAt, Date.parse("2026-09-11T10:33:17Z"));
   assert.equal(transports.length, 1);
   const continuation = await host.loadDirectSessionProfile({ kind: "continuation-session", selectionKey });
   assert.ok(continuation.ok);
@@ -109,6 +111,20 @@ test("production host and sanitizer expose quota pause and accept only explicit 
     assert.match(english, /id="direct-model"[^>]*disabled/u);
     assert.match(english, /id="direct-work-intensity"[^>]*disabled/u);
     assert.match(english, /No automatic retry/u);
+    // w211: the captured GLM 429 text names a reset instant, so the pause card names it too.
+    const resetsAt = paused.commands[0].quotaPauseResetsAt;
+    assert.ok(resetsAt, "captured fixture text must yield a parsed provider reset time");
+    const timeOfDay = (language: string, milliseconds: number) =>
+      new Intl.DateTimeFormat(language, { hour: "2-digit", minute: "2-digit" }).format(milliseconds);
+    assert.ok(english.includes(timeOfDay("en", resetsAt!)), "composer names the provider reset time");
+    assert.match(english, /Provider says it resets at/u);
+    const withoutResetsAt = { ...paused.commands[0], quotaPauseResetsAt: undefined };
+    const englishWithoutResetsAt = renderToString(() => module.DirectInputComposer({
+      ...ready, view: paused, selected: withoutResetsAt, composer: { ...ready.composer, draft: "EXPLICIT_NEW_INPUT" }, centered: false,
+      onDraft() {}, onNavigateComposerHistory() {}, onLoadProfile() {}, onEnterNewSession() {}, onCancelNewSession() {},
+      onEndpoint() {}, onModel() {}, onWorkIntensity() {}, onExecutionMode() {}, onAccessMode() {}, onUseAsDefault() {}, onSubmit() {},
+    }));
+    assert.doesNotMatch(englishWithoutResetsAt, /Provider says it resets at/u, "no reset time known means no invented line");
     assert.match(render(""), /class="send submit-button"[^>]*disabled/u);
     const unavailable = completeDirectInputSubmission(submission.state, publicContinuationUnavailable());
     const feedback = presentationText(unavailable.composer.feedback)!;
@@ -117,6 +133,8 @@ test("production host and sanitizer expose quota pause and accept only explicit 
     const chinese = render("请继续处理上一条任务");
     assert.match(chinese, /此次请求未执行/u);
     assert.match(chinese, /class="send submit-button"[^>]*>(?:<!--.*?-->)*恢复/u);
+    assert.ok(chinese.includes(timeOfDay("zh-CN", resetsAt!)), "Chinese composer names the provider reset time");
+    assert.match(chinese, /Provider .*（本地）重置/u);
     const transcript = await server.ssrLoadModule("/src/workbench-shell/renderer/transcript.tsx");
     const expired = { ...paused.commands[0], status: "failed", failureCategory: "quota-expired",
       session: { ...paused.commands[0].session, resumable: false, selectionKey: null } };

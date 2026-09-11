@@ -99,6 +99,7 @@ import {
 } from "./copy/runtime-profile-copy.ts";
 import { dynamicCopy } from "./copy/dynamic-copy.ts";
 import { quotaPauseCopy } from "./copy/session-status-copy.ts";
+import { locale } from "./locale.ts";
 import {
   presentationText,
   type WorkbenchPresentationText,
@@ -444,6 +445,16 @@ export const DirectInputComposer: Component<{
   const recorded = () => recordedRequestedProfile(props.selected);
   const interruptControl = () => props.selected?.interrupt;
   const steerControl = () => props.selected?.steer;
+  const showQuotaPauseNotice = () =>
+    props.selected?.status === "quota-paused" && mode() === "continue" &&
+    props.composer.phase !== "error" && props.composer.phase !== "pending";
+  const quotaPauseResetNotice = (): string | undefined => {
+    const resetsAt = props.selected?.quotaPauseResetsAt;
+    if (resetsAt === undefined) return undefined;
+    const timeOfDay = (milliseconds: number) =>
+      new Intl.DateTimeFormat(locale(), { hour: "2-digit", minute: "2-digit" }).format(milliseconds);
+    return quotaPauseCopy.resetNotice(timeOfDay(resetsAt), timeOfDay(Date.now()));
+  };
   const interruptPending = () => props.interruptPending === true;
   const steerPending = () => props.steerPending === true;
   const interruptTitle = () => {
@@ -988,8 +999,7 @@ export const DirectInputComposer: Component<{
             when={continuationIssue()}
             keyed
             fallback={
-              props.selected?.status === "quota-paused" && mode() === "continue" &&
-              props.composer.phase !== "error" && props.composer.phase !== "pending"
+              showQuotaPauseNotice()
                 ? quotaPauseCopy.notice
                 : activeTurn()
                 ? presentationText(props.steerFeedback) ??
@@ -1005,6 +1015,9 @@ export const DirectInputComposer: Component<{
             {(issue) => automaticContinuationIssueMessage(issue)}
           </Show>
         </span>
+        <Show when={showQuotaPauseNotice() ? quotaPauseResetNotice() : undefined}>
+          {(text) => <span class="quota-pause-reset-notice">{text()}</span>}
+        </Show>
         <span class="grow" />
         <span class="count">
           {props.composer.draft.length.toLocaleString("en-US")} /{" "}

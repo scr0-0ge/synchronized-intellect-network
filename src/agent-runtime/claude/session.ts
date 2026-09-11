@@ -466,6 +466,9 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
     };
     let initialQuotaRefusal = true;
     let quotaRefusalText: string | undefined;
+    // Most recent first-party rate_limit_event window resets, kept for the one
+    // quota-exhausted yield below; unrelated to the GLM text path.
+    let lastRateLimitWindowResetsAt: number | undefined;
     const reasoning = new ClaudeReasoningStream();
     let pendingTextEmitted = false;
     const promptSuggestions: string[] = [];
@@ -755,7 +758,10 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
             await this.#transport.stop();
             terminal = true;
             this.#terminal = true;
-            yield { kind: "turn-paused", reason: "quota-exhausted" };
+            const resetsAt = glmQuotaRefusalResetsAt(quotaRefusalText) ?? lastRateLimitWindowResetsAt;
+            yield resetsAt === undefined
+              ? { kind: "turn-paused", reason: "quota-exhausted" }
+              : { kind: "turn-paused", reason: "quota-exhausted", resetsAt };
             return;
           }
           // A steer has two results on the wire. The first closes only the
@@ -877,18 +883,35 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
             const status = isPlainRecord(info) ? info.status : undefined;
             const windows = isPlainRecord(info) && isPlainRecord(info.unifiedWindows)
               ? info.unifiedWindows : undefined;
+            const fiveHourWindow = readSubscriptionWindow(windows?.five_hour);
+            const sevenDayWindow = readSubscriptionWindow(windows?.seven_day);
             // Optional telemetry stays off the turn-state/Project event lane.
             // Composition attaches this observer only to the first-party endpoint.
             if (this.#observeSubscriptionUsage !== undefined) {
               const observation = Object.freeze({
-                five_hour: readSubscriptionWindow(windows?.five_hour),
-                seven_day: readSubscriptionWindow(windows?.seven_day),
+                five_hour: fiveHourWindow,
+                seven_day: sevenDayWindow,
                 observedAt: Date.now(),
               });
               try { await this.#observeSubscriptionUsage(observation); } catch {
                 // Unavailable settings storage must not fail a healthy turn.
               }
             }
+            // The window that actually triggered names itself in rateLimitType.
+            // When that isn't resolvable, take the earlier reset of the two
+            // known windows rather than guess which one applies.
+            const triggeredWindow = isPlainRecord(info) && info.rateLimitType === "five_hour"
+              ? fiveHourWindow
+              : isPlainRecord(info) && info.rateLimitType === "seven_day"
+                ? sevenDayWindow
+                : undefined;
+            const knownWindows = [fiveHourWindow, sevenDayWindow].filter(
+              (window): window is RuntimeSubscriptionUsageWindow => window !== null,
+            );
+            const windowResetsAt = triggeredWindow?.resetsAt ??
+              (knownWindows.length === 0 ? undefined : Math.min(...knownWindows.map((window) => window.resetsAt)));
+            // Provider epoch seconds; the quota-pause event carries milliseconds.
+            if (windowResetsAt !== undefined) lastRateLimitWindowResetsAt = windowResetsAt * 1000;
             // This is quota telemetry, not a retry/wait instruction. An
             // allowed request can still have overageStatus="rejected".
             // Unknown optional telemetry cannot establish a blocked state.
@@ -1096,6 +1119,14 @@ function initialGlmQuotaRefusalText(message: Record<string, unknown>, endpointUr
   return isPlainRecord(block) && block.type === "text" && typeof block.text === "string" &&
     /^API Error: Request rejected \(429\) · \[1310\]\[[^\]\r\n]+\]\[[^\]\r\n]+\]$/u.test(block.text)
     ? block.text : undefined;
+}
+
+/** GLM's 429 text names no timezone; only a literal UTC reading is parsed, never guessed. */
+function glmQuotaRefusalResetsAt(text: string): number | undefined {
+  const match = /reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/u.exec(text);
+  if (match === null) return undefined;
+  const parsed = Date.parse(`${match[1].replace(" ", "T")}Z`);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 async function write(

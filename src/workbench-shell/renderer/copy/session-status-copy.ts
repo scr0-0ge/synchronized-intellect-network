@@ -18,6 +18,8 @@ const englishCopy = {
     notice: "Quota exhausted; this attempt did not execute. After confirming quota is available, enter a new instruction and choose Resume. No automatic retry; this wait expires within 24 hours.",
     resume: "Resume",
     profileLocked: "Resume keeps the same endpoint and profile. Enter a new instruction when quota is available.",
+    resetNotice: (resetTime: string, observedTime: string): string =>
+      `Provider says it resets at ${resetTime} (local) — as observed at ${observedTime}.`,
   },
   statusCopy: {
     accepted: "Accepted",
@@ -60,6 +62,8 @@ const simplifiedChineseCopy = {
     notice: "额度耗尽，此次请求未执行。确认额度恢复后，请输入新的继续指令并点击「恢复」。不会自动重试；本次等待最多保留 24 小时。",
     resume: "恢复",
     profileLocked: "恢复沿用原端点和配置。额度恢复后，请输入新的继续指令。",
+    resetNotice: (resetTime: string, observedTime: string): string =>
+      `Provider 说 ${resetTime}（本地）重置 —— 观测于 ${observedTime}。`,
   },
   statusCopy: {
     accepted: "已接受",

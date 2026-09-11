@@ -341,7 +341,8 @@ function createBackend(
     ): Promise<WorkbenchInterruptResult> {
       const reconstructed = reconstructWorkbenchInterruptRequest(request);
       if (!reconstructed.ok) return Promise.resolve(publicInvalidInterrupt());
-      continuationPlan.cancel();
+      // The user's own Stop click: let the continuation plan record why it stopped.
+      continuationPlan.cancel("interrupted-by-user");
       if (closing) return Promise.resolve(publicInterruptUnavailable());
       const resolved = liveView.resolveInterrupt(
         reconstructed.request.interruptKey,

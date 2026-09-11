@@ -211,6 +211,15 @@ for (const takeover of ["steer", "interrupt", "composer"] as const) {
     await waitFor(() => fixture.backend.readTurnActivity() === "idle");
     assert.deepEqual(fixture.sent, ["Proceed one step.", "Proceed one step.",
       ...(takeover === "composer" ? ["Human starts a separate Session."] : [])]);
+    if (takeover === "interrupt") {
+      // The real bridged interruptActiveTurn call above must itself land the
+      // stop, not a hand-built plan-internal call (w220).
+      await waitFor(() => fixture.command()?.continuationStop?.reason === "interrupted-by-user");
+    } else if (takeover === "composer") {
+      // A plan cancelled because a new human turn replaced it must stay silent,
+      // not be misrecorded as the user having pressed Stop (w220).
+      assert.notEqual(fixture.command()?.continuationStop?.reason, "interrupted-by-user");
+    }
   });
 }
 
@@ -348,4 +357,68 @@ test("a recorded stop reason survives closing and reopening the Project", async 
   assert.ok(afterRestart?.ok);
   assert.deepEqual(afterRestart.view.commands[0]?.continuationStop, { step: 2, limit: 3, reason: "turn-not-completed" },
     "after restart: the stop reason is read back from the ledger, not just kept in memory");
+});
+
+test("interrupted-by-user, reached via the real interruptActiveTurn click path, survives closing and reopening the Project (w220)", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-auto-continue-interrupt-restart-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  const sent: string[] = [];
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let interrupted = false;
+  const binding = (profile: SessionProfile) => {
+    let step = 0;
+    return {
+      profile, opaqueSessionReference: "auto-continue-interrupt-restart-reference",
+      async send(input: { text: string }) { sent.push(input.text); step = sent.length; },
+      interruptAvailability: () => "available" as const,
+      async interrupt() { interrupted = true; release(); },
+      async *events(): AsyncIterable<NormalizedRuntimeEvent> {
+        if (step === 0) return; // A fresh resume probe must not execute a turn.
+        yield { kind: "turn-started" };
+        if (step === 2) await held;
+        if (interrupted) { yield { kind: "turn-interrupted", status: "interrupted" }; return; }
+        yield { kind: "agent-message", text: "One verified step finished." };
+        yield { kind: "turn-completed", status: "completed" };
+      },
+    };
+  };
+  const adapter: ResumableAgentRuntimeAdapter = {
+    async inspect() {
+      return {
+        runtime: "codex", models: [{ id: "gpt-5.6-sol", effortLevels: ["ultra"] }],
+        executionModes: ["single-agent"], accessModes: ["full-access"],
+      };
+    },
+    async start(request) { return binding(request.profile); },
+    async resume(request) { return binding(request.profile); },
+  };
+  let backend = await createWorkbenchBackend({ projectDirectory, databasePath, adapter });
+  let view: WorkbenchProjectResult | undefined;
+  const currentView = () => view;
+  backend.observeProject((result) => { view = result; });
+  const profile = await backend.loadDirectSessionProfile();
+  assert.equal((await backend.submitDirectInput(startRequest(profile, "/auto-continue 4\nDo the next verified step."))).ok, true);
+  await waitFor(() => !!view?.ok && view.view.commands[0]?.status === "in-flight" && sent.length === 2);
+  const control = view?.ok ? view.view.commands[0]?.interrupt : undefined;
+  assert.ok(control?.status === "available", "the real Stop control, not an internal plan call");
+  assert.equal((await backend.interruptActiveTurn!({ interruptKey: control.interruptKey })).ok, true);
+  await waitFor(() => !!view?.ok && view.view.commands[0]?.continuationStop?.reason === "interrupted-by-user");
+  const beforeRestart = currentView();
+  assert.ok(beforeRestart?.ok);
+  assert.deepEqual(beforeRestart.view.commands[0]?.continuationStop, { step: 2, limit: 4, reason: "interrupted-by-user" },
+    "before restart: the in-memory report shows the real click path's stop reason");
+  await backend.close();
+
+  view = undefined;
+  backend = await createWorkbenchBackend({ projectDirectory, databasePath, adapter });
+  t.after(async () => { await backend.close(); await rm(root, { recursive: true, force: true }); });
+  backend.observeProject((result) => { view = result; });
+  await waitFor(() => !!view?.ok && view.view.commands[0]?.continuationStop?.reason === "interrupted-by-user");
+  const afterRestart = currentView();
+  assert.ok(afterRestart?.ok);
+  assert.deepEqual(afterRestart.view.commands[0]?.continuationStop, { step: 2, limit: 4, reason: "interrupted-by-user" },
+    "after restart: interrupted-by-user is read back from the ledger just like the other stop reasons");
 });

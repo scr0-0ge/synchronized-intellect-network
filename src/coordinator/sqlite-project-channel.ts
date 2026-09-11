@@ -1664,6 +1664,9 @@ class SqliteProjectChannel implements ProjectChannel {
        ORDER BY cursor LIMIT 1`,
     ).get(sessionId, sessionId) as { data_json: string } | undefined;
     const expiresAt = prior === undefined ? Date.now() + quotaPauseMaximumMs : readQuotaDeadline(prior.data_json);
+    // Fresh per attempt, unlike expiresAt: this attempt's own provider reading, not chained.
+    const resetsAt = events.find((event): event is Extract<NormalizedRuntimeEvent, { kind: "turn-paused" }> =>
+      event.kind === "turn-paused")?.resetsAt;
     const committed = transaction(this.database, () => {
       const result = this.database.prepare(
         "UPDATE commands SET status = 'failed', failure_category = 'quota-paused', effect_phase = 'committed', outcome_uncertain = 0 WHERE command_id = ? AND status = 'in-flight' AND effect_phase = 'awaiting-terminal'",
@@ -1673,7 +1676,8 @@ class SqliteProjectChannel implements ProjectChannel {
         this.database, this.projectId, commandId, "runtime-event", "in-flight", sessionId, { event },
       );
       this.database.prepare("UPDATE sessions SET lifecycle_status = 'failed' WHERE session_id = ?").run(sessionId);
-      appendUpdate(this.database, this.projectId, commandId, "quota-paused", "quota-paused", sessionId, { expiresAt });
+      appendUpdate(this.database, this.projectId, commandId, "quota-paused", "quota-paused", sessionId,
+        resetsAt === undefined ? { expiresAt } : { expiresAt, resetsAt });
       return true;
     });
     if (committed) {
@@ -1686,6 +1690,12 @@ class SqliteProjectChannel implements ProjectChannel {
     const row = this.database.prepare("SELECT data_json FROM updates WHERE command_id = ? AND kind = 'quota-paused' ORDER BY cursor DESC LIMIT 1")
       .get(commandId) as { data_json: string } | undefined;
     return row === undefined ? 0 : readQuotaDeadline(row.data_json);
+  }
+
+  private quotaResetsAt(commandId: string): number | undefined {
+    const row = this.database.prepare("SELECT data_json FROM updates WHERE command_id = ? AND kind = 'quota-paused' ORDER BY cursor DESC LIMIT 1")
+      .get(commandId) as { data_json: string } | undefined;
+    return row === undefined ? undefined : readQuotaResetsAt(row.data_json);
   }
 
   private sessionHasQuotaPause(sessionId: string): boolean {
@@ -2686,15 +2696,19 @@ class SqliteProjectChannel implements ProjectChannel {
     );
     const failureCategory = failedCommandFailureCategory(row);
     const continuationStop = this.continuationStopForCommand(row.command_id);
+    const status: ProjectCommandStatus =
+      row.status === "failed" && row.failure_category === "quota-paused" && this.quotaDeadline(row.command_id) > Date.now()
+        ? "quota-paused" : row.status;
+    const quotaPauseResetsAt = status === "quota-paused" ? this.quotaResetsAt(row.command_id) : undefined;
     const summary: ProjectCommandSummary = {
       commandId: row.command_id,
       runtime: row.runtime,
-      status: row.status === "failed" && row.failure_category === "quota-paused" && this.quotaDeadline(row.command_id) > Date.now()
-        ? "quota-paused" : row.status,
+      status,
       ...(row.status === "recovery-required" ? { recovery: this.recoveryForCommand(row.command_id) } : {}),
       ...(failureCategory === undefined ? {} : { failureCategory }),
       ...(currentCommand === undefined ? {} : { input: currentCommand.input }),
       ...(continuationStop === undefined ? {} : { continuationStop }),
+      ...(quotaPauseResetsAt === undefined ? {} : { quotaPauseResetsAt }),
     };
     if (session === undefined) return summary;
     let requestedProfileProjection: RequestedSessionProfileProjection | undefined;
@@ -2990,12 +3004,36 @@ function createPromiseController<T>(): PromiseController<T> {
 
 const currentSchemaVersion = 6;
 const quotaPauseMaximumMs = 24 * 60 * 60 * 1000;
+const maximumQuotaResetsAtMs = 8_640_000_000_000;
+
+function isValidQuotaResetsAt(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= maximumQuotaResetsAtMs;
+}
+
+/** `resetsAt` is optional: written only when a provider reset instant was observed. */
+function readQuotaPauseData(dataJson: string): { expiresAt: number; resetsAt?: number } {
+  const value: unknown = JSON.parse(dataJson);
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["expiresAt", "resetsAt"]) ||
+    !Number.isSafeInteger(value.expiresAt) ||
+    (value.expiresAt as number) <= 0 ||
+    (hasOwn(value, "resetsAt") && !isValidQuotaResetsAt(value.resetsAt))
+  ) {
+    throw new Error("invalid-quota-pause");
+  }
+  return {
+    expiresAt: value.expiresAt as number,
+    ...(hasOwn(value, "resetsAt") ? { resetsAt: value.resetsAt as number } : {}),
+  };
+}
 
 function readQuotaDeadline(dataJson: string): number {
-  const value: unknown = JSON.parse(dataJson);
-  if (!isExactDataRecord(value, ["expiresAt"]) || !Number.isSafeInteger(value.expiresAt) ||
-      (value.expiresAt as number) <= 0) throw new Error("invalid-quota-pause");
-  return value.expiresAt as number;
+  return readQuotaPauseData(dataJson).expiresAt;
+}
+
+function readQuotaResetsAt(dataJson: string): number | undefined {
+  return readQuotaPauseData(dataJson).resetsAt;
 }
 const conceptualTables = ["commands", "projects", "sessions", "updates"] as const;
 const versionOneColumns = Object.freeze({
@@ -4590,7 +4628,11 @@ function cloneRuntimeEvent(
     case "turn-interrupted":
       return { kind: "turn-interrupted", status: "interrupted" };
     case "turn-paused":
-      return { kind: "turn-paused", reason: "quota-exhausted" };
+      return {
+        kind: "turn-paused",
+        reason: "quota-exhausted",
+        ...(event.resetsAt === undefined ? {} : { resetsAt: event.resetsAt }),
+      };
     case "failed":
       return { kind: "failed", category: event.category };
   }
@@ -4766,7 +4808,11 @@ function isNormalizedRuntimeEvent(
         value.status === "interrupted"
       );
     case "turn-paused":
-      return isExactDataRecord(value, ["kind", "reason"]) && value.reason === "quota-exhausted";
+      return (
+        hasRuntimeEventKeys(value, ["kind", "reason", "resetsAt"], ignoredFields) &&
+        value.reason === "quota-exhausted" &&
+        (!hasOwn(value, "resetsAt") || isValidQuotaResetsAt(value.resetsAt))
+      );
     case "failed":
       return (
         hasRuntimeEventKeys(value, ["category", "kind"], ignoredFields) &&

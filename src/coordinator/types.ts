@@ -201,6 +201,8 @@ export interface ProjectCommandSummary {
   readonly input?: string;
   /** Durable record of why an automatic continuation plan stopped on this command. */
   readonly continuationStop?: SessionContinuationStop;
+  /** Provider-reported reset instant while `status` is `quota-paused`; epoch milliseconds. */
+  readonly quotaPauseResetsAt?: number;
   readonly session?: ProjectSessionSummary;
 }
 

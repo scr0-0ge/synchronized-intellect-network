@@ -639,6 +639,8 @@ export interface WorkbenchCommandView {
   readonly runtime: string;
   readonly status: ProjectCommandStatus;
   readonly failureCategory?: ProjectCommandFailureCategory;
+  /** Provider-reported reset instant while `status` is `quota-paused`; epoch milliseconds. */
+  readonly quotaPauseResetsAt?: number;
   readonly continuationStop?: WorkbenchContinuationStop;
   /** Present only while this projected command owns the running turn. */
   readonly continuationProgress?: WorkbenchContinuationProgress;

@@ -3658,6 +3658,8 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
   const hasContinuationProgress = isRecord(value) && Object.hasOwn(value, "continuationProgress");
   const hasFailure =
     isRecord(value) && Object.prototype.hasOwnProperty.call(value, "failureCategory");
+  const hasQuotaPauseResetsAt =
+    isRecord(value) && Object.prototype.hasOwnProperty.call(value, "quotaPauseResetsAt");
   const hasSession =
     isRecord(value) && Object.prototype.hasOwnProperty.call(value, "session");
   const hasInterrupt =
@@ -3667,6 +3669,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
   if (
     !isStrictDataRecord(value, [
       ...(hasFailure ? ["failureCategory"] : []),
+      ...(hasQuotaPauseResetsAt ? ["quotaPauseResetsAt"] : []),
       ...(hasContinuationStop ? ["continuationStop"] : []),
       ...(hasContinuationProgress ? ["continuationProgress"] : []),
       ...(hasInterrupt ? ["interrupt"] : []),
@@ -3686,7 +3689,9 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
     (hasContinuationProgress && value.continuationProgress === undefined) ||
     (hasInterrupt && value.interrupt === undefined) ||
     (hasSession && value.session === undefined) ||
-    (hasSteer && value.steer === undefined)
+    (hasSteer && value.steer === undefined) ||
+    (hasQuotaPauseResetsAt &&
+      (value.status !== "quota-paused" || !isValidQuotaPauseResetsAt(value.quotaPauseResetsAt)))
   ) {
     throw new Error("invalid-command");
   }
@@ -3814,6 +3819,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
     runtime,
     status: value.status,
     ...(failureCategory === undefined ? {} : { failureCategory }),
+    ...(hasQuotaPauseResetsAt ? { quotaPauseResetsAt: value.quotaPauseResetsAt as number } : {}),
     ...(continuationStop === undefined ? {} : { continuationStop }),
     ...(continuationProgress === undefined ? {} : { continuationProgress }),
     ...(interrupt === undefined ? {} : { interrupt }),
@@ -4462,6 +4468,12 @@ function hasExactDirectProfileKeys(
   } catch {
     return false;
   }
+}
+
+const maximumQuotaPauseResetsAtMs = 8_640_000_000_000;
+
+function isValidQuotaPauseResetsAt(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= maximumQuotaPauseResetsAtMs;
 }
 
 function isStrictDataRecord(

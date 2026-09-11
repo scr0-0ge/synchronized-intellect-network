@@ -1327,6 +1327,18 @@ test("the follow-up suggestion row never overflows and every suggestion stays fu
         overflow.scrollWidth <= overflow.clientWidth,
         `${width}px wide: scrollWidth ${overflow.scrollWidth} must not exceed clientWidth ${overflow.clientWidth}`,
       );
+      const suggestionRects = await page.locator(".prompt-suggestion").evaluateAll((buttons) =>
+        buttons.map((button) => {
+          const rect = button.getBoundingClientRect();
+          return { right: rect.right, innerWidth: window.innerWidth };
+        }),
+      );
+      for (const rect of suggestionRects) {
+        assert.ok(
+          rect.right <= rect.innerWidth,
+          `${width}px wide: a suggestion button's right edge ${rect.right} must not exceed innerWidth ${rect.innerWidth} (clipped off-screen, scrollWidth/clientWidth alone missed this)`,
+        );
+      }
       assert.deepEqual(
         await page.locator(".prompt-suggestion").allTextContents(),
         [
@@ -1335,6 +1347,47 @@ test("the follow-up suggestion row never overflows and every suggestion stays fu
         ],
         `${width}px wide: every suggestion must render its full text, none clipped out of view`,
       );
+      // A realistic-but-longer follow-up suggestion (w214): the fixture's two short
+      // strings never exercised the title-vs-list squeeze that clipped real suggestions
+      // off-screen at 620px (w210 walkthrough). Mutate rendered text in place so the
+      // stress case matches real CSS behavior without touching the shared fixture data
+      // (out of this guard's territory) or any other assertion in this test file.
+      const longSuggestions = [
+        "Check the remaining tests in this module before merging",
+        "Explain the layout trade-off between wrap and scroll here",
+      ];
+      await page.locator(".prompt-suggestion").evaluateAll((buttons, texts) => {
+        buttons.forEach((button, index) => {
+          button.textContent = texts[index] ?? button.textContent;
+        });
+      }, longSuggestions);
+      const longGeometry = await page.locator(".prompt-suggestion").evaluateAll((buttons) =>
+        buttons.map((button) => {
+          const rect = button.getBoundingClientRect();
+          return {
+            right: rect.right,
+            innerWidth: window.innerWidth,
+            scrollWidth: button.scrollWidth,
+            clientWidth: button.clientWidth,
+            scrollHeight: button.scrollHeight,
+            clientHeight: button.clientHeight,
+          };
+        }),
+      );
+      for (const geometry of longGeometry) {
+        assert.ok(
+          geometry.right <= geometry.innerWidth,
+          `${width}px wide with a longer suggestion: right edge ${geometry.right} must not exceed innerWidth ${geometry.innerWidth}`,
+        );
+        assert.ok(
+          geometry.scrollWidth <= geometry.clientWidth,
+          `${width}px wide with a longer suggestion: scrollWidth ${geometry.scrollWidth} must not exceed clientWidth ${geometry.clientWidth} (text must wrap onto another line, not be clipped horizontally)`,
+        );
+        assert.ok(
+          geometry.scrollHeight <= geometry.clientHeight,
+          `${width}px wide with a longer suggestion: scrollHeight ${geometry.scrollHeight} must not exceed clientHeight ${geometry.clientHeight} (wrapped text must not be clipped vertically either)`,
+        );
+      }
     } finally {
       await application.close();
     }

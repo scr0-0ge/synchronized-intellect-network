@@ -285,6 +285,7 @@ export function createWorkbenchLiveView(options: {
         resumable: boolean;
         status: ProjectCommandStatus;
         failureCategory?: ProjectCommandFailureCategory;
+        quotaPauseResetsAt?: number;
         /** Cursor of the last recorded model reply for this Session. */
         lastModelReplyCursor: number;
         /** Latest accepted command cursor grouped into this Session. */
@@ -305,6 +306,12 @@ export function createWorkbenchLiveView(options: {
         !isFailureCategory(command.failureCategory)
       ) {
         throw new Error("invalid-failure");
+      }
+      if (
+        command.quotaPauseResetsAt !== undefined &&
+        (command.status !== "quota-paused" || !isValidResetsAt(command.quotaPauseResetsAt))
+      ) {
+        throw new Error("invalid-quota-pause-resets-at");
       }
       if (command.continuationStop !== undefined) {
         continuationStops.set(commandId, sanitizeWorkbenchContinuationStop(command.continuationStop));
@@ -347,6 +354,9 @@ export function createWorkbenchLiveView(options: {
             ...(command.failureCategory === undefined
               ? {}
               : { failureCategory: command.failureCategory }),
+            ...(command.quotaPauseResetsAt === undefined
+              ? {}
+              : { quotaPauseResetsAt: command.quotaPauseResetsAt }),
           });
           continue;
         }
@@ -396,6 +406,9 @@ export function createWorkbenchLiveView(options: {
           ...(command.failureCategory === undefined
             ? {}
             : { failureCategory: command.failureCategory }),
+          ...(command.quotaPauseResetsAt === undefined
+            ? {}
+            : { quotaPauseResetsAt: command.quotaPauseResetsAt }),
         });
         continue;
       }
@@ -448,6 +461,8 @@ export function createWorkbenchLiveView(options: {
       );
       if (command.failureCategory === undefined) delete existing.failureCategory;
       else existing.failureCategory = command.failureCategory;
+      if (command.quotaPauseResetsAt === undefined) delete existing.quotaPauseResetsAt;
+      else existing.quotaPauseResetsAt = command.quotaPauseResetsAt;
     }
 
     const groups = [...grouped.values()];
@@ -732,6 +747,9 @@ export function createWorkbenchLiveView(options: {
         ...(entry.failureCategory === undefined
           ? {}
           : { failureCategory: entry.failureCategory }),
+        ...(entry.quotaPauseResetsAt === undefined
+          ? {}
+          : { quotaPauseResetsAt: entry.quotaPauseResetsAt }),
         ...(entry.profile === undefined || entry.sessionId === undefined
           ? {}
           : {
@@ -1728,6 +1746,12 @@ function isFailureCategory(
   value: unknown,
 ): value is ProjectCommandFailureCategory {
   return failureCategories.includes(value as ProjectCommandFailureCategory);
+}
+
+const maximumQuotaResetsAtMs = 8_640_000_000_000;
+
+function isValidResetsAt(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= maximumQuotaResetsAtMs;
 }
 
 function sameLockedProfileFields(

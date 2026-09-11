@@ -716,6 +716,23 @@ function startPrimaryWorkbench(): void {
     });
   }
   mainWindow = createdWindow;
+  // w215 (issue #6). Thirteen window-scoped IPC bindings — up to six of them
+  // parameterized per configured endpoint key — each install their own
+  // terminal-lifecycle listener(s) directly on this window and its
+  // webContents. First measured at startup in ao-0909-w48-listener-warning.md
+  // (20 "closed" on the BrowserWindow, 18 "destroyed"/"render-process-gone"
+  // on WebContents); re-measured on this branch in
+  // ao-0911-w215-max-listeners.md as 21/19/19. Both measurements agree it is a
+  // fixed, non-growing fan-out (five open/close Settings cycles left every
+  // count unchanged, re-verified by
+  // tests/e2e/w215-window-terminal-listener-fanout.ts), not a leak. Node's
+  // default cap of 10 warns on a stranger's first run anyway. Raise the
+  // ceiling to comfortably more than twice the largest measurement, so the
+  // startup log stays clean while an actual runaway leak would still
+  // eventually warn.
+  const windowTerminalListenerCeiling = 40;
+  createdWindow.setMaxListeners(windowTerminalListenerCeiling);
+  createdWindow.webContents.setMaxListeners(windowTerminalListenerCeiling);
   // F204. The launch-time suppression above is a one-shot; Windows repaints
   // the caption every time it recomputes the accent, which on a wallpaper
   // slideshow with AutoColorization is every ten minutes. Gated on the same

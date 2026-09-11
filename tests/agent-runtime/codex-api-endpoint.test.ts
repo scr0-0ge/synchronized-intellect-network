@@ -33,7 +33,7 @@ import { RuntimeAdapterError } from "../../src/agent-runtime/index.ts";
 import { createTestDirectory } from "../helpers/test-lifecycle.ts";
 
 /**
- * Ticket 21 codex-api endpoint: the isolated CODEX_HOME seeding (openai
+ * Ticket 21 codex-api endpoint: the isolated CODEX_HOME seeding (custom
  * provider on the responses wire), the CODEX_API_KEY → OPENAI_API_KEY naming
  * discipline, and the static-catalog adapter (chatgpt-account gate skipped).
  * All credential material is an explicit fake; no CLI, network, or real key.
@@ -109,13 +109,15 @@ test("the isolated CODEX_HOME follows the %APPDATA% location budget and can neve
   assert.equal(home.includes(".codex"), false);
 });
 
-test("the canonical config.toml pins the openai provider, responses wire, our env_key, and the default model", () => {
+test("the canonical config.toml pins the non-reserved custom provider id, responses wire, our env_key, and the default model", () => {
   const canonical = composeCodexApiConfigToml({ homeDirectory: ISOLATED_HOME });
   assert.ok(canonical.includes(`model = "${CODEX_API_DEFAULT_MODEL_ID}"`));
   assert.ok(
     canonical.includes(`model_provider = "${CODEX_API_CODEX_PROVIDER_ID}"`),
   );
-  assert.ok(canonical.includes("[model_providers.openai]"));
+  assert.ok(
+    canonical.includes(`[model_providers.${CODEX_API_CODEX_PROVIDER_ID}]`),
+  );
   assert.ok(canonical.includes('base_url = "https://api.openai.com/v1"'));
   assert.ok(
     canonical.includes(
@@ -340,7 +342,7 @@ test("a codex-api adapter whose codex executable is not locatable reports runtim
   // Seeding still ran: preparation precedes discovery on the static path.
   assert.ok(
     readFileSync(join(home, CODEX_API_CONFIG_TOML_FILE_NAME), "utf8").includes(
-      "[model_providers.openai]",
+      `[model_providers.${CODEX_API_CODEX_PROVIDER_ID}]`,
     ),
   );
 });

@@ -1,20 +1,30 @@
 /**
  * Workbench-owned isolated CODEX_HOME for the codex-api endpoint (ticket 21:
- * the real OpenAI backend through the codex CLI's own openai provider).
+ * the real OpenAI backend, carried by the codex CLI's custom-provider route
+ * — same route kimi-platform uses, ticket 17).
  *
  * ADR-0001 semantics, unchanged from the kimi-platform seeding (ticket 17):
  * transport configuration lives in the runtime's own isolated home. The
  * workbench seeds `config.toml` inside a dedicated directory (`%APPDATA%`
- * pattern, same location budget as `glmIsolatedClaudeConfigDir`) setting
- * `model_provider` to the CLI's own `openai` provider (re-declared with the
- * CN-platform-verified `wire_api = "responses"` and an `env_key` naming our
- * injected variable `OPENAI_API_KEY`, which the codex-api env factory fills
- * from the dedicated `CODEX_API_KEY` source or the secret envelope store).
- * The user-level `~/.codex` is never read, written, or merged.
+ * pattern, same location budget as `glmIsolatedClaudeConfigDir`) declaring a
+ * custom `model_provider` pointed at the real OpenAI backend with
+ * `wire_api = "responses"` and an `env_key` naming our injected variable
+ * `OPENAI_API_KEY`, which the codex-api env factory fills from the dedicated
+ * `CODEX_API_KEY` source or the secret envelope store. The user-level
+ * `~/.codex` is never read, written, or merged.
+ *
+ * The provider id must not be `openai` (or any other codex CLI built-in
+ * provider id): the CLI validates `model_providers` against its reserved
+ * built-in ids and refuses the entire config, falling back to defaults, if
+ * one is redeclared — CLI's own error names the fix: "Rename your custom
+ * provider (for example, `openai-custom`)". Live-verified on both 0.153.4
+ * and 0.154.0 (ticket 21 rework) — the reserved-id rejection is not a
+ * version-specific regression, so this file cannot rely on any codex CLI
+ * version tolerating a redeclared built-in id.
  *
  * No model-metadata seeds here (unlike kimi-platform): the gpt-5.x family
  * is in the codex CLI's own built-in catalog, so there is no unknown-model
- * metadata problem to paper over — and 0.153.1 rejects nothing we write.
+ * metadata problem to paper over.
  *
  * All operations are synchronous on purpose (same budget as kimi-platform).
  */
@@ -28,8 +38,12 @@ import { RuntimeAdapterError } from "../index.ts";
 import { CODEX_API_ENDPOINT_ENV_CONTRACT } from "./endpoint-env-factory.ts";
 import { CODEX_API_DEFAULT_MODEL_ID } from "./codex-api-models.ts";
 
-/** Provider id inside the seeded config.toml (`model_providers.<id>`). */
-export const CODEX_API_CODEX_PROVIDER_ID = "openai";
+/**
+ * Provider id inside the seeded config.toml (`model_providers.<id>`). Must
+ * stay outside the codex CLI's reserved built-in provider ids (`openai`
+ * included) — see the file header for the validation this avoids.
+ */
+export const CODEX_API_CODEX_PROVIDER_ID = "openai-custom";
 
 export const CODEX_API_CONFIG_TOML_FILE_NAME = "config.toml";
 
