@@ -228,6 +228,7 @@ const englishCopy = {
     customPathSummary: "Custom path",
     providerHint: (cliName: string): string =>
       `Install or locate the ${cliName} under Tools.`,
+    goToInstallAction: "Go to Tools to install",
   },
   bindingStatusAriaCopy: (
     runtimeFamilyLabel: string,
@@ -246,13 +247,13 @@ const englishCopy = {
     }): string =>
       `${entry.displayName ?? entry.id} · new (untiered)` +
       (entry.createdAt === undefined ? "" : ` · listed ${entry.createdAt}`),
-    enrolledListLabel: "Recently added by the automatic catalog check (untiered until curated):",
+    enrolledListLabel: "Recently added models (untiered until curated):",
     refreshAction: "Check for new models",
     refreshingAction: "Checking…",
     silentFailureSentence:
-      "The automatic catalog check could not reach this provider just now. The known catalog stays in effect.",
+      "New models could not be checked just now. The models you already have remain available.",
     unavailableSentence:
-      "Catalog freshness is unavailable in this window. The known catalog stays in effect.",
+      "New models cannot be checked in this window. The models you already have remain available.",
   },
   /**
    * CLI update block (ticket 18). claude's button appears only when the
@@ -572,6 +573,7 @@ const simplifiedChineseCopy = {
     checkFailed: "检查失败",
     customPathSummary: "自定义路径",
     providerHint: (cliName: string): string => `请到“工具”安装或指定 ${cliName}。`,
+    goToInstallAction: "去“工具”安装",
   },
   bindingStatusAriaCopy: (
     runtimeFamilyLabel: string,
@@ -587,12 +589,11 @@ const simplifiedChineseCopy = {
     }): string =>
       `${entry.displayName ?? entry.id} · 新（未定档）` +
       (entry.createdAt === undefined ? "" : ` · 列出于 ${entry.createdAt}`),
-    enrolledListLabel: "由自动目录检查加入（定档前为未定档）：",
+    enrolledListLabel: "最近加入的模型（定档前为未定档）：",
     refreshAction: "检查新模型",
     refreshingAction: "正在检查…",
-    silentFailureSentence:
-      "自动目录检查暂时无法连接此提供方。现有目录继续生效。",
-    unavailableSentence: "此窗口中目录新鲜度不可用。现有目录继续生效。",
+    silentFailureSentence: "暂时无法检查新模型。现有模型仍可使用。",
+    unavailableSentence: "此窗口中无法检查新模型。现有模型仍可使用。",
   },
   cliUpdateCopy: {
     updateAvailableSentence: (

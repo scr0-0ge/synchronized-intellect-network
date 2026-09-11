@@ -36,6 +36,10 @@ const f68ProductionDriverUrl = new URL(
   "../e2e/settings-subscription-authentication-production.ts",
   import.meta.url,
 );
+const f68SettingsObservationUrl = new URL(
+  "../e2e/settings-subscription-authentication-production/settings-observation.ts",
+  import.meta.url,
+);
 const f68ProductionHarnessUrl = new URL(
   "./settings-subscription-authentication-production.test.ts",
   import.meta.url,
@@ -225,21 +229,22 @@ test("public boundary matrix names every forbidden field on both request and res
   assert.match(runner, /public\.response\.consequence-count\.\$\{member\}/u);
 });
 
-test("only stale F68 no-logout assertions are replaced and unrelated guards remain", async () => {
-  const [driver, harness, settings, mainWiring, fidelity] = await Promise.all([
+test("stale F68 no-logout assertions stay removed while current unsupported-provider guards remain", async () => {
+  const [driver, observation, harness, settings, mainWiring, fidelity] = await Promise.all([
     readFile(f68ProductionDriverUrl, "utf8"),
+    readFile(f68SettingsObservationUrl, "utf8"),
     readFile(f68ProductionHarnessUrl, "utf8"),
     readFile(f68SettingsUrl, "utf8"),
     readFile(f68MainWiringUrl, "utf8"),
     readFile(settingsFidelityUrl, "utf8"),
   ]);
   assert.match(
-    driver,
-    /Object\.freeze\(\["API key", "Add provider", "OpenCode"\] as const\)/u,
+    observation,
+    /Object\.freeze\(\["Add provider", "OpenCode"\] as const\)/u,
   );
   assert.match(
     harness,
-    /"API key", "Add provider", "OpenCode"/u,
+    /"Add provider", "OpenCode"/u,
   );
   assert.match(settings, /assert\.doesNotMatch\(html, \/--bare\/u\)/u);
   assert.match(mainWiring, /\(\?:--bare\|API_KEY\|token\|shell:/u);
@@ -247,7 +252,7 @@ test("only stale F68 no-logout assertions are replaced and unrelated guards rema
     fidelity,
     /API key\|--bare\|OpenCode\|Add provider\|Connect provider/u,
   );
-  const stale = `${driver}\n${harness}\n${settings}\n${mainWiring}\n${fidelity}`;
+  const stale = `${driver}\n${observation}\n${harness}\n${settings}\n${mainWiring}\n${fidelity}`;
   assert.doesNotMatch(stale, /no credential or logout surface/iu);
   assert.doesNotMatch(stale, /Logout\|Log out/iu);
   assert.doesNotMatch(stale, /Connect provider\|Log out/iu);

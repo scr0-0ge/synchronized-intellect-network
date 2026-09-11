@@ -80,7 +80,13 @@ export function createEvidencePublication(productionEvidencePath: string) {
       ]),
     );
     assert.equal(value.settings.heading, "Settings");
-    assert.deepEqual(value.settings.sections, ["Data recovery", "Providers", "Appearance"]);
+    assert.deepEqual(value.settings.sections, [
+      "Appearance",
+      "Providers",
+      "Tools",
+      "Usage & resets",
+      "Claude permissions",
+    ]);
     assert.equal(value.settings.railEntryUnique, true);
     assert.equal(value.settings.headingUnique, true);
     assert.equal(value.settings.current, true);
@@ -93,7 +99,7 @@ export function createEvidencePublication(productionEvidencePath: string) {
     const expected = [
       {
         name: "Codex",
-        availability: "Catalog available",
+        availability: "Ready",
         status: "Catalog ready",
         catalog: "Available",
         subscription: "Bound",
@@ -102,7 +108,7 @@ export function createEvidencePublication(productionEvidencePath: string) {
       },
       {
         name: "Claude",
-        availability: "Catalog available",
+        availability: "Ready",
         status: "Catalog ready",
         catalog: "Available",
         subscription: "Bound",

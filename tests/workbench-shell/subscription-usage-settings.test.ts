@@ -82,7 +82,7 @@ test("all four real Claude captures plus the real GLM 429 parse render as five r
           assert.ok(html.includes(date(time)), "rendered local human time equals the wire/reset or receipt time");
         }
         // Codex never reports; Kimi/DeepSeek have not been observed in this render.
-        assert.match(html, language === "en" ? /This provider's CLI does not report usage/ : /此 provider 的 CLI 不报告用量/);
+        assert.match(html, language === "en" ? /This provider's CLI does not report usage/ : /此提供方的 CLI 不报告用量/);
         assert.match(html, language === "en" ? /Not yet observed/ : /尚未观测/);
         // GLM row: a reset time with no percentage, from the real 429-text parse.
         assert.match(html, language === "en" ? /Quota window: Resets at/ : /配额窗口：重置时间：/);

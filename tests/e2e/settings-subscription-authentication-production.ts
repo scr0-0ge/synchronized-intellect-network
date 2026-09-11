@@ -116,8 +116,11 @@ const credentialEnvironmentKeyPattern =
 const controlledEnvironmentKeyPattern =
   /^(?:electron_run_as_node|node_options|node_path|temp|tmp|tmpdir)$/iu;
 const publicAvailabilityValues = Object.freeze([
-  "Catalog available",
-  "Catalog unavailable",
+  "Ready",
+  "Sign-in needed",
+  "API key needed",
+  "CLI missing",
+  "Check failed",
   "Not checked",
 ] as const);
 const publicStatusValues = Object.freeze([
@@ -139,7 +142,7 @@ const publicSubscriptionValues = Object.freeze([
   "Unknown",
 ] as const);
 const expectedProviderState = Object.freeze({
-  availability: "Catalog available",
+  availability: "Ready",
   status: "Catalog ready",
   catalog: "Available",
   subscription: "Bound",
@@ -324,32 +327,6 @@ async function inspectSettings(
   page: Page,
   onProviders: (providers: readonly PublicProviderObservation[]) => void,
 ): Promise<SettingsObservation> {
-  /* Source-guard anchors; implementation moved byte-for-byte behind this wrapper:
-  getByRole("button", { name: "Settings", exact: true })
-    .click();
-  const settingsPage = page.locator("main.settings");
-  const settingsHeadings = settingsPage.getByRole("heading", { name: "Settings", exact: true, level: 1 });
-  assert.equal(await settingsHeadings.count(), 1);
-  const titlebarSettings = titlebar.getByText("Settings", { exact: true });
-  assert.equal(await titlebarSettings.count(), 0);
-  assert.deepEqual(sections, ["Data recovery", "Providers", "Appearance"]);
-  assert.equal(await settingsPage.locator("input, textarea").count(), 0);
-  assert.equal(await settingsPage.locator('input[type="password"]').count(), 0);
-  const unsupportedSurfaceLabels = Object.freeze(["API key", "Add provider", "OpenCode"] as const);
-  assert.equal(await providerCards.count(), 2);
-  assert.equal(renderedName, provider);
-  name: provider,
-  availability: "Catalog available",
-  status: "Catalog ready",
-  catalog: "Available",
-  subscription: "Bound",
-  const boundStatus = card.getByRole("status", {
-    name: `${provider} subscription authentication: Bound`,
-    exact: true,
-  });
-  assert.equal(await bindButtons.count(), 0);
-  assert.equal(await cancelButtons.count(), 0);
-  */
   return settingsObservation.inspectSettings(page, onProviders);
 }
 

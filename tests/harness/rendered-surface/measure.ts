@@ -191,6 +191,8 @@ export type MeasuredExtent = Readonly<{
   /** The content box — the border box less border and padding on each side. */
   content: Readonly<{ left: number; width: number }> | null;
   declaredMaxWidth: string | null;
+  scrollWidth: number | null;
+  clientWidth: number | null;
 }>;
 
 /**

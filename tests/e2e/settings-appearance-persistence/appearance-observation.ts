@@ -95,12 +95,16 @@ export function createAppearanceObservation<
   }
 
   async function openSettings(page: Page): Promise<void> {
+    setActiveStep("settings-open/gear");
     const gear = page.getByRole("button", { name: "Settings", exact: true });
     assert.equal(await gear.count(), 1);
+    setActiveStep("settings-open/click");
     await gear.click();
+    setActiveStep("settings-open/heading");
     await page
       .getByRole("heading", { name: "Settings", exact: true, level: 1 })
       .waitFor({ state: "visible", timeout: 10_000 });
+    setActiveStep("settings-open/current");
     assert.equal(await gear.getAttribute("aria-current"), "page");
   }
 
@@ -119,7 +123,9 @@ export function createAppearanceObservation<
     const settings = page.locator("main.settings");
     const sections = (await settings.getByRole("heading", { level: 2 }).allTextContents())
       .map((value) => value.trim());
-    const scope = ((await settings.locator(".settings-scope").textContent()) ?? "").trim();
+    const scope = ((await settings
+      .locator(".appearance-section-head .settings-scope")
+      .textContent()) ?? "").trim();
     return Object.freeze({
       sections: Object.freeze(sections),
       current:
@@ -260,7 +266,9 @@ export function createAppearanceObservation<
 
   async function waitForScope(page: Page, expected: string): Promise<void> {
     await eventually(async () =>
-      ((await page.locator(".settings-scope").textContent()) ?? "").trim() === expected,
+      ((await page
+        .locator(".appearance-section-head .settings-scope")
+        .textContent()) ?? "").trim() === expected,
     );
   }
 

@@ -1749,7 +1749,7 @@ async function runRenderedSettingsMatrix(
               await scenario.subject.renderSettings(),
               providerCase.provider,
             ).actions,
-            [{ label: "Re-check sign-in", disabled: false }],
+            [{ label: "Check sign-in", disabled: false }],
           );
           assert.equal(scenario.generations.commits.length, 0);
           assert.equal(

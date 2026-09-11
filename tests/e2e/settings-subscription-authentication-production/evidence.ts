@@ -48,7 +48,13 @@ export type ProductionEvidence = Readonly<{
   dist: DistFact;
   settings: Readonly<{
     heading: "Settings";
-    sections: readonly ["Data recovery", "Providers", "Appearance"];
+    sections: readonly [
+      "Appearance",
+      "Providers",
+      "Tools",
+      "Usage & resets",
+      "Claude permissions",
+    ];
     railEntryUnique: true;
     headingUnique: true;
     current: true;
@@ -117,7 +123,13 @@ export function buildProductionEvidence(
     dist,
     settings: Object.freeze({
       heading: "Settings",
-      sections: Object.freeze(["Data recovery", "Providers", "Appearance"] as const),
+      sections: Object.freeze([
+        "Appearance",
+        "Providers",
+        "Tools",
+        "Usage & resets",
+        "Claude permissions",
+      ] as const),
       railEntryUnique: true,
       headingUnique: true,
       current: true,

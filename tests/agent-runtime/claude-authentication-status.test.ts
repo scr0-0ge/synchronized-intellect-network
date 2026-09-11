@@ -224,7 +224,7 @@ test("the observed exit-1 tuple reaches the Claude catalog as authentication-req
   );
 });
 
-test("repeated exit-1 subscription reads move Settings from Unknown / Re-check sign-in to Sign-in required / Login", async () => {
+test("repeated exit-1 subscription reads move Settings from Unknown / Check sign-in to Sign-in required / Login", async () => {
   const dependencies: ClaudeSubscriptionAuthenticationDependencies =
     Object.freeze({
       async discoverExecutable() {
@@ -276,8 +276,7 @@ test("repeated exit-1 subscription reads move Settings from Unknown / Re-check s
     const initialPresentation = settingsSubscriptionAuthenticationPresentation(
       initial["claude-code-desktop"]!,
     );
-    // The renderer's verb is "Check sign-in" since w233 (one verb root on the
-    // page); the coordinator's model-level card below keeps its own label.
+    // The renderer and the coordinator model use the same Settings verb.
     assert.deepEqual(
       [initialPresentation.label, initialPresentation.actionLabel],
       ["Unknown", "Check sign-in"],
@@ -285,7 +284,7 @@ test("repeated exit-1 subscription reads move Settings from Unknown / Re-check s
     const initialCard = coordinator.renderSettings().cards[1];
     assert.deepEqual(
       [initialCard?.authentication, initialCard?.actions[0]?.label],
-      ["Unknown", "Re-check sign-in"],
+      ["Unknown", "Check sign-in"],
     );
 
     const first = await coordinator.request({

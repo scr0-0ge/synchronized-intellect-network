@@ -17,6 +17,7 @@ import { emptyVisualFixture } from "./visual-harness/fixture.ts";
 import type {
   WorkbenchEndpointKeyPanel,
 } from "../../src/workbench-shell/renderer/endpoint-key-state.ts";
+import type { WorkbenchEndpointBaseUrlPanel } from "../../src/workbench-shell/renderer/endpoint-base-url-state.ts";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -44,6 +45,18 @@ function panel(
     onRemove: () => undefined,
     onProbe: () => undefined,
     ...overrides,
+  });
+}
+
+function baseUrlPanel(): WorkbenchEndpointBaseUrlPanel {
+  return Object.freeze({
+    phase: "ready",
+    savedBaseUrl: "",
+    draft: "",
+    busy: false,
+    feedback: null,
+    onDraft: () => undefined,
+    onSave: () => undefined,
   });
 }
 
@@ -191,6 +204,16 @@ function providerSection(html: string, headingId: string): string {
   return section;
 }
 
+function assertOptionalBaseUrlDetails(section: string, headingId: string): void {
+  assert.match(
+    section,
+    /<details[^>]*class="settings-details endpoint-base-url-details"[^>]*>[\s\S]*?<summary>Base URL \(optional\)<\/summary>[\s\S]*?Save base URL[\s\S]*?<\/details>/u,
+    `${headingId}: optional Base URL belongs behind Details`,
+  );
+  assert.match(section, /<button[^>]*class="btn sm"[^>]*>Save key<\/button>/u);
+  assert.match(section, /<button[^>]*class="btn ghost sm"[^>]*>Save base URL<\/button>/u);
+}
+
 function renderSettings(
   SettingsScreen: (props: Record<string, unknown>) => unknown,
   options: {
@@ -199,6 +222,9 @@ function renderSettings(
         "glm-coding-plan" | "kimi-code" | "deepseek-api" | "claude-api" | "codex-api",
         WorkbenchEndpointKeyPanel
       >
+    >;
+    readonly endpointBaseUrlPanels?: Partial<
+      Record<"glm-coding-plan" | "kimi-code" | "deepseek-api" | "codex-api", WorkbenchEndpointBaseUrlPanel>
     >;
     readonly profile?: ReturnType<typeof buildProfile>;
     readonly endpointPreferences?: {
@@ -233,6 +259,9 @@ function renderSettings(
       ...(options.endpointKeyPanels === undefined
         ? {}
         : { endpointKeyPanels: options.endpointKeyPanels }),
+      ...(options.endpointBaseUrlPanels === undefined
+        ? {}
+        : { endpointBaseUrlPanels: options.endpointBaseUrlPanels }),
       canRead: false,
       onRead: noOp,
     }),
@@ -244,6 +273,7 @@ test("the GLM key block lives inside the GLM provider row and renders the stored
   try {
     const html = renderSettings(SettingsScreen, {
       endpointKeyPanels: { "glm-coding-plan": panel() },
+      endpointBaseUrlPanels: { "glm-coding-plan": baseUrlPanel() },
     });
     // Relocated layout (WO10): the key block sits inside the GLM provider
     // row, in the same actions slot where codex/claude rows place login
@@ -291,12 +321,13 @@ test("the GLM key block lives inside the GLM provider row and renders the stored
     );
     assert.match(html, /type="password"/u);
     assert.match(html, />Save key</u);
+    assertOptionalBaseUrlDetails(glmSection, "glm-coding-plan");
     assert.match(html, />Reveal key</u);
     assert.match(html, />Remove key</u);
     assert.match(html, />Check connection</u);
     // Exactly one credential entry input exists on the whole page — the
-    // disclosed GLM one. The only other inputs are the two Tools rows'
-    // typed executable paths (w233 step 2), which are plain text, not
+    // disclosed GLM one. The other inputs are the optional GLM Base URL and
+    // the two Tools rows' typed executable paths, all plain text rather than
     // secrets.
     assert.equal(
       (html.match(/<input[^>]*type="password"/gu) ?? []).length,
@@ -308,8 +339,12 @@ test("the GLM key block lives inside the GLM provider row and renders the stored
         .map((match) => match[1])
         .filter((id) => !id.startsWith("endpoint-key-input-"))
         .sort(),
-      ["runtime-executable-claude", "runtime-executable-codex"],
-      "the only non-credential inputs are the two Tools executable paths",
+      [
+        "endpoint-base-url-input-glm-coding-plan",
+        "runtime-executable-claude",
+        "runtime-executable-codex",
+      ],
+      "the only non-credential inputs are the optional Base URL and two Tools executable paths",
     );
   } finally {
     await server.close();
@@ -330,6 +365,10 @@ test("the Kimi key block renders its own placeholder, env fallback, and the show
           },
         }),
         "deepseek-api": panel(),
+      },
+      endpointBaseUrlPanels: {
+        "kimi-code": baseUrlPanel(),
+        "deepseek-api": baseUrlPanel(),
       },
     });
     const kimiSection = providerSection(html, "kimi");
@@ -357,6 +396,7 @@ test("the Kimi key block renders its own placeholder, env fallback, and the show
       kimiSection,
       /<label for="endpoint-key-input-kimi-code">API key<\/label>/u,
     );
+    assertOptionalBaseUrlDetails(kimiSection, "kimi");
     assert.equal(
       (html.match(/<input[^>]*type="password"/gu) ?? []).length,
       2,
@@ -370,6 +410,7 @@ test("the Kimi key block renders its own placeholder, env fallback, and the show
     assert.match(deepseekSection, /endpoint-key-copy/u);
     assert.match(deepseekSection, /Paste your DeepSeek API key/u);
     assert.doesNotMatch(deepseekSection, /plan/iu);
+    assertOptionalBaseUrlDetails(deepseekSection, "deepseek-api");
   } finally {
     await server.close();
   }
@@ -441,7 +482,7 @@ test("catalog freshness controls render supplied reports generically, including 
     const kimiSection = providerSection(html, "kimi");
     assert.match(
       kimiSection,
-      /The automatic catalog check could not reach this provider just now\. The known catalog stays in effect\./u,
+      /New models could not be checked just now\. The models you already have remain available\./u,
     );
     assert.match(kimiSection, />Check for new models</u);
     // The merged Claude/Codex family cards carry no freshness markup at all.

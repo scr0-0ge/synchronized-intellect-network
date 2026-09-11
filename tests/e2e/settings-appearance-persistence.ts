@@ -74,7 +74,7 @@ const routineRootPrefix = "workbench-settings-appearance-";
 const appearanceFileName = "workbench-appearance-preferences-v1.json";
 const directPreferenceFileName = "direct-session-profile-preferences.json";
 const exactAppearanceBytes =
-  '{"schemaVersion":3,"appearance":{"tone":"light","crt":"full","phosphor":"amber","phosphorTier":"c","language":"en"}}\n';
+  '{"schemaVersion":10,"appearance":{"tone":"light","crt":"full","phosphor":"amber","phosphorTier":"c","language":"en"},"claudePermissionHandling":"without-asking","endpointPreference":{"claude":"claude-code-desktop","codex":"codex-desktop","kimi":"kimi-code"},"runtimeExecutables":{"codex":"","claude":""},"endpointBaseUrls":{"glm-coding-plan":"","deepseek-api":"","kimi-code":"","codex-api":""}}\n';
 const savedScope = "Saved · This user on this device";
 const appearanceTones = Object.freeze(["Dark", "Light"] as const);
 const appearanceCrts = Object.freeze(["Off", "Blocks", "Screen", "Full"] as const);
@@ -173,9 +173,11 @@ async function main(): Promise<void> {
     const initialSettings = await settingsFacts(firstPage);
     activeStep = "first-launch-settings/sections";
     assert.deepEqual(initialSettings.sections, [
-      "Data recovery",
-      "Providers",
       "Appearance",
+      "Providers",
+      "Tools",
+      "Usage & resets",
+      "Claude permissions",
     ]);
     activeStep = "first-launch-settings/scope";
     assert.equal(initialSettings.scope, savedScope);
@@ -231,7 +233,7 @@ async function main(): Promise<void> {
 
     activeStep = "project-switch/trigger";
     const beta = firstPage.getByRole("button", {
-      name: "Project Beta, Project 2, closed",
+      name: "Switch to Project Beta",
       exact: true,
     });
     await beta.click();
@@ -258,17 +260,17 @@ async function main(): Promise<void> {
 
     activeStep = "runtime-attention/catalog-read-trigger";
     await openSettings(firstPage);
-    const readCatalogs = firstPage.getByRole("button", {
-      name: "Read catalogs",
+    const checkCatalogs = firstPage.getByRole("button", {
+      name: "Check",
       exact: true,
     });
-    const recheckCatalogsAtTrigger = firstPage.getByRole("button", {
-      name: "Re-check all",
+    const checkAllCatalogsAtTrigger = firstPage.getByRole("button", {
+      name: "Check all",
       exact: true,
     });
     const catalogTriggerCounts = await Promise.all([
-      readCatalogs.count(),
-      recheckCatalogsAtTrigger.count(),
+      checkCatalogs.count(),
+      checkAllCatalogsAtTrigger.count(),
     ]);
     assert.equal(
       (catalogTriggerCounts[0] === 1 && catalogTriggerCounts[1] === 0) ||
@@ -277,13 +279,13 @@ async function main(): Promise<void> {
       `expected exactly one catalog trigger label; observed ${JSON.stringify(catalogTriggerCounts)}`,
     );
     await (catalogTriggerCounts[0] === 1
-      ? readCatalogs
-      : recheckCatalogsAtTrigger
+      ? checkCatalogs
+      : checkAllCatalogsAtTrigger
     ).click();
 
     activeStep = "runtime-attention/catalog-settled";
     const recheckCatalogs = firstPage.getByRole("button", {
-      name: "Re-check all",
+      name: "Check all",
       exact: true,
     });
     await recheckCatalogs.waitFor({ state: "visible", timeout: 25_000 });
@@ -303,19 +305,40 @@ async function main(): Promise<void> {
     assert.equal(await attentionGear.getAttribute("aria-current"), "page");
 
     activeStep = "runtime-attention/provider-status-public-observations";
+    const providerCards = firstPage.locator(
+      ".provider-endpoint-list > section.provider",
+    );
+    const providerCardNames = (await providerCards
+      .locator(":scope > .provider-head .ph-name")
+      .allTextContents())
+      .map((value) => value.trim());
+    assert.deepEqual(providerCardNames, [
+      "Codex",
+      "Claude",
+      "GLM",
+      "DeepSeek",
+      "Kimi",
+    ]);
+    const subscriptionProviderCards = firstPage.locator(
+      ".provider-endpoint-list > section.provider.provider-codex, " +
+        ".provider-endpoint-list > section.provider.provider-claude",
+    );
+    assert.equal(await subscriptionProviderCards.count(), 2);
     providerAvailabilityBadges = Object.freeze(
-      (await firstPage
-        .locator("section.provider > .provider-head > .badge")
+      (await subscriptionProviderCards
+        .locator(":scope > .provider-head > .badge")
         .allTextContents())
         .map((value) => value.trim()),
     );
-    const providerCards = firstPage.locator("section.provider");
-    const providerCardCount = await providerCards.count();
-    assert.equal(providerCardCount, 2);
+    const providerCardCount = await subscriptionProviderCards.count();
     const detailedStatusValues: string[] = [];
     for (let cardIndex = 0; cardIndex < providerCardCount; cardIndex += 1) {
-      const card = providerCards.nth(cardIndex);
-      const rows = card.locator(":scope > .provider-body > dl.kv > .kv-row");
+      const card = subscriptionProviderCards.nth(cardIndex);
+      const details = card.locator(":scope > .provider-body > details.provider-details");
+      assert.equal(await details.getAttribute("open"), null);
+      await details.locator(":scope > summary").click();
+      assert.notEqual(await details.getAttribute("open"), null);
+      const rows = details.locator(":scope > dl.kv > .kv-row");
       const rowCount = await rows.count();
       const statusRowIndexes: number[] = [];
       for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
@@ -340,7 +363,7 @@ async function main(): Promise<void> {
     activeStep = "runtime-attention/provider-availability-badges";
     assert.deepEqual(
       providerAvailabilityBadges,
-      ["Catalog unavailable", "Catalog unavailable"],
+      ["CLI missing", "CLI missing"],
     );
 
     activeStep = "runtime-attention/provider-detailed-status-values";
@@ -467,7 +490,7 @@ async function main(): Promise<void> {
           projectSwitch: true,
         },
         attentionAfterRuntimeUnavailable: true,
-        providerNotFoundRows: 2,
+        subscriptionProviderCliMissingRows: 2,
       },
       appearance: {
         chosen: {
@@ -905,8 +928,15 @@ async function exactAppearanceFact(
   activeStep = `${observationPrefix}/json`;
   const parsed: unknown = JSON.parse(bytes.toString("utf8"));
   activeStep = `${observationPrefix}/document-schema`;
-  assert.ok(isExactRecord(parsed, ["appearance", "schemaVersion"]));
-  assert.equal(parsed.schemaVersion, 3);
+  assert.ok(isExactRecord(parsed, [
+    "appearance",
+    "claudePermissionHandling",
+    "endpointBaseUrls",
+    "endpointPreference",
+    "runtimeExecutables",
+    "schemaVersion",
+  ]));
+  assert.equal(parsed.schemaVersion, 10);
   activeStep = `${observationPrefix}/appearance-schema`;
   assert.ok(
     isExactRecord(parsed.appearance, [
@@ -924,6 +954,19 @@ async function exactAppearanceFact(
     phosphor: "amber",
     phosphorTier: "c",
     language: "en",
+  });
+  assert.equal(parsed.claudePermissionHandling, "without-asking");
+  assert.deepEqual(parsed.endpointPreference, {
+    claude: "claude-code-desktop",
+    codex: "codex-desktop",
+    kimi: "kimi-code",
+  });
+  assert.deepEqual(parsed.runtimeExecutables, { codex: "", claude: "" });
+  assert.deepEqual(parsed.endpointBaseUrls, {
+    "glm-coding-plan": "",
+    "deepseek-api": "",
+    "kimi-code": "",
+    "codex-api": "",
   });
   return Object.freeze({ bytes: bytes.byteLength, sha256: sha256(bytes) });
 }

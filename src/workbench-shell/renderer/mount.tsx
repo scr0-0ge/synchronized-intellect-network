@@ -642,6 +642,11 @@ const WorkbenchApp: Component<{
     }
   };
 
+  const recheckProviders = (): void => {
+    refreshDirectSessionProfileFromProviders();
+    refreshSubscriptionAuthentication();
+  };
+
   const beginPreparedSubscriptionAuthentication = (
     endpointId: WorkbenchRuntimeEndpointId,
     preparationKey: string,
@@ -1590,7 +1595,10 @@ const WorkbenchApp: Component<{
       .catch(() => publicRuntimeExecutableUnavailable())
       .then((result) => {
         if (!active) return;
-        if (result.ok) setRuntimeExecutables(result.executables);
+        if (result.ok) {
+          setRuntimeExecutables(result.executables);
+          recheckProviders();
+        }
         const phase: SettingsRuntimeInstallPhase = result.ok
           ? { status: "installed", version: result.version }
           : result.error.category === "runtime-install-failed"
@@ -2131,10 +2139,7 @@ const WorkbenchApp: Component<{
           }
           onNavigateComposerHistory={navigateAcceptedComposerInput}
           onLoadProfile={loadDirectSessionProfile}
-          onRefreshProfile={() => {
-            refreshDirectSessionProfileFromProviders();
-            refreshSubscriptionAuthentication();
-          }}
+          onRefreshProfile={recheckProviders}
           onEnterNewSession={enterNewSession}
           replacementSessionRefusal={replacementSessionRefusal(state())}
           onEnterReplacementSession={enterReplacementSession}
