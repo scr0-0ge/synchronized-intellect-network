@@ -15,7 +15,8 @@ async function replay(frames = quotaFrames, endpoint = quotaEndpoint, stopError 
 test("captured GLM initial 429/1310 rejection pauses only after transport stops", async (t) => {
   const { binding, events, transport } = await replay();
   t.diagnostic(JSON.stringify({ terminal: events.at(-1), stopCalls: transport.stopped, sentInputs: transport.sent.filter(f => f.type === "user").length }));
-  assert.deepEqual(events.at(-1), { kind: "turn-paused", reason: "quota-exhausted" });
+  // The captured fixture text names "2026-09-11 10:33:17" with no timezone; w211 reads it as UTC.
+  assert.deepEqual(events.at(-1), { kind: "turn-paused", reason: "quota-exhausted", resetsAt: Date.parse("2026-09-11T10:33:17Z") });
   assert.equal(binding.effectiveProfile(), undefined, "quota refusal is not a Stop-hook execution receipt");
   assert.equal(transport.stopped, 1);
   assert.equal(transport.sent.filter(frame => frame.type === "user").length, 1);

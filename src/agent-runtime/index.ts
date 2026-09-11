@@ -250,7 +250,12 @@ export type NormalizedRuntimeEvent =
     }
   | { readonly kind: "turn-interrupted"; readonly status: "interrupted" }
   /** Confirmed initial quota refusal, with no execution; the transport has stopped. */
-  | { readonly kind: "turn-paused"; readonly reason: "quota-exhausted" }
+  | {
+      readonly kind: "turn-paused";
+      readonly reason: "quota-exhausted";
+      /** Provider-reported reset instant, epoch milliseconds; absent when unavailable. */
+      readonly resetsAt?: number;
+    }
   | { readonly kind: "failed"; readonly category: RuntimeFailureCategory };
 
 export type RuntimeInterruptAvailability =
