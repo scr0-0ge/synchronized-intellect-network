@@ -94,6 +94,46 @@ test("the endpoint context composes static catalog, api-key-static auth, and the
   assert.equal(environment.CLAUDE_CONFIG_DIR, "C:\\temp\\glm-isolated");
 });
 
+// w232: the Settings "Base URL (optional)" field's saved override must win
+// over both GLM_ANTHROPIC_BASE_URL and the contract default, mirroring
+// resolveAuthToken's precedence.
+test("a live resolveBaseUrl override wins over GLM_ANTHROPIC_BASE_URL and the contract default", () => {
+  const sourceEnvironment = Object.freeze({
+    ...FAKE_TOKEN_ENV,
+    GLM_ANTHROPIC_BASE_URL: "https://mirror.example.com/anthropic",
+  });
+  const source = createGlmEndpointEnvironmentSource({
+    configDir: "C:\\temp\\glm-isolated",
+    sourceEnvironment,
+    resolveBaseUrl: () => "http://127.0.0.1:4180",
+  });
+  const environment = createEndpointProcessEnvironment(
+    sourceEnvironment,
+    source({}),
+  );
+  assert.equal(environment.ANTHROPIC_BASE_URL, "http://127.0.0.1:4180");
+});
+
+test("resolveBaseUrl returning undefined falls through to GLM_ANTHROPIC_BASE_URL, exactly as before w232", () => {
+  const sourceEnvironment = Object.freeze({
+    ...FAKE_TOKEN_ENV,
+    GLM_ANTHROPIC_BASE_URL: "https://mirror.example.com/anthropic",
+  });
+  const source = createGlmEndpointEnvironmentSource({
+    configDir: "C:\\temp\\glm-isolated",
+    sourceEnvironment,
+    resolveBaseUrl: () => undefined,
+  });
+  const environment = createEndpointProcessEnvironment(
+    sourceEnvironment,
+    source({}),
+  );
+  assert.equal(
+    environment.ANTHROPIC_BASE_URL,
+    "https://mirror.example.com/anthropic",
+  );
+});
+
 test("the isolated config dir lives under the platform temp root, never the real claude home", () => {
   const directory = glmIsolatedClaudeConfigDir("C:\\TEMP-ROOT");
   assert.equal(directory, "C:\\TEMP-ROOT\\synchronized-intellect-network\\glm-claude-config");

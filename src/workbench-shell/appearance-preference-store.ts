@@ -14,12 +14,14 @@ import { basename, dirname, join } from "node:path";
 import {
   defaultWorkbenchClaudePermissionHandling,
   defaultWorkbenchAppearancePreference,
-  defaultWorkbenchCodexApiBaseUrl,
+  defaultWorkbenchBaseUrl,
   defaultWorkbenchFamilyEndpointPreferences,
   defaultWorkbenchRuntimeExecutablePaths,
   workbenchEndpointPreferenceFamily,
-  WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH,
+  WORKBENCH_BASE_URL_ENDPOINT_IDS,
+  WORKBENCH_BASE_URL_MAX_LENGTH,
   WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH,
+  type WorkbenchBaseUrlEndpointId,
   type WorkbenchRuntimeExecutablePaths,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchAppearancePreference,
@@ -32,6 +34,21 @@ import {
 } from "./contract.ts";
 
 export { defaultWorkbenchAppearancePreference } from "./contract.ts";
+
+/** One base URL override per base-URL endpoint (w232); "" means "not set". */
+export type WorkbenchEndpointBaseUrls = Readonly<
+  Record<WorkbenchBaseUrlEndpointId, string>
+>;
+
+export const defaultWorkbenchEndpointBaseUrls: WorkbenchEndpointBaseUrls =
+  Object.freeze(
+    Object.fromEntries(
+      WORKBENCH_BASE_URL_ENDPOINT_IDS.map((endpointId) => [
+        endpointId,
+        defaultWorkbenchBaseUrl,
+      ]),
+    ) as Record<WorkbenchBaseUrlEndpointId, string>,
+  );
 
 const maximumPreferenceDocumentBytes = 64 * 1024;
 const executablePathControlCharacters = /[\u0000-\u001f\u007f-\u009f]/u;
@@ -69,9 +86,12 @@ export interface WorkbenchAppearancePreferenceStore {
   saveRuntimeExecutables(
     executables: WorkbenchRuntimeExecutablePaths,
   ): Promise<WorkbenchRuntimeExecutablePaths>;
-  /** Empty string means "not set" (the OpenAI default applies). */
-  readCodexApiBaseUrl(): Promise<string>;
-  saveCodexApiBaseUrl(baseUrl: string): Promise<string>;
+  /** Empty string means "not set" (that endpoint's own default applies). */
+  readBaseUrl(endpointId: WorkbenchBaseUrlEndpointId): Promise<string>;
+  saveBaseUrl(
+    endpointId: WorkbenchBaseUrlEndpointId,
+    baseUrl: string,
+  ): Promise<string>;
   readClaudeSubscriptionUsage(): Promise<WorkbenchSubscriptionUsageObservation | null>;
   saveClaudeSubscriptionUsage(observation: WorkbenchSubscriptionUsageObservation): Promise<WorkbenchSubscriptionUsageObservation>;
   close(): Promise<void>;
@@ -83,7 +103,7 @@ interface WorkbenchPreferenceDocument {
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly endpointPreference: WorkbenchFamilyEndpointPreferences;
   readonly runtimeExecutables: WorkbenchRuntimeExecutablePaths;
-  readonly codexApiBaseUrl: string;
+  readonly endpointBaseUrls: WorkbenchEndpointBaseUrls;
 }
 
 const defaultWorkbenchPreferenceDocument: WorkbenchPreferenceDocument =
@@ -93,7 +113,7 @@ const defaultWorkbenchPreferenceDocument: WorkbenchPreferenceDocument =
     claudePermissionHandling: defaultWorkbenchClaudePermissionHandling,
     endpointPreference: defaultWorkbenchFamilyEndpointPreferences,
     runtimeExecutables: defaultWorkbenchRuntimeExecutablePaths,
-    codexApiBaseUrl: defaultWorkbenchCodexApiBaseUrl,
+    endpointBaseUrls: defaultWorkbenchEndpointBaseUrls,
   });
 
 export type WorkbenchAppearancePreferenceAtomicReplace = (
@@ -151,7 +171,7 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             current.endpointPreference,
             current.runtimeExecutables,
             current.claudeSubscriptionUsage,
-            current.codexApiBaseUrl,
+            current.endpointBaseUrls,
           ),
           atomicReplace,
         );
@@ -185,7 +205,7 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             current.endpointPreference,
             current.runtimeExecutables,
             current.claudeSubscriptionUsage,
-            current.codexApiBaseUrl,
+            current.endpointBaseUrls,
           ),
           atomicReplace,
         );
@@ -222,7 +242,7 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             ),
             current.runtimeExecutables,
             current.claudeSubscriptionUsage,
-            current.codexApiBaseUrl,
+            current.endpointBaseUrls,
           ),
           atomicReplace,
         );
@@ -255,22 +275,27 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             current.endpointPreference,
             captured,
             current.claudeSubscriptionUsage,
-            current.codexApiBaseUrl,
+            current.endpointBaseUrls,
           ),
           atomicReplace,
         );
         return captured;
       });
     },
-    readCodexApiBaseUrl(): Promise<string> {
+    readBaseUrl(endpointId: WorkbenchBaseUrlEndpointId): Promise<string> {
       return enqueue(async () =>
-        (await readPreferenceDocument(options.filePath)).codexApiBaseUrl,
+        (await readPreferenceDocument(options.filePath)).endpointBaseUrls[
+          endpointId
+        ],
       );
     },
-    saveCodexApiBaseUrl(baseUrl: string): Promise<string> {
+    saveBaseUrl(
+      endpointId: WorkbenchBaseUrlEndpointId,
+      baseUrl: string,
+    ): Promise<string> {
       let captured: string;
       try {
-        captured = captureCodexApiBaseUrl(baseUrl);
+        captured = captureBaseUrl(baseUrl);
       } catch {
         return Promise.reject(
           new WorkbenchAppearancePreferenceStoreError("preferences-invalid"),
@@ -280,7 +305,13 @@ export function createWorkbenchAppearancePreferenceStore(options: {
         const current = await readPreferenceDocument(options.filePath);
         await writePreference(
           options.filePath,
-          Object.freeze({ ...current, codexApiBaseUrl: captured }),
+          Object.freeze({
+            ...current,
+            endpointBaseUrls: Object.freeze({
+              ...current.endpointBaseUrls,
+              [endpointId]: captured,
+            }),
+          }),
           atomicReplace,
         );
         return captured;
@@ -471,13 +502,38 @@ async function readPreferenceDocument(
       ])) &&
       document.schemaVersion === 8
     ) {
+      // w232 migration: the v8 document carries only the codex-api override
+      // under its own key. That value carries over verbatim to the codex-api
+      // slot of the new per-endpoint record; glm/deepseek/kimi-code start
+      // unset (their default), exactly as a first launch on w232 would leave
+      // them.
       return capturePreferenceDocument(
         captureAppearance(document.appearance),
         captureClaudePermissionHandling(document.claudePermissionHandling),
         captureFamilyEndpointPreferencesRecord(document.endpointPreference),
         captureRuntimeExecutables(document.runtimeExecutables),
         document.claudeSubscriptionUsage === undefined ? null : captureSubscriptionUsage(document.claudeSubscriptionUsage),
-        captureCodexApiBaseUrl(document.codexApiBaseUrl),
+        Object.freeze({
+          ...defaultWorkbenchEndpointBaseUrls,
+          "codex-api": captureBaseUrl(document.codexApiBaseUrl),
+        }),
+      );
+    }
+    if (
+      (isExactDataRecord(document, [
+        "appearance", "claudePermissionHandling", "endpointBaseUrls", "endpointPreference", "runtimeExecutables", "schemaVersion",
+      ]) || isExactDataRecord(document, [
+        "appearance", "claudePermissionHandling", "claudeSubscriptionUsage", "endpointBaseUrls", "endpointPreference", "runtimeExecutables", "schemaVersion",
+      ])) &&
+      document.schemaVersion === 9
+    ) {
+      return capturePreferenceDocument(
+        captureAppearance(document.appearance),
+        captureClaudePermissionHandling(document.claudePermissionHandling),
+        captureFamilyEndpointPreferencesRecord(document.endpointPreference),
+        captureRuntimeExecutables(document.runtimeExecutables),
+        document.claudeSubscriptionUsage === undefined ? null : captureSubscriptionUsage(document.claudeSubscriptionUsage),
+        captureEndpointBaseUrls(document.endpointBaseUrls),
       );
     }
     throw new Error("invalid-appearance-preferences");
@@ -504,13 +560,13 @@ async function writePreference(
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const contents = `${JSON.stringify({
-      schemaVersion: 8,
+      schemaVersion: 9,
       ...(preference.claudeSubscriptionUsage === null ? {} : { claudeSubscriptionUsage: preference.claudeSubscriptionUsage }),
       appearance: preference.appearance,
       claudePermissionHandling: preference.claudePermissionHandling,
       endpointPreference: preference.endpointPreference,
       runtimeExecutables: preference.runtimeExecutables,
-      codexApiBaseUrl: preference.codexApiBaseUrl,
+      endpointBaseUrls: preference.endpointBaseUrls,
     })}\n`;
     if (
       Buffer.byteLength(contents, "utf8") > maximumPreferenceDocumentBytes
@@ -540,13 +596,13 @@ function capturePreferenceDocument(
   endpointPreference: WorkbenchFamilyEndpointPreferences,
   runtimeExecutables: WorkbenchRuntimeExecutablePaths,
   claudeSubscriptionUsage: WorkbenchSubscriptionUsageObservation | null = null,
-  codexApiBaseUrl: string = defaultWorkbenchCodexApiBaseUrl,
+  endpointBaseUrls: WorkbenchEndpointBaseUrls = defaultWorkbenchEndpointBaseUrls,
 ): WorkbenchPreferenceDocument {
   return Object.freeze({
     appearance,
     claudePermissionHandling,
     endpointPreference,
-    codexApiBaseUrl,
+    endpointBaseUrls,
     runtimeExecutables,
     claudeSubscriptionUsage,
   });
@@ -573,17 +629,30 @@ function captureRuntimeExecutables(
 }
 
 // Shape only (length, no control characters); the http(s):// scheme check
-// lives at the IPC boundary (codex-api-base-url-ipc.ts), same split as the
+// lives at the IPC boundary (endpoint-base-url-ipc.ts), same split as the
 // runtime-executable path's admission check.
-function captureCodexApiBaseUrl(value: unknown): string {
+function captureBaseUrl(value: unknown): string {
   if (
     typeof value !== "string" ||
-    value.length > WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH ||
+    value.length > WORKBENCH_BASE_URL_MAX_LENGTH ||
     executablePathControlCharacters.test(value)
   ) {
     throw new Error("invalid-appearance-preferences");
   }
   return value;
+}
+
+/** The v9 endpointBaseUrls record: exact key set, every value a valid base URL string. */
+function captureEndpointBaseUrls(value: unknown): WorkbenchEndpointBaseUrls {
+  if (!isExactDataRecord(value, WORKBENCH_BASE_URL_ENDPOINT_IDS)) {
+    throw new Error("invalid-appearance-preferences");
+  }
+  const entries = WORKBENCH_BASE_URL_ENDPOINT_IDS.map(
+    (endpointId) => [endpointId, captureBaseUrl(value[endpointId])] as const,
+  );
+  return Object.freeze(
+    Object.fromEntries(entries) as Record<WorkbenchBaseUrlEndpointId, string>,
+  );
 }
 
 function captureClaudePermissionHandling(

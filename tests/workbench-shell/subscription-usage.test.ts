@@ -39,7 +39,7 @@ test("real wire persists globally across Projects/reopen and other settings writ
   registerTestClosable(t, reopened);
   assert.deepEqual(await reopened.readClaudeSubscriptionUsage(), second);
   const document = JSON.parse(await readFile(filePath, "utf8"));
-  assert.equal(document.schemaVersion, 8);
+  assert.equal(document.schemaVersion, 9);
   assert.deepEqual(document.claudeSubscriptionUsage, second);
   assert.equal(document.endpointPreference.claude, "claude-api");
 });

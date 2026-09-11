@@ -114,8 +114,8 @@ where you already set it up. Keys are encrypted through Windows DPAPI, and each 
 reaches the endpoint it belongs to. No server behind the app, no telemetry: your turns reach the
 vendor through the vendor's own CLI, exactly as they would in a terminal.
 
-The Codex · API card also has an optional Base URL field, for pointing it at an OpenAI-compatible
-gateway instead of the official API.
+The GLM · DeepSeek · Kimi Code · Codex · API cards also each have an optional Base URL field, for
+pointing that endpoint at a compatible gateway instead of its official API.
 
 ## Status
 

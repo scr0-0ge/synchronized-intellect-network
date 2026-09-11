@@ -15,12 +15,12 @@ import {
   WORKBENCH_DISCOVER_PROJECT_HISTORIES_CHANNEL,
   WORKBENCH_HIDE_PROJECT_HISTORY_CHANNEL,
   WORKBENCH_DISPOSE_CHANNEL,
+  WORKBENCH_BASE_URL_CHANNELS,
+  WORKBENCH_BASE_URL_ENDPOINT_IDS,
   WORKBENCH_ENDPOINT_KEY_CHANNELS,
   WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS,
   WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL,
   WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL,
-  WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL,
-  WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
   WORKBENCH_LOAD_ENDPOINT_PREFERENCES_CHANNEL,
   WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL,
   WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
@@ -48,7 +48,7 @@ import {
   publicInvalidProfileDefaultSelection,
   publicAppearancePreferenceUnavailable,
   publicClaudePermissionHandlingUnavailable,
-  publicCodexApiBaseUrlUnavailable,
+  publicBaseUrlUnavailable,
   publicEndpointPreferenceUnavailable,
   publicEndpointKeyUnavailable,
   publicEndpointKeyInvalidValue,
@@ -74,8 +74,9 @@ import {
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchClaudePermissionHandlingLoadResult,
-  type WorkbenchCodexApiBaseUrlLoadResult,
-  type WorkbenchCodexApiBaseUrlSaveResult,
+  type WorkbenchBaseUrlEndpointId,
+  type WorkbenchBaseUrlLoadResult,
+  type WorkbenchBaseUrlSaveResult,
   type WorkbenchRuntimeExecutableSaveRequest,
   type WorkbenchRuntimeExecutableSaveResult,
   type WorkbenchRuntimeInstallRequest,
@@ -89,6 +90,7 @@ import {
   type WorkbenchDirectSessionProfileDefaultRequest,
   type WorkbenchDirectSessionProfileDefaultResult,
   type WorkbenchDirectSessionProfileLoadRequest,
+  type WorkbenchBaseUrlChannel,
   type WorkbenchEndpointKeyChannel,
   type WorkbenchEndpointKeyEndpointId,
   type WorkbenchEndpointKeyRemoveResult,
@@ -157,9 +159,9 @@ import {
   reconstructWorkbenchRuntimeInstallRequest,
   sanitizeWorkbenchRuntimeInstallResult,
   sanitizeWorkbenchClaudePermissionHandlingSaveResult,
-  reconstructWorkbenchCodexApiBaseUrl,
-  sanitizeWorkbenchCodexApiBaseUrlLoadResult,
-  sanitizeWorkbenchCodexApiBaseUrlSaveResult,
+  reconstructWorkbenchBaseUrl,
+  sanitizeWorkbenchBaseUrlLoadResult,
+  sanitizeWorkbenchBaseUrlSaveResult,
   sanitizeWorkbenchEndpointPreferenceLoadResult,
   sanitizeWorkbenchEndpointPreferenceSaveResult,
   sanitizeWorkbenchDirectSessionProfileResult,
@@ -263,8 +265,7 @@ export interface FixedProjectViewIpc {
       | typeof WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL
       | typeof WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL
       | typeof WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL
-      | typeof WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL
-      | typeof WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL
+      | WorkbenchBaseUrlChannel
       | typeof WORKBENCH_LOAD_SUBSCRIPTION_USAGE_CHANNEL
       | typeof WORKBENCH_LOAD_ENDPOINT_PREFERENCES_CHANNEL
       | typeof WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL
@@ -720,31 +721,40 @@ export function createWorkbenchPreloadBridge(
         return publicClaudePermissionHandlingUnavailable();
       }
     },
-    async loadCodexApiBaseUrl(): Promise<WorkbenchCodexApiBaseUrlLoadResult> {
+    async loadBaseUrl(
+      endpointId: WorkbenchBaseUrlEndpointId,
+    ): Promise<WorkbenchBaseUrlLoadResult> {
+      if (!isBaseUrlEndpointId(endpointId)) {
+        return publicBaseUrlUnavailable();
+      }
       try {
-        return sanitizeWorkbenchCodexApiBaseUrlLoadResult(
-          await ipc.invoke(WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL),
+        return sanitizeWorkbenchBaseUrlLoadResult(
+          await ipc.invoke(WORKBENCH_BASE_URL_CHANNELS[endpointId].load),
         );
       } catch {
-        return publicCodexApiBaseUrlUnavailable();
+        return publicBaseUrlUnavailable();
       }
     },
-    async saveCodexApiBaseUrl(
+    async saveBaseUrl(
+      endpointId: WorkbenchBaseUrlEndpointId,
       baseUrl: string,
-    ): Promise<WorkbenchCodexApiBaseUrlSaveResult> {
-      const reconstructed = reconstructWorkbenchCodexApiBaseUrl(baseUrl);
+    ): Promise<WorkbenchBaseUrlSaveResult> {
+      if (!isBaseUrlEndpointId(endpointId)) {
+        return publicBaseUrlUnavailable();
+      }
+      const reconstructed = reconstructWorkbenchBaseUrl(baseUrl);
       if (!reconstructed.ok) {
-        return publicCodexApiBaseUrlUnavailable();
+        return publicBaseUrlUnavailable();
       }
       try {
-        return sanitizeWorkbenchCodexApiBaseUrlSaveResult(
+        return sanitizeWorkbenchBaseUrlSaveResult(
           await ipc.invoke(
-            WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
+            WORKBENCH_BASE_URL_CHANNELS[endpointId].save,
             reconstructed.baseUrl,
           ),
         );
       } catch {
-        return publicCodexApiBaseUrlUnavailable();
+        return publicBaseUrlUnavailable();
       }
     },
     async loadEndpointPreferences(): Promise<WorkbenchEndpointPreferenceLoadResult> {
@@ -1257,6 +1267,13 @@ export function createWorkbenchPreloadBridge(
     return (
       WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS as readonly string[]
     ).includes(value);
+  }
+
+  /** Fail-closed membership check: renderer-originated ids are untrusted. */
+  function isBaseUrlEndpointId(value: WorkbenchBaseUrlEndpointId): boolean {
+    return (WORKBENCH_BASE_URL_ENDPOINT_IDS as readonly string[]).includes(
+      value,
+    );
   }
 
   async function invokeAuthentication(    channel:

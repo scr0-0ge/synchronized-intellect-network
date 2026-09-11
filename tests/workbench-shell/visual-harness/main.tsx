@@ -47,8 +47,8 @@ import {
   publicAppearancePreferenceSaved,
   publicClaudePermissionHandlingLoaded,
   publicClaudePermissionHandlingSaved,
-  publicCodexApiBaseUrlLoaded,
-  publicCodexApiBaseUrlSaved,
+  publicBaseUrlLoaded,
+  publicBaseUrlSaved,
   publicEndpointProbed,
   publicEndpointKeySaved,
   publicEndpointKeyStatusLoaded,
@@ -266,13 +266,14 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
   saveClaudePermissionHandling() {
     return Promise.resolve(publicClaudePermissionHandlingSaved());
   },
-  // Visual QA fake for the Codex · API card's optional Base URL field (w223).
-  // No real base URL ever appears here.
-  loadCodexApiBaseUrl() {
-    return Promise.resolve(publicCodexApiBaseUrlLoaded(""));
+  // Visual QA fake for the GLM/DeepSeek/Kimi Code/Codex · API cards' optional
+  // Base URL field (ticket 21/w223 shipped Codex · API alone; w232
+  // generalizes it). No real base URL ever appears here.
+  loadBaseUrl() {
+    return Promise.resolve(publicBaseUrlLoaded(""));
   },
-  saveCodexApiBaseUrl(baseUrl: string) {
-    return Promise.resolve(publicCodexApiBaseUrlSaved(baseUrl));
+  saveBaseUrl(_endpointId: string, baseUrl: string) {
+    return Promise.resolve(publicBaseUrlSaved(baseUrl));
   },
   // Visual QA fakes for the endpoint-key blocks (ADR 0022; one per static-key
   // endpoint). The default shows a configured durable key so every state of

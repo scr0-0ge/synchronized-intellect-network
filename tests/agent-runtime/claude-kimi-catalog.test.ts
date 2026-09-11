@@ -159,6 +159,45 @@ test("a KIMI_CODE_ANTHROPIC_BASE_URL override wins over the contract default", (
   );
 });
 
+// w232: the Settings "Base URL (optional)" field's saved override must win
+// over both the env var and the contract default, mirroring resolveAuthToken.
+test("a live resolveBaseUrl override wins over KIMI_CODE_ANTHROPIC_BASE_URL and the contract default", () => {
+  const sourceEnvironment = Object.freeze({
+    ...FAKE_TOKEN_ENV,
+    KIMI_CODE_ANTHROPIC_BASE_URL: "https://api.kimi.com/coding-mirror/",
+  });
+  const source = createKimiEndpointEnvironmentSource({
+    configDir: "C:\\temp\\kimi-isolated",
+    sourceEnvironment,
+    resolveBaseUrl: () => "http://127.0.0.1:4182",
+  });
+  const environment = createEndpointProcessEnvironment(
+    sourceEnvironment,
+    source({}),
+  );
+  assert.equal(environment.ANTHROPIC_BASE_URL, "http://127.0.0.1:4182");
+});
+
+test("resolveBaseUrl returning undefined falls through to the env var, exactly as before w232", () => {
+  const sourceEnvironment = Object.freeze({
+    ...FAKE_TOKEN_ENV,
+    KIMI_CODE_ANTHROPIC_BASE_URL: "https://api.kimi.com/coding-mirror/",
+  });
+  const source = createKimiEndpointEnvironmentSource({
+    configDir: "C:\\temp\\kimi-isolated",
+    sourceEnvironment,
+    resolveBaseUrl: () => undefined,
+  });
+  const environment = createEndpointProcessEnvironment(
+    sourceEnvironment,
+    source({}),
+  );
+  assert.equal(
+    environment.ANTHROPIC_BASE_URL,
+    "https://api.kimi.com/coding-mirror/",
+  );
+});
+
 test("the endpoint context composes static catalog, api-key-static auth, and the env source", () => {
   const context = createKimiEndpointContext({
     configDir: "C:\\temp\\kimi-isolated",

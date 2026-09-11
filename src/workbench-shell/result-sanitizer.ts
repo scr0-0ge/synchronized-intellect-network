@@ -30,11 +30,11 @@ import {
   WORKBENCH_RUNTIME_INSTALL_VERSION_MAX_LENGTH,
   publicClaudePermissionHandlingSaved,
   publicClaudePermissionHandlingUnavailable,
-  publicCodexApiBaseUrlLoaded,
-  publicCodexApiBaseUrlSaved,
-  publicCodexApiBaseUrlRejected,
-  publicCodexApiBaseUrlUnavailable,
-  WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH,
+  publicBaseUrlLoaded,
+  publicBaseUrlSaved,
+  publicBaseUrlRejected,
+  publicBaseUrlUnavailable,
+  WORKBENCH_BASE_URL_MAX_LENGTH,
   publicEndpointPreferencesLoaded,
   publicEndpointPreferenceSaved,
   publicEndpointPreferenceUnavailable,
@@ -96,8 +96,8 @@ import {
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchClaudePermissionHandlingLoadResult,
-  type WorkbenchCodexApiBaseUrlLoadResult,
-  type WorkbenchCodexApiBaseUrlSaveResult,
+  type WorkbenchBaseUrlLoadResult,
+  type WorkbenchBaseUrlSaveResult,
   type WorkbenchRuntimeExecutablePaths,
   type WorkbenchRuntimeExecutableRejection,
   type WorkbenchRuntimeExecutableSaveRequest,
@@ -367,79 +367,79 @@ function isClaudePermissionHandlingFailureResult(value: unknown): boolean {
   );
 }
 
-export function reconstructWorkbenchCodexApiBaseUrl(
+export function reconstructWorkbenchBaseUrl(
   value: unknown,
 ): { readonly ok: true; readonly baseUrl: string } | { readonly ok: false } {
   return typeof value === "string" &&
-    value.length <= WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH
+    value.length <= WORKBENCH_BASE_URL_MAX_LENGTH
     ? Object.freeze({ ok: true, baseUrl: value })
     : Object.freeze({ ok: false });
 }
 
-export function sanitizeWorkbenchCodexApiBaseUrlLoadResult(
+export function sanitizeWorkbenchBaseUrlLoadResult(
   value: unknown,
-): WorkbenchCodexApiBaseUrlLoadResult {
+): WorkbenchBaseUrlLoadResult {
   try {
     if (
       isStrictDataRecord(value, ["baseUrl", "ok", "status"]) &&
       value.ok === true &&
       value.status === "loaded"
     ) {
-      const reconstructed = reconstructWorkbenchCodexApiBaseUrl(value.baseUrl);
+      const reconstructed = reconstructWorkbenchBaseUrl(value.baseUrl);
       if (reconstructed.ok) {
-        return publicCodexApiBaseUrlLoaded(reconstructed.baseUrl);
+        return publicBaseUrlLoaded(reconstructed.baseUrl);
       }
     }
-    if (isCodexApiBaseUrlUnavailableResult(value)) {
-      return publicCodexApiBaseUrlUnavailable();
+    if (isBaseUrlUnavailableResult(value)) {
+      return publicBaseUrlUnavailable();
     }
   } catch {
     // Accessor-like and proxy values fail closed at the renderer boundary.
   }
-  return publicCodexApiBaseUrlUnavailable();
+  return publicBaseUrlUnavailable();
 }
 
-export function sanitizeWorkbenchCodexApiBaseUrlSaveResult(
+export function sanitizeWorkbenchBaseUrlSaveResult(
   value: unknown,
-): WorkbenchCodexApiBaseUrlSaveResult {
+): WorkbenchBaseUrlSaveResult {
   try {
     if (
       isStrictDataRecord(value, ["baseUrl", "ok", "status"]) &&
       value.ok === true &&
       value.status === "saved"
     ) {
-      const reconstructed = reconstructWorkbenchCodexApiBaseUrl(value.baseUrl);
+      const reconstructed = reconstructWorkbenchBaseUrl(value.baseUrl);
       if (reconstructed.ok) {
-        return publicCodexApiBaseUrlSaved(reconstructed.baseUrl);
+        return publicBaseUrlSaved(reconstructed.baseUrl);
       }
     }
     if (
       isStrictDataRecord(value, ["error", "ok"]) &&
       value.ok === false &&
       isStrictDataRecord(value.error, ["category", "message", "reason"]) &&
-      value.error.category === "codex-api-base-url-rejected" &&
+      value.error.category === "base-url-rejected" &&
       value.error.message === "That base URL cannot be used." &&
       value.error.reason === "invalid-url"
     ) {
-      return publicCodexApiBaseUrlRejected("invalid-url");
+      return publicBaseUrlRejected("invalid-url");
     }
-    if (isCodexApiBaseUrlUnavailableResult(value)) {
-      return publicCodexApiBaseUrlUnavailable();
+    if (isBaseUrlUnavailableResult(value)) {
+      return publicBaseUrlUnavailable();
     }
   } catch {
     // Accessor-like and proxy values fail closed at the renderer boundary.
   }
-  return publicCodexApiBaseUrlUnavailable();
+  return publicBaseUrlUnavailable();
 }
 
-function isCodexApiBaseUrlUnavailableResult(value: unknown): boolean {
+function isBaseUrlUnavailableResult(value: unknown): boolean {
   return (
     isStrictDataRecord(value, ["error", "ok"]) &&
     value.ok === false &&
     isStrictDataRecord(value.error, ["category", "message"]) &&
-    value.error.category === "codex-api-base-url-unavailable" &&
+    value.error.category === "base-url-unavailable" &&
     value.error.message ===
-      "The Codex · API base URL could not be loaded or saved. Keep the current value and try again."
+      "The base URL could not be loaded or saved. Keep the current value and try again."
   );
 }
 

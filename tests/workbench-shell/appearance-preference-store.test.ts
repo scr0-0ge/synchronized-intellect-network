@@ -155,7 +155,7 @@ test("Ask when needed survives a clean restart without resetting appearance and 
     "ask-when-needed",
   );
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 8,
+    schemaVersion: 9,
     appearance: {
       tone: "dark",
       crt: "blocks",
@@ -170,7 +170,12 @@ test("Ask when needed survives a clean restart without resetting appearance and 
       kimi: "kimi-code",
     },
     runtimeExecutables: { codex: "", claude: "" },
-    codexApiBaseUrl: "",
+    endpointBaseUrls: {
+      "glm-coding-plan": "",
+      "deepseek-api": "",
+      "kimi-code": "",
+      "codex-api": "",
+    },
   });
   await reopened.close();
 });
@@ -246,7 +251,7 @@ test("family endpoint preferences round-trip per family, default from a v4 docum
     kimi: "kimi-platform",
   });
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 8,
+    schemaVersion: 9,
     appearance: {
       tone: "light",
       crt: "full",
@@ -261,7 +266,12 @@ test("family endpoint preferences round-trip per family, default from a v4 docum
       kimi: "kimi-platform",
     },
     runtimeExecutables: { codex: "", claude: "" },
-    codexApiBaseUrl: "",
+    endpointBaseUrls: {
+      "glm-coding-plan": "",
+      "deepseek-api": "",
+      "kimi-code": "",
+      "codex-api": "",
+    },
   });
   await store.close();
 
@@ -335,7 +345,7 @@ test("a v6 document's kimiEndpointPreference migrates into the endpointPreferenc
   // The next write upgrades the document to the v7 family record.
   await store.saveEndpointPreference("codex-api");
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 8,
+    schemaVersion: 9,
     appearance: {
       tone: "light",
       crt: "full",
@@ -350,7 +360,12 @@ test("a v6 document's kimiEndpointPreference migrates into the endpointPreferenc
       kimi: "kimi-platform",
     },
     runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
-    codexApiBaseUrl: "",
+    endpointBaseUrls: {
+      "glm-coding-plan": "",
+      "deepseek-api": "",
+      "kimi-code": "",
+      "codex-api": "",
+    },
   });
   await store.close();
 });
@@ -463,7 +478,7 @@ test("one exact non-default appearance survives a clean store restart and cannot
   assert.equal(
     await readFile(appearancePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 8,
+      schemaVersion: 9,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
       endpointPreference: {
@@ -472,7 +487,12 @@ test("one exact non-default appearance survives a clean store restart and cannot
         kimi: "kimi-code",
       },
       runtimeExecutables: { codex: "", claude: "" },
-      codexApiBaseUrl: "",
+      endpointBaseUrls: {
+        "glm-coding-plan": "",
+        "deepseek-api": "",
+        "kimi-code": "",
+        "codex-api": "",
+      },
     })}\n`,
   );
   assert.equal(await readFile(directProfilePath, "utf8"), directProfileBytes);
@@ -679,7 +699,7 @@ test("close flushes an in-flight appearance save and rejects every later operati
   assert.equal(
     await readFile(filePath, "utf8"),
     `${JSON.stringify({
-      schemaVersion: 8,
+      schemaVersion: 9,
       appearance: nonDefaultAppearance,
       claudePermissionHandling: "without-asking",
       endpointPreference: {
@@ -688,44 +708,79 @@ test("close flushes an in-flight appearance save and rejects every later operati
         kimi: "kimi-code",
       },
       runtimeExecutables: { codex: "", claude: "" },
-      codexApiBaseUrl: "",
+      endpointBaseUrls: {
+        "glm-coding-plan": "",
+        "deepseek-api": "",
+        "kimi-code": "",
+        "codex-api": "",
+      },
     })}\n`,
   );
 });
 
-test("codex-api base URL defaults empty, round-trips, and survives an unrelated save", async (t) => {
+test("each base-URL endpoint defaults empty, round-trips independently, and survives an unrelated save (w232)", async (t) => {
   const directory = await createTestDirectory(
     t,
     join(tmpdir(), "workbench-appearance-"),
   );
   const store = createRegisteredAppearancePreferenceStore(t, {
-    filePath: join(directory, "codex-api-base-url.json"),
+    filePath: join(directory, "base-urls.json"),
   });
 
-  assert.equal(await store.readCodexApiBaseUrl(), "");
+  for (const endpointId of [
+    "glm-coding-plan",
+    "deepseek-api",
+    "kimi-code",
+    "codex-api",
+  ] as const) {
+    assert.equal(await store.readBaseUrl(endpointId), "");
+  }
+
   assert.equal(
-    await store.saveCodexApiBaseUrl("https://gateway.example.com/v1"),
+    await store.saveBaseUrl("codex-api", "https://gateway.example.com/v1"),
     "https://gateway.example.com/v1",
   );
   assert.equal(
-    await store.readCodexApiBaseUrl(),
-    "https://gateway.example.com/v1",
+    await store.saveBaseUrl("glm-coding-plan", "https://glm.example.com/anthropic"),
+    "https://glm.example.com/anthropic",
   );
 
-  // An unrelated save (Claude permission handling) must not clobber it.
+  // One endpoint's saved value never clobbers another's, and unset endpoints
+  // stay empty.
+  assert.equal(
+    await store.readBaseUrl("codex-api"),
+    "https://gateway.example.com/v1",
+  );
+  assert.equal(
+    await store.readBaseUrl("glm-coding-plan"),
+    "https://glm.example.com/anthropic",
+  );
+  assert.equal(await store.readBaseUrl("deepseek-api"), "");
+  assert.equal(await store.readBaseUrl("kimi-code"), "");
+
+  // An unrelated save (Claude permission handling) must not clobber either.
   await store.saveClaudePermissionHandling("ask-when-needed");
   assert.equal(
-    await store.readCodexApiBaseUrl(),
+    await store.readBaseUrl("codex-api"),
     "https://gateway.example.com/v1",
   );
+  assert.equal(
+    await store.readBaseUrl("glm-coding-plan"),
+    "https://glm.example.com/anthropic",
+  );
 
-  // Clearing it back to "" (the escape hatch) also round-trips.
-  assert.equal(await store.saveCodexApiBaseUrl(""), "");
-  assert.equal(await store.readCodexApiBaseUrl(), "");
+  // Clearing one back to "" (the escape hatch) also round-trips and leaves
+  // the other endpoint's value alone.
+  assert.equal(await store.saveBaseUrl("codex-api", ""), "");
+  assert.equal(await store.readBaseUrl("codex-api"), "");
+  assert.equal(
+    await store.readBaseUrl("glm-coding-plan"),
+    "https://glm.example.com/anthropic",
+  );
   await store.close();
 });
 
-test("a v7 document migrates to v8 with codexApiBaseUrl defaulted empty, and a save upgrades the bytes on disk", async (t) => {
+test("a v7 document migrates to v9 with every endpointBaseUrls slot defaulted empty, and a save upgrades the bytes on disk", async (t) => {
   const directory = await createTestDirectory(
     t,
     join(tmpdir(), "workbench-appearance-"),
@@ -745,12 +800,12 @@ test("a v7 document migrates to v8 with codexApiBaseUrl defaulted empty, and a s
   await writeFile(filePath, v7Bytes, "utf8");
   const store = createRegisteredAppearancePreferenceStore(t, { filePath });
 
-  assert.equal(await store.readCodexApiBaseUrl(), "");
+  assert.equal(await store.readBaseUrl("codex-api"), "");
   assert.equal(await readFile(filePath, "utf8"), v7Bytes);
 
-  await store.saveCodexApiBaseUrl("https://gateway.example.com/v1");
+  await store.saveBaseUrl("codex-api", "https://gateway.example.com/v1");
   assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
-    schemaVersion: 8,
+    schemaVersion: 9,
     appearance: defaultWorkbenchAppearancePreference,
     claudePermissionHandling: "without-asking",
     endpointPreference: {
@@ -759,25 +814,95 @@ test("a v7 document migrates to v8 with codexApiBaseUrl defaulted empty, and a s
       kimi: "kimi-code",
     },
     runtimeExecutables: { codex: "D:\\codex\\codex.exe", claude: "" },
-    codexApiBaseUrl: "https://gateway.example.com/v1",
+    endpointBaseUrls: {
+      "glm-coding-plan": "",
+      "deepseek-api": "",
+      "kimi-code": "",
+      "codex-api": "https://gateway.example.com/v1",
+    },
   });
   await store.close();
 });
 
-test("a codex-api base URL with a control character fails closed without rewrite", async (t) => {
+// w232: the pre-w232 v8 document carries only the codex-api override under
+// its own top-level key. The migration must carry that value over into the
+// new record's codex-api slot verbatim, defaulting the three new endpoints.
+test("a v8 document's codexApiBaseUrl migrates into the endpointBaseUrls record's codex-api slot", async (t) => {
   const directory = await createTestDirectory(
     t,
     join(tmpdir(), "workbench-appearance-"),
   );
-  const store = createRegisteredAppearancePreferenceStore(t, {
-    filePath: join(directory, "codex-api-base-url-invalid.json"),
+  const filePath = join(directory, "v8-migration.json");
+  const v8Bytes = `${JSON.stringify({
+    schemaVersion: 8,
+    appearance: defaultWorkbenchAppearancePreference,
+    claudePermissionHandling: "without-asking",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-desktop",
+      kimi: "kimi-code",
+    },
+    runtimeExecutables: { codex: "", claude: "" },
+    codexApiBaseUrl: "https://old-gateway.example.com/v1",
+  })}\n`;
+  await writeFile(filePath, v8Bytes, "utf8");
+  const store = createRegisteredAppearancePreferenceStore(t, { filePath });
+
+  assert.equal(
+    await store.readBaseUrl("codex-api"),
+    "https://old-gateway.example.com/v1",
+  );
+  assert.equal(await store.readBaseUrl("glm-coding-plan"), "");
+  assert.equal(await store.readBaseUrl("deepseek-api"), "");
+  assert.equal(await store.readBaseUrl("kimi-code"), "");
+  assert.equal(await readFile(filePath, "utf8"), v8Bytes);
+
+  await store.saveBaseUrl("kimi-code", "https://kimi.example.com/coding/");
+  assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), {
+    schemaVersion: 9,
+    appearance: defaultWorkbenchAppearancePreference,
+    claudePermissionHandling: "without-asking",
+    endpointPreference: {
+      claude: "claude-code-desktop",
+      codex: "codex-desktop",
+      kimi: "kimi-code",
+    },
+    runtimeExecutables: { codex: "", claude: "" },
+    endpointBaseUrls: {
+      "glm-coding-plan": "",
+      "deepseek-api": "",
+      "kimi-code": "https://kimi.example.com/coding/",
+      "codex-api": "https://old-gateway.example.com/v1",
+    },
   });
-  const saveUnknown = store.saveCodexApiBaseUrl as unknown as (
-    value: unknown,
-  ) => Promise<unknown>;
-  await rejectsAppearance(saveUnknown("https://example.com/\u0000"), "preferences-invalid");
-  assert.equal(await store.readCodexApiBaseUrl(), "");
   await store.close();
+});
+
+test("a base URL with a control character fails closed without rewrite, for every base-URL endpoint", async (t) => {
+  const directory = await createTestDirectory(
+    t,
+    join(tmpdir(), "workbench-appearance-"),
+  );
+  for (const endpointId of [
+    "glm-coding-plan",
+    "deepseek-api",
+    "kimi-code",
+    "codex-api",
+  ] as const) {
+    const store = createRegisteredAppearancePreferenceStore(t, {
+      filePath: join(directory, `base-url-invalid-${endpointId}.json`),
+    });
+    const saveUnknown = store.saveBaseUrl as unknown as (
+      endpointId: string,
+      value: unknown,
+    ) => Promise<unknown>;
+    await rejectsAppearance(
+      saveUnknown(endpointId, "https://example.com/\u0000"),
+      "preferences-invalid",
+    );
+    assert.equal(await store.readBaseUrl(endpointId), "");
+    await store.close();
+  }
 });
 
 async function rejectsAppearance(

@@ -185,6 +185,8 @@ export function createProductionGlmRuntimeAdapter(options: {
   readonly configDirectory?: string;
   /** Live store-backed token resolver; `undefined` result falls back to env. */
   readonly resolveGlmAuthToken?: () => string | undefined;
+  /** Live preference-backed GLM base URL resolver (w232 Settings field). */
+  readonly resolveGlmBaseUrl?: () => string | undefined;
   readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
   readonly createSessionTransport?: ClaudeSessionTransportFactory;
 }): ResumableAgentRuntimeAdapter {
@@ -197,6 +199,9 @@ export function createProductionGlmRuntimeAdapter(options: {
     ...(options.resolveGlmAuthToken === undefined
       ? {}
       : { resolveAuthToken: options.resolveGlmAuthToken }),
+    ...(options.resolveGlmBaseUrl === undefined
+      ? {}
+      : { resolveBaseUrl: options.resolveGlmBaseUrl }),
   });
   return new ClaudeAdapter(
     undefined,
@@ -238,6 +243,8 @@ export function createProductionKimiRuntimeAdapter(options: {
   readonly configDirectory?: string;
   /** Live store-backed token resolver; `undefined` result falls back to env. */
   readonly resolveKimiAuthToken?: () => string | undefined;
+  /** Live preference-backed Kimi Code base URL resolver (w232 Settings field). */
+  readonly resolveKimiBaseUrl?: () => string | undefined;
   readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
@@ -248,6 +255,9 @@ export function createProductionKimiRuntimeAdapter(options: {
     ...(options.resolveKimiAuthToken === undefined
       ? {}
       : { resolveAuthToken: options.resolveKimiAuthToken }),
+    ...(options.resolveKimiBaseUrl === undefined
+      ? {}
+      : { resolveBaseUrl: options.resolveKimiBaseUrl }),
   });
   return new ClaudeAdapter(
     undefined,
@@ -282,6 +292,8 @@ export function createProductionDeepseekRuntimeAdapter(options: {
   readonly configDirectory?: string;
   /** Live store-backed token resolver; `undefined` result falls back to env. */
   readonly resolveDeepseekAuthToken?: () => string | undefined;
+  /** Live preference-backed DeepSeek base URL resolver (w232 Settings field). */
+  readonly resolveDeepseekBaseUrl?: () => string | undefined;
   readonly resolveStaticCatalogAugmentation?: () => readonly RuntimeModel[];
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
@@ -292,6 +304,9 @@ export function createProductionDeepseekRuntimeAdapter(options: {
     ...(options.resolveDeepseekAuthToken === undefined
       ? {}
       : { resolveAuthToken: options.resolveDeepseekAuthToken }),
+    ...(options.resolveDeepseekBaseUrl === undefined
+      ? {}
+      : { resolveBaseUrl: options.resolveDeepseekBaseUrl }),
   });
   return new ClaudeAdapter(
     undefined,
@@ -484,18 +499,24 @@ export async function createProductionRuntimeEndpointAdapter(options: {
   readonly glmConfigDirectory?: string;
   /** Live store-backed GLM token resolver (ADR 0022); env stays the fallback. */
   readonly resolveGlmAuthToken?: () => string | undefined;
+  /** Live preference-backed GLM base URL resolver (w232 Settings field). */
+  readonly resolveGlmBaseUrl?: () => string | undefined;
   /** Environment the default Kimi adapter reads its token/base URL from. */
   readonly kimiEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CLAUDE_CONFIG_DIR for the default Kimi adapter. */
   readonly kimiConfigDirectory?: string;
   /** Live store-backed Kimi token resolver (ADR 0022); env stays the fallback. */
   readonly resolveKimiAuthToken?: () => string | undefined;
+  /** Live preference-backed Kimi Code base URL resolver (w232 Settings field). */
+  readonly resolveKimiBaseUrl?: () => string | undefined;
   /** Environment the default DeepSeek adapter reads its token/base URL from. */
   readonly deepseekEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CLAUDE_CONFIG_DIR for the default DeepSeek adapter. */
   readonly deepseekConfigDirectory?: string;
   /** Live store-backed DeepSeek token resolver (ADR 0022); env stays the fallback. */
   readonly resolveDeepseekAuthToken?: () => string | undefined;
+  /** Live preference-backed DeepSeek base URL resolver (w232 Settings field). */
+  readonly resolveDeepseekBaseUrl?: () => string | undefined;
   /** Environment the default kimi-platform adapter reads its key from. */
   readonly kimiPlatformEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CODEX_HOME for the default kimi-platform adapter. */
@@ -543,6 +564,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.glmEnvironment,
       configDirectory: options.glmConfigDirectory,
       resolveGlmAuthToken: options.resolveGlmAuthToken,
+      resolveGlmBaseUrl: options.resolveGlmBaseUrl,
       ...(options.catalogAugmentation === undefined
         ? {}
         : {
@@ -559,6 +581,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.kimiEnvironment,
       configDirectory: options.kimiConfigDirectory,
       resolveKimiAuthToken: options.resolveKimiAuthToken,
+      resolveKimiBaseUrl: options.resolveKimiBaseUrl,
       ...(options.catalogAugmentation === undefined
         ? {}
         : {
@@ -575,6 +598,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.deepseekEnvironment,
       configDirectory: options.deepseekConfigDirectory,
       resolveDeepseekAuthToken: options.resolveDeepseekAuthToken,
+      resolveDeepseekBaseUrl: options.resolveDeepseekBaseUrl,
       ...(options.catalogAugmentation === undefined
         ? {}
         : {
@@ -845,18 +869,24 @@ export async function discoverRuntimeEndpointComposition(options: {
   readonly glmConfigDirectory?: string;
   /** Live store-backed GLM token resolver (ADR 0022); env stays the fallback. */
   readonly resolveGlmAuthToken?: () => string | undefined;
+  /** Live preference-backed GLM base URL resolver (w232 Settings field). */
+  readonly resolveGlmBaseUrl?: () => string | undefined;
   /** Environment the default Kimi adapter reads its token/base URL from. */
   readonly kimiEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CLAUDE_CONFIG_DIR for the default Kimi adapter. */
   readonly kimiConfigDirectory?: string;
   /** Live store-backed Kimi token resolver (ADR 0022); env stays the fallback. */
   readonly resolveKimiAuthToken?: () => string | undefined;
+  /** Live preference-backed Kimi Code base URL resolver (w232 Settings field). */
+  readonly resolveKimiBaseUrl?: () => string | undefined;
   /** Environment the default DeepSeek adapter reads its token/base URL from. */
   readonly deepseekEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CLAUDE_CONFIG_DIR for the default DeepSeek adapter. */
   readonly deepseekConfigDirectory?: string;
   /** Live store-backed DeepSeek token resolver (ADR 0022); env stays the fallback. */
   readonly resolveDeepseekAuthToken?: () => string | undefined;
+  /** Live preference-backed DeepSeek base URL resolver (w232 Settings field). */
+  readonly resolveDeepseekBaseUrl?: () => string | undefined;
   /** Environment the default kimi-platform adapter reads its key from. */
   readonly kimiPlatformEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CODEX_HOME for the default kimi-platform adapter. */
@@ -929,6 +959,7 @@ export async function discoverRuntimeEndpointComposition(options: {
           environment: options.glmEnvironment,
           configDirectory: options.glmConfigDirectory,
           resolveGlmAuthToken: options.resolveGlmAuthToken,
+          resolveGlmBaseUrl: options.resolveGlmBaseUrl,
           ...(options.catalogAugmentation === undefined
             ? {}
             : {
@@ -962,6 +993,7 @@ export async function discoverRuntimeEndpointComposition(options: {
           environment: options.kimiEnvironment,
           configDirectory: options.kimiConfigDirectory,
           resolveKimiAuthToken: options.resolveKimiAuthToken,
+          resolveKimiBaseUrl: options.resolveKimiBaseUrl,
           ...(options.catalogAugmentation === undefined
             ? {}
             : {
@@ -998,6 +1030,7 @@ export async function discoverRuntimeEndpointComposition(options: {
           environment: options.deepseekEnvironment,
           configDirectory: options.deepseekConfigDirectory,
           resolveDeepseekAuthToken: options.resolveDeepseekAuthToken,
+          resolveDeepseekBaseUrl: options.resolveDeepseekBaseUrl,
           ...(options.catalogAugmentation === undefined
             ? {}
             : {

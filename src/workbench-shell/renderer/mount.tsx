@@ -16,6 +16,7 @@ import type {
   WorkbenchClaudePermissionHandling,
   WorkbenchDirectSessionProfileLoadRequest,
   WorkbenchAppearancePreference,
+  WorkbenchBaseUrlEndpointId,
   WorkbenchEndpointCatalogFreshnessReport,
   WorkbenchEndpointKeyEndpointId,
   WorkbenchFamilyEndpointPreference,
@@ -38,7 +39,7 @@ import {
   isValidWorkbenchDirectInput,
   publicAppearancePreferenceUnavailable,
   publicClaudePermissionHandlingUnavailable,
-  publicCodexApiBaseUrlUnavailable,
+  publicBaseUrlUnavailable,
   publicRuntimeExecutableUnavailable,
   defaultWorkbenchRuntimeExecutablePaths,
   type WorkbenchConfigurableRuntime,
@@ -54,6 +55,7 @@ import {
   publicProjectOpenUnavailable,
   publicProjectSwitchUnavailable,
   publicUnavailableSubmission,
+  WORKBENCH_BASE_URL_ENDPOINT_IDS,
   WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS,
 } from "../contract.ts";
 import {
@@ -72,14 +74,14 @@ import {
   type WorkbenchClaudePermissionHandlingPersistencePhase,
 } from "./claude-permission-handling-state.ts";
 import {
-  beginWorkbenchCodexApiBaseUrlSave,
-  changeWorkbenchCodexApiBaseUrlDraft,
-  completeWorkbenchCodexApiBaseUrlHydration,
-  completeWorkbenchCodexApiBaseUrlSave,
-  initialWorkbenchCodexApiBaseUrlState,
-  type WorkbenchCodexApiBaseUrlPanel,
-  type WorkbenchCodexApiBaseUrlState,
-} from "./codex-api-base-url-state.ts";
+  beginWorkbenchEndpointBaseUrlSave,
+  changeWorkbenchEndpointBaseUrlDraft,
+  completeWorkbenchEndpointBaseUrlHydration,
+  completeWorkbenchEndpointBaseUrlSave,
+  initialWorkbenchEndpointBaseUrlState,
+  type WorkbenchEndpointBaseUrlPanel,
+  type WorkbenchEndpointBaseUrlState,
+} from "./endpoint-base-url-state.ts";
 import {
   beginWorkbenchEndpointPreferenceChange,
   completeWorkbenchEndpointPreferenceHydration,
@@ -326,8 +328,20 @@ const WorkbenchApp: Component<{
   );
   const [claudePermissionHandlingPersistence, setClaudePermissionHandlingPersistence] =
     createSignal(initialWorkbenchClaudePermissionHandlingPersistenceState);
-  const [codexApiBaseUrlState, setCodexApiBaseUrlState] = createSignal(
-    initialWorkbenchCodexApiBaseUrlState,
+  // One independent base-URL state machine per base-URL endpoint (w223
+  // shipped codex-api alone; w232 generalizes to GLM/DeepSeek/Kimi Code too,
+  // same Record<endpointId, state> shape as endpointKeyStates below).
+  const [baseUrlStates, setBaseUrlStates] = createSignal<
+    Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlState>
+  >(
+    Object.freeze(
+      Object.fromEntries(
+        WORKBENCH_BASE_URL_ENDPOINT_IDS.map((endpointId) => [
+          endpointId,
+          initialWorkbenchEndpointBaseUrlState,
+        ]),
+      ),
+    ) as Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlState>,
   );
   const [endpointPreferencePersistence, setEndpointPreferencePersistence] =
     createSignal(initialWorkbenchEndpointPreferencePersistenceState);
@@ -836,17 +850,23 @@ const WorkbenchApp: Component<{
           ),
         );
       });
-    const loadCodexApiBaseUrl = props.bridge.loadCodexApiBaseUrl;
-    if (loadCodexApiBaseUrl !== undefined) {
-      void loadCodexApiBaseUrl
-        .call(props.bridge)
-        .catch(() => publicCodexApiBaseUrlUnavailable())
-        .then((result) => {
-          if (!active) return;
-          setCodexApiBaseUrlState((current) =>
-            completeWorkbenchCodexApiBaseUrlHydration(current, result),
-          );
-        });
+    const loadBaseUrl = props.bridge.loadBaseUrl;
+    if (loadBaseUrl !== undefined) {
+      for (const endpointId of WORKBENCH_BASE_URL_ENDPOINT_IDS) {
+        void loadBaseUrl
+          .call(props.bridge, endpointId)
+          .catch(() => publicBaseUrlUnavailable())
+          .then((result) => {
+            if (!active) return;
+            setBaseUrlStates((current) => ({
+              ...current,
+              [endpointId]: completeWorkbenchEndpointBaseUrlHydration(
+                current[endpointId],
+                result,
+              ),
+            }));
+          });
+      }
     }
     const loadEndpointPreferences = props.bridge.loadEndpointPreferences;
     if (loadEndpointPreferences !== undefined) {
@@ -1582,26 +1602,41 @@ const WorkbenchApp: Component<{
       });
   };
 
-  const changeCodexApiBaseUrlDraft = (draft: string): void => {
-    setCodexApiBaseUrlState((current) =>
-      changeWorkbenchCodexApiBaseUrlDraft(current, draft),
-    );
-  };
+  const changeBaseUrlDraft =
+    (endpointId: WorkbenchBaseUrlEndpointId) =>
+    (draft: string): void => {
+      setBaseUrlStates((current) => ({
+        ...current,
+        [endpointId]: changeWorkbenchEndpointBaseUrlDraft(
+          current[endpointId],
+          draft,
+        ),
+      }));
+    };
 
-  const saveCodexApiBaseUrl = (): void => {
-    const save = props.bridge.saveCodexApiBaseUrl;
+  const saveBaseUrl = (endpointId: WorkbenchBaseUrlEndpointId) => (): void => {
+    const save = props.bridge.saveBaseUrl;
     if (save === undefined) return;
-    const attempt = beginWorkbenchCodexApiBaseUrlSave(codexApiBaseUrlState());
-    setCodexApiBaseUrlState(attempt.state);
+    const attempt = beginWorkbenchEndpointBaseUrlSave(
+      baseUrlStates()[endpointId],
+    );
+    setBaseUrlStates((current) => ({
+      ...current,
+      [endpointId]: attempt.state,
+    }));
     if (attempt.baseUrl === null) return;
     void save
-      .call(props.bridge, attempt.baseUrl)
-      .catch(() => publicCodexApiBaseUrlUnavailable())
+      .call(props.bridge, endpointId, attempt.baseUrl)
+      .catch(() => publicBaseUrlUnavailable())
       .then((result) => {
         if (!active) return;
-        setCodexApiBaseUrlState((current) =>
-          completeWorkbenchCodexApiBaseUrlSave(current, result),
-        );
+        setBaseUrlStates((current) => ({
+          ...current,
+          [endpointId]: completeWorkbenchEndpointBaseUrlSave(
+            current[endpointId],
+            result,
+          ),
+        }));
       });
   };
 
@@ -1764,19 +1799,30 @@ const WorkbenchApp: Component<{
           ),
         );
 
-  const codexApiBaseUrlPanel = (): WorkbenchCodexApiBaseUrlPanel | undefined => {
-    if (props.bridge.loadCodexApiBaseUrl === undefined) return undefined;
-    const state = codexApiBaseUrlState();
-    return Object.freeze({
-      phase: state.phase,
-      savedBaseUrl: state.savedBaseUrl,
-      draft: state.draft,
-      busy: state.busy,
-      feedback: state.feedback,
-      onDraft: changeCodexApiBaseUrlDraft,
-      onSave: saveCodexApiBaseUrl,
-    } satisfies WorkbenchCodexApiBaseUrlPanel);
-  };
+  const endpointBaseUrlPanels = ():
+    | Partial<Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>>
+    | undefined =>
+    props.bridge.loadBaseUrl === undefined
+      ? undefined
+      : Object.freeze(
+          Object.fromEntries(
+            WORKBENCH_BASE_URL_ENDPOINT_IDS.map((endpointId) => {
+              const state = baseUrlStates()[endpointId];
+              return [
+                endpointId,
+                Object.freeze({
+                  phase: state.phase,
+                  savedBaseUrl: state.savedBaseUrl,
+                  draft: state.draft,
+                  busy: state.busy,
+                  feedback: state.feedback,
+                  onDraft: changeBaseUrlDraft(endpointId),
+                  onSave: saveBaseUrl(endpointId),
+                } satisfies WorkbenchEndpointBaseUrlPanel),
+              ];
+            }),
+          ),
+        );
 
   const refreshEndpointCatalogFreshness = (): void => {
     const refresh = props.bridge.refreshEndpointCatalogFreshness;
@@ -2065,7 +2111,7 @@ const WorkbenchApp: Component<{
           }
           onEndpointPreference={changeEndpointPreference}
           endpointKeyPanels={endpointKeyPanels()}
-          codexApiBaseUrl={codexApiBaseUrlPanel()}
+          endpointBaseUrlPanels={endpointBaseUrlPanels()}
           catalogFreshness={endpointCatalogFreshnessPanel()}
           newSession={state().newSession}
           projectSwitch={state().projectSwitch}
@@ -2225,7 +2271,7 @@ const ResolvedWorkbench: Component<{
   readonly endpointKeyPanels?: Partial<
     Record<WorkbenchEndpointKeyEndpointId, WorkbenchEndpointKeyPanel>
   >;
-  readonly codexApiBaseUrl?: WorkbenchCodexApiBaseUrlPanel;
+  readonly endpointBaseUrlPanels?: Partial<Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>>;
   readonly catalogFreshness?: {
     readonly unavailable: boolean;
     readonly reports:
@@ -2349,7 +2395,7 @@ const ResolvedWorkbench: Component<{
           endpointPreferences={props.endpointPreferences}
           onEndpointPreference={props.onEndpointPreference}
           endpointKeyPanels={props.endpointKeyPanels}
-          codexApiBaseUrl={props.codexApiBaseUrl}
+          endpointBaseUrlPanels={props.endpointBaseUrlPanels}
           catalogFreshness={props.catalogFreshness}
           newSession={props.newSession}
           projectSwitch={props.projectSwitch}
@@ -2460,7 +2506,7 @@ interface WorkbenchScreenProps {
   readonly endpointKeyPanels?: Partial<
     Record<WorkbenchEndpointKeyEndpointId, WorkbenchEndpointKeyPanel>
   >;
-  readonly codexApiBaseUrl?: WorkbenchCodexApiBaseUrlPanel;
+  readonly endpointBaseUrlPanels?: Partial<Record<WorkbenchBaseUrlEndpointId, WorkbenchEndpointBaseUrlPanel>>;
   readonly catalogFreshness?: {
     readonly unavailable: boolean;
     readonly reports:
@@ -2729,7 +2775,7 @@ const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
             endpointPreferences={props.endpointPreferences}
             onEndpointPreference={props.onEndpointPreference}
             endpointKeyPanels={props.endpointKeyPanels}
-            codexApiBaseUrl={props.codexApiBaseUrl}
+            endpointBaseUrlPanels={props.endpointBaseUrlPanels}
           catalogFreshness={props.catalogFreshness}
             canRead={canRefreshDirectSessionProfileFromProviders(
               rendererState(),
