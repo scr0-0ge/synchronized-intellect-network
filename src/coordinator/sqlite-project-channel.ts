@@ -74,6 +74,10 @@ import {
   type DurableRuntimeEndpointId,
   type WorkLedgerAuthGenerationModule,
 } from "./work-ledger-auth-generation.ts";
+import {
+  SESSION_CONTINUATION_MAX_STEPS,
+  type SessionContinuationStop,
+} from "./session-continuation-plan.ts";
 
 /**
  * Endpoint roster the channel admits when no explicit roster is injected.
@@ -2330,6 +2334,55 @@ class SqliteProjectChannel implements ProjectChannel {
     this.notifyCommittedUpdate();
   }
 
+  /** Best-effort: a plan that already decided to stop must not wait on this write. */
+  recordContinuationStop(commandId: string, stop: SessionContinuationStop): void {
+    if (this.closed) return;
+    try {
+      const row = this.database
+        .prepare("SELECT status, target_session_id FROM commands WHERE command_id = ?")
+        .get(commandId) as { status: string; target_session_id: string | null } | undefined;
+      if (row === undefined) return;
+      this.database
+        .prepare(
+          `INSERT INTO updates (project_id, command_id, kind, status, session_id, data_json)
+           VALUES (?, ?, 'continuation-stop', ?, ?, ?)`,
+        )
+        .run(this.projectId, commandId, row.status, row.target_session_id, JSON.stringify({ stop }));
+    } catch {
+      // The in-memory report already reached the renderer; only restart visibility is lost.
+      return;
+    }
+    this.notifyCommittedUpdate();
+  }
+
+  private continuationStopForCommand(commandId: string): SessionContinuationStop | undefined {
+    const row = this.database
+      .prepare(
+        "SELECT data_json FROM updates WHERE command_id = ? AND kind = 'continuation-stop' ORDER BY cursor DESC LIMIT 1",
+      )
+      .get(commandId) as { data_json: string | null } | undefined;
+    if (row === undefined || row.data_json === null) return undefined;
+    const data = JSON.parse(row.data_json) as { stop: unknown };
+    if (!isExactDataRecord(data, ["stop"])) throw new Error("invalid-continuation-stop-update");
+    const stop = data.stop;
+    if (
+      !isExactDataRecord(stop, ["step", "limit", "reason"]) ||
+      !Number.isSafeInteger(stop.step) ||
+      !Number.isSafeInteger(stop.limit) ||
+      (stop.step as number) < 1 ||
+      (stop.step as number) > (stop.limit as number) ||
+      (stop.limit as number) > SESSION_CONTINUATION_MAX_STEPS ||
+      (stop.reason !== "turn-not-completed" &&
+        stop.reason !== "continuation-unavailable" &&
+        stop.reason !== "observation-unavailable" &&
+        stop.reason !== "submission-unavailable" &&
+        stop.reason !== "interrupted-by-user")
+    ) {
+      throw new Error("invalid-continuation-stop-update");
+    }
+    return { step: stop.step as number, limit: stop.limit as number, reason: stop.reason };
+  }
+
   readTurnActivity(): ProjectTurnActivity {
     if (this.closed) return "unknown";
     try {
@@ -2569,6 +2622,10 @@ class SqliteProjectChannel implements ProjectChannel {
         .get(this.projectId, state.cursor) as UpdateRow | undefined;
       if (row !== undefined) {
         const update = hydrateUpdate(row);
+        if (update === undefined) {
+          state.cursor = row.cursor;
+          continue;
+        }
         state.cursor = update.cursor;
         return { done: false, value: update };
       }
@@ -2628,6 +2685,7 @@ class SqliteProjectChannel implements ProjectChannel {
       row.private_envelope_json,
     );
     const failureCategory = failedCommandFailureCategory(row);
+    const continuationStop = this.continuationStopForCommand(row.command_id);
     const summary: ProjectCommandSummary = {
       commandId: row.command_id,
       runtime: row.runtime,
@@ -2636,6 +2694,7 @@ class SqliteProjectChannel implements ProjectChannel {
       ...(row.status === "recovery-required" ? { recovery: this.recoveryForCommand(row.command_id) } : {}),
       ...(failureCategory === undefined ? {} : { failureCategory }),
       ...(currentCommand === undefined ? {} : { input: currentCommand.input }),
+      ...(continuationStop === undefined ? {} : { continuationStop }),
     };
     if (session === undefined) return summary;
     let requestedProfileProjection: RequestedSessionProfileProjection | undefined;
@@ -4904,7 +4963,7 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-function hydrateUpdate(row: UpdateRow): DurableProjectUpdate {
+function hydrateUpdate(row: UpdateRow): DurableProjectUpdate | undefined {
   if (
     !Number.isSafeInteger(Number(row.cursor)) ||
     Number(row.cursor) <= 0 ||
@@ -4925,6 +4984,7 @@ function hydrateUpdate(row: UpdateRow): DurableProjectUpdate {
     case "accepted":
     case "in-flight":
     case "recovery-required":
+    case "continuation-stop":
       return { ...base, kind: row.kind };
     case "completed":
       effectiveProjectionFromTerminalData("completed", row.data_json);
@@ -4996,7 +5056,15 @@ function hydrateUpdate(row: UpdateRow): DurableProjectUpdate {
       };
     }
     default:
-      throw new Error("invalid-update-kind");
+      // A build from a newer version of this product can append a `kind` this
+      // build has never heard of. Skipping it (instead of throwing) keeps the
+      // rest of the ledger observable when an older build reopens a project a
+      // newer build has already written to.
+      console.warn("[coordinator] Skipped unknown ledger update kind", {
+        kind: row.kind,
+        cursor: base.cursor,
+      });
+      return undefined;
   }
 }
 

@@ -1530,8 +1530,10 @@ const SubscriptionFacadeProviderCard: Component<{
             </Show>
             <RuntimeExecutableField
               runtime={props.family}
+              fieldScope={`${props.family}-family`}
               value={configuredExecutablePath()}
               phase={props.executablePhases?.[props.family]}
+              catalogReady={activeRow()?.category === "catalog-ready"}
               onSave={props.onSaveExecutablePath}
               installPhase={props.runtimeInstallPhases?.[props.family]}
               onInstall={props.onInstallExecutable}
@@ -1702,8 +1704,22 @@ const SubscriptionFacadeProviderCard: Component<{
  */
 const RuntimeExecutableField: Component<{
   readonly runtime: WorkbenchConfigurableRuntime;
+  /**
+   * A card-unique key, folded into the field id. GLM piggybacks the same
+   * "claude" runtime as the Claude family card, so `runtime` alone is not
+   * unique: two cards would render the same id, and a `<label for>` only
+   * ever resolves to the first element carrying it.
+   */
+  readonly fieldScope: string;
   readonly value: string;
   readonly phase?: SettingsRuntimeExecutablePhase;
+  /**
+   * Whether this runtime's endpoint is already Catalog ready. A "saved"
+   * phase is a session-local echo of the Save action; it does not know a
+   * later Re-check has already confirmed the runtime, so it must not keep
+   * telling the user to run one.
+   */
+  readonly catalogReady?: boolean;
   readonly onSave?: (
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
@@ -1715,7 +1731,12 @@ const RuntimeExecutableField: Component<{
   // The stored value only changes when a save or an install has answered, and
   // an install answers with a path the user never typed: show it.
   createEffect(on(() => props.value, (value) => setDraft(value), { defer: true }));
-  const fieldId = () => `runtime-executable-${props.runtime}`;
+  const fieldId = () => `runtime-executable-${props.fieldScope}`;
+  const visiblePhase = (): SettingsRuntimeExecutablePhase | undefined => {
+    const phase = props.phase;
+    if (phase === undefined) return undefined;
+    return phase.status === "saved" && props.catalogReady ? undefined : phase;
+  };
   const saving = () => props.phase?.status === "saving";
   const installing = () => props.installPhase?.status === "installing";
   return (
@@ -1766,7 +1787,7 @@ const RuntimeExecutableField: Component<{
           {runtimeExecutableCopy.clearAction}
         </button>
       </span>
-      <Show when={props.phase}>
+      <Show when={visiblePhase()}>
         {(phase) => (
           <p
             class={
@@ -2027,8 +2048,10 @@ const ProviderCard: Component<{
               </p>
               <RuntimeExecutableField
                 runtime={props.row.runtime}
+                fieldScope={props.row.endpointId}
                 value={props.executablePath ?? ""}
                 phase={props.executablePhase}
+                catalogReady={props.row.category === "catalog-ready"}
                 onSave={props.onSaveExecutablePath}
                 installPhase={props.installPhase}
                 onInstall={props.onInstallExecutable}

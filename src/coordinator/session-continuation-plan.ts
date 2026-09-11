@@ -18,7 +18,13 @@ export interface SessionContinuationPlanRequest {
 export interface SessionContinuationStop {
   readonly step: number;
   readonly limit: number;
-  readonly reason: "turn-not-completed" | "continuation-unavailable" | "observation-unavailable" | "submission-unavailable";
+  readonly reason: "turn-not-completed" | "continuation-unavailable" | "observation-unavailable" | "submission-unavailable" | "interrupted-by-user";
+}
+
+/** Which step of the bounded plan is currently running; absent once stopped or done. */
+export interface SessionContinuationProgress {
+  readonly step: number;
+  readonly limit: number;
 }
 
 /** Undefined is ordinary composer text; null is an invalid explicit plan. */
@@ -38,6 +44,7 @@ export function sessionContinuationStepInput(plan: SessionContinuationPlanReques
 export function createSessionContinuationPlan(
   channel: ProjectChannel,
   reportStop?: (commandId: string, stop: SessionContinuationStop) => void,
+  reportProgress?: (commandId: string, progress: SessionContinuationProgress) => void,
 ) {
   let generation = 0;
   let closing = false;
@@ -68,6 +75,7 @@ export function createSessionContinuationPlan(
       if (!active()) return;
       const stopped = Object.freeze({ step, limit: plan.steps, reason });
       reportStop?.(current.commandId, stopped);
+      channel.recordContinuationStop?.(current.commandId, stopped);
       console.warn("[coordinator] Automatic continuation stopped", stopped);
     };
     try {
@@ -80,7 +88,8 @@ export function createSessionContinuationPlan(
         if (update.commandId !== current.commandId ||
             update.status === "accepted" || update.status === "in-flight") continue;
         if (update.status !== "completed") {
-          stop("turn-not-completed");
+          stop(update.kind === "failed" && update.failureCategory === "interrupted"
+            ? "interrupted-by-user" : "turn-not-completed");
           return;
         }
         if (step === plan.steps) return;
@@ -104,6 +113,7 @@ export function createSessionContinuationPlan(
           input: sessionContinuationStepInput(plan, step + 1),
         }), runtimeContext);
         step += 1;
+        reportProgress?.(current.commandId, Object.freeze({ step, limit: plan.steps }));
       }
     } catch {
       // No retry: an observation/acceptance error is never a completed turn.
@@ -127,6 +137,7 @@ export function createSessionContinuationPlan(
         ...command, input: sessionContinuationStepInput(plan, 1),
       }), runtimeContext);
       if (plan !== undefined && plan.steps > 1 && generation === intent && !closing) {
+        reportProgress?.(receipt.commandId, Object.freeze({ step: 1, limit: plan.steps }));
         const run = follow(receipt, command, runtimeContext, plan, intent);
         runs.add(run);
         void run.then(() => runs.delete(run), () => runs.delete(run));

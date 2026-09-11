@@ -308,9 +308,11 @@ function createBackend(
   const runtimeResumeIdentityResolver =
     readWorkbenchRuntimeResumeIdentityResolver(adapter);
   let closing = false;
-  const continuationPlan = createSessionContinuationPlan(channel, (commandId, stop) => {
-    liveView.reportContinuationStop(commandId, stop);
-  });
+  const continuationPlan = createSessionContinuationPlan(
+    channel,
+    (commandId, stop) => { liveView.reportContinuationStop(commandId, stop); },
+    (commandId, progress) => { liveView.reportContinuationProgress(commandId, progress); },
+  );
   return Object.freeze({
     observeProject: (listener: WorkbenchProjectListener) =>
       liveView.observe(listener),

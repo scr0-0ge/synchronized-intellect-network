@@ -810,14 +810,14 @@ kbd {
   border-bottom: 1px solid var(--line-0);
 }
 
-.stage-head.has-continuation-stop {
+.stage-head.has-continuation-stop, .stage-head.has-continuation-progress {
   flex-wrap: wrap;
   height: auto;
   min-height: 38px;
   padding-block: 10px;
   row-gap: 8px;
 }
-.continuation-stop-notice {
+.continuation-stop-notice, .continuation-progress-notice {
   flex-basis: 100%;
   min-width: 0;
   display: grid;
@@ -827,7 +827,7 @@ kbd {
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-.continuation-stop-notice strong { color: var(--fg-0); }
+.continuation-stop-notice strong, .continuation-progress-notice strong { color: var(--fg-0); }
 
 .stage-title {
   display: flex;

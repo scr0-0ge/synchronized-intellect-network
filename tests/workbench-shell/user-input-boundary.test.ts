@@ -13,7 +13,8 @@ test("IPC questions use the selected Session and original binding, reject stale 
   const unsubscribe = ipc.bridge.observeUserInput!(() => { notifications++; });
   t.after(unsubscribe);
   workbench.ask();
-  await waitFor(() => notifications > 0);
+  await waitFor(() => notifications > 0,
+    { diagnostic: message => t.diagnostic(message), label: "user-input notification" });
   const sessionKey = workbench.view().commands[0].session!.metadataKey;
   const pending = await ipc.bridge.readUserInput!({ sessionKey });
   assert.ok(pending.ok && pending.requests[0].state === "pending");
@@ -34,7 +35,8 @@ test("IPC questions use the selected Session and original binding, reject stale 
   assert.deepEqual(answered, { ok: true, requests: [{ requestKey, state: "answered" }] });
   assert.deepEqual(await ipc.bridge.respondToUserInput!({ kind: "cancel", requestKey }), { status: "unavailable" });
   workbench.finish();
-  await waitFor(() => workbench.view().commands[0].status === "completed");
+  await waitFor(() => workbench.view().commands[0].status === "completed",
+    { diagnostic: message => t.diagnostic(message), label: "completed command projection" });
   assert.doesNotMatch(JSON.stringify(workbench.view()), /SECRET_ANSWER_NOT_HISTORY|A handwritten scope|Which scope\?/);
   ipc.dispose();
   assert.equal(ipc.handlers.has(WORKBENCH_READ_USER_INPUT_CHANNEL), false);
@@ -65,7 +67,8 @@ test("a stalled response reports uncertainty after eight seconds and does not ho
   const unsubscribe = ipc.bridge.observeUserInput!(() => { changed = true; });
   t.after(unsubscribe);
   workbench.ask();
-  await waitFor(() => changed);
+  await waitFor(() => changed,
+    { diagnostic: message => t.diagnostic(message), label: "stalled-response notification" });
   const pending = await ipc.bridge.readUserInput!({ sessionKey: workbench.view().commands[0].session!.metadataKey });
   assert.ok(pending.ok && pending.requests[0].state === "pending");
   workbench.servers[0].holdResponses = true;

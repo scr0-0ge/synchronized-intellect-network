@@ -337,7 +337,10 @@ const StageHeader: Component<{
   readonly onOpenProject: () => void;
   readonly projectOpen: WorkbenchProjectOpenState;
 }> = (props) => (
-  <div class="stage-head" classList={{ "has-continuation-stop": !props.freshStart && props.command?.continuationStop !== undefined }}>
+  <div class="stage-head" classList={{
+    "has-continuation-stop": !props.freshStart && props.command?.continuationStop !== undefined,
+    "has-continuation-progress": !props.freshStart && props.command?.continuationProgress !== undefined,
+  }}>
     <div class="stage-title">
       <Show when={!props.freshStart && props.command}>
         {(command) => (
@@ -410,6 +413,13 @@ const StageHeader: Component<{
         <div class="continuation-stop-notice" role="status">
           <strong>{continuationCopy.heading(stop().step, stop().limit)}</strong>
           <span>{continuationCopy.reasons[stop().reason]}</span>
+        </div>
+      )}
+    </Show>
+    <Show when={!props.freshStart && props.command?.continuationProgress}>
+      {(progress) => (
+        <div class="continuation-progress-notice" role="status">
+          <strong>{continuationCopy.progress(progress().step, progress().limit)}</strong>
         </div>
       )}
     </Show>

@@ -110,7 +110,10 @@ export async function createQuestionWorkbench(t: TestContext) {
     endpointKey: endpoint.key, modelKey: model.key, workIntensityKey: model.workIntensities[0].key,
     executionModeKey: endpoint.executionModes[0].key, accessModeKey: endpoint.accessModes[0].key });
   assert.equal(started.ok, true);
-  await waitFor(() => !!servers[0]?.outbound.some(frame => frame.method === "turn/start") && !!view?.commands[0]?.session?.metadataKey);
+  await waitFor(
+    () => !!servers[0]?.outbound.some(frame => frame.method === "turn/start") && !!view?.commands[0]?.session?.metadataKey,
+    { diagnostic: message => t.diagnostic(message), label: "turn start and Session metadata" },
+  );
   return {
     host, root, servers,
     view: () => { assert.ok(view); return view; },
@@ -119,10 +122,31 @@ export async function createQuestionWorkbench(t: TestContext) {
   };
 }
 
-export async function waitFor(predicate: () => boolean | Promise<boolean>, timeout = 5000) {
+/* Project observation crosses a serialised, filesystem-backed path, so its latency is a
+   property of the machine. The 5s bound expired in PR #9 run 34555466625 attempt 1 while
+   the unchanged rerun passed. 60s still separates a missing observation from a slow one;
+   every wait reports its cost on successful and failed runs. */
+const USER_INPUT_WAIT_LIMIT_MS = 60_000;
+
+export async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  options: number | {
+    readonly timeout?: number;
+    readonly diagnostic?: (message: string) => void;
+    readonly label?: string;
+  } = {},
+) {
+  const timeout = typeof options === "number" ? options : options.timeout ?? USER_INPUT_WAIT_LIMIT_MS;
+  const diagnostic = typeof options === "number" ? console.log : options.diagnostic ?? console.log;
+  const label = typeof options === "number" ? "loopback observation" : options.label ?? "loopback observation";
+  const started = performance.now();
   const until = Date.now() + timeout;
-  while (!(await predicate())) {
-    assert.ok(Date.now() < until, "loopback observation did not arrive before deadline");
-    await new Promise(resolve => setTimeout(resolve, 10));
+  try {
+    while (!(await predicate())) {
+      assert.ok(Date.now() < until, "loopback observation did not arrive before deadline");
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  } finally {
+    diagnostic(`waitFor(${label}): elapsed=${Math.round(performance.now() - started)}ms limit=${timeout}ms`);
   }
 }

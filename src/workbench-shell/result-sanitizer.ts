@@ -3636,14 +3636,26 @@ export function sanitizeWorkbenchContinuationStop(value: unknown): import("./con
       (value.step as number) < 1 || (value.step as number) > (value.limit as number) ||
       (value.limit as number) > 10 ||
       (value.reason !== "turn-not-completed" && value.reason !== "continuation-unavailable" &&
-       value.reason !== "observation-unavailable" && value.reason !== "submission-unavailable")) {
+       value.reason !== "observation-unavailable" && value.reason !== "submission-unavailable" &&
+       value.reason !== "interrupted-by-user")) {
     throw new Error("invalid-continuation-stop");
   }
   return Object.freeze({ step: value.step as number, limit: value.limit as number, reason: value.reason });
 }
 
+export function sanitizeWorkbenchContinuationProgress(value: unknown): import("./contract.ts").WorkbenchContinuationProgress {
+  if (!isStrictDataRecord(value, ["step", "limit"]) ||
+      !Number.isSafeInteger(value.step) || !Number.isSafeInteger(value.limit) ||
+      (value.step as number) < 1 || (value.step as number) > (value.limit as number) ||
+      (value.limit as number) > 10) {
+    throw new Error("invalid-continuation-progress");
+  }
+  return Object.freeze({ step: value.step as number, limit: value.limit as number });
+}
+
 function sanitizeCommand(value: unknown): WorkbenchCommandView {
   const hasContinuationStop = isRecord(value) && Object.hasOwn(value, "continuationStop");
+  const hasContinuationProgress = isRecord(value) && Object.hasOwn(value, "continuationProgress");
   const hasFailure =
     isRecord(value) && Object.prototype.hasOwnProperty.call(value, "failureCategory");
   const hasSession =
@@ -3656,6 +3668,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
     !isStrictDataRecord(value, [
       ...(hasFailure ? ["failureCategory"] : []),
       ...(hasContinuationStop ? ["continuationStop"] : []),
+      ...(hasContinuationProgress ? ["continuationProgress"] : []),
       ...(hasInterrupt ? ["interrupt"] : []),
       "key",
       "label",
@@ -3670,6 +3683,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
   }
   if (
     (hasFailure && value.failureCategory === undefined) ||
+    (hasContinuationProgress && value.continuationProgress === undefined) ||
     (hasInterrupt && value.interrupt === undefined) ||
     (hasSession && value.session === undefined) ||
     (hasSteer && value.steer === undefined)
@@ -3696,11 +3710,17 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
     : undefined;
   const steer = hasSteer ? sanitizeSteerControl(value.steer) : undefined;
   const continuationStop = hasContinuationStop ? sanitizeWorkbenchContinuationStop(value.continuationStop) : undefined;
+  const continuationProgress = hasContinuationProgress
+    ? sanitizeWorkbenchContinuationProgress(value.continuationProgress)
+    : undefined;
   if (interrupt !== undefined && value.status !== "in-flight") {
     throw new Error("invalid-interrupt-control");
   }
   if (steer !== undefined && value.status !== "in-flight") {
     throw new Error("invalid-steer-control");
+  }
+  if (continuationProgress !== undefined && value.status !== "in-flight") {
+    throw new Error("invalid-continuation-progress");
   }
   let session: WorkbenchCommandView["session"];
   if (value.session !== undefined) {
@@ -3795,6 +3815,7 @@ function sanitizeCommand(value: unknown): WorkbenchCommandView {
     status: value.status,
     ...(failureCategory === undefined ? {} : { failureCategory }),
     ...(continuationStop === undefined ? {} : { continuationStop }),
+    ...(continuationProgress === undefined ? {} : { continuationProgress }),
     ...(interrupt === undefined ? {} : { interrupt }),
     ...(session === undefined ? {} : { session }),
     ...(steer === undefined ? {} : { steer }),

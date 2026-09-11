@@ -154,8 +154,9 @@ for (const outcome of ["failed", "interrupted", "unknown-confirmed", "unknown-un
     const fixture = await controlledBackend(t, { outcome });
     assert.equal((await fixture.start("/auto-continue 4\nDo one next step and summarize it.")).ok, true);
     const terminal = outcome.startsWith("unknown") ? "recovery-required" : "failed";
+    const stopReason = outcome === "interrupted" ? "interrupted-by-user" : "turn-not-completed";
     await waitFor(() => fixture.command()?.status === terminal);
-    await waitFor(() => fixture.command()?.continuationStop?.reason === "turn-not-completed");
+    await waitFor(() => fixture.command()?.continuationStop?.reason === stopReason);
     assert.equal(fixture.sent.length, 2);
     const turn = fixture.command()?.session?.turns?.[1];
     assert.deepEqual(turn?.timeline[0], { kind: "user-message", text: "Do one next step and summarize it." });
@@ -212,6 +213,22 @@ for (const takeover of ["steer", "interrupt", "composer"] as const) {
       ...(takeover === "composer" ? ["Human starts a separate Session."] : [])]);
   });
 }
+
+test("the running step is visible as i/N while in flight, and yields to the terminal state once done", async (t) => {
+  const fixture = await controlledBackend(t, { heldStep: 2 });
+  assert.equal((await fixture.start("/auto-continue 4\nProceed one step.")).ok, true);
+  await waitFor(() => fixture.command()?.status === "in-flight" && fixture.sent.length === 1);
+  assert.deepEqual(fixture.command()?.continuationProgress, { step: 1, limit: 4 },
+    "the first step is visible as soon as it is dispatched");
+  assert.equal(fixture.command()?.continuationStop, undefined);
+  await waitFor(() => fixture.command()?.steer?.status === "available" && fixture.sent.length === 2);
+  assert.deepEqual(fixture.command()?.continuationProgress, { step: 2, limit: 4 },
+    "the second step replaces the first once dispatched");
+  fixture.release();
+  await waitFor(() => fixture.command()?.status === "completed");
+  assert.equal(fixture.command()?.continuationProgress, undefined,
+    "a finished run has no in-flight step to show");
+});
 
 for (const steps of [1, 10]) {
   test(`the composer accepts ${steps} total steps and stops at that exact limit`, async (t) => {
@@ -275,4 +292,60 @@ test("a changed account stops continuation after completion without inventing a 
   assert.deepEqual(warning.mock.calls[0]?.arguments, ["[coordinator] Automatic continuation stopped", {
     step: 2, limit: 3, reason: "continuation-unavailable",
   }]);
+});
+
+test("a recorded stop reason survives closing and reopening the Project", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-auto-continue-restart-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  const sent: string[] = [];
+  const binding = (profile: SessionProfile) => {
+    let step = 0;
+    return {
+      profile, opaqueSessionReference: "auto-continue-restart-reference",
+      async send(input: { text: string }) { sent.push(input.text); step = sent.length; },
+      async *events(): AsyncIterable<NormalizedRuntimeEvent> {
+        yield { kind: "turn-started" };
+        if (step === 1) {
+          yield { kind: "agent-message", text: "One verified step finished." };
+          yield { kind: "turn-completed", status: "completed" };
+        } else {
+          yield { kind: "failed", category: "turn-failed" };
+        }
+      },
+    };
+  };
+  const adapter: ResumableAgentRuntimeAdapter = {
+    async inspect() {
+      return {
+        runtime: "codex", models: [{ id: "gpt-5.6-sol", effortLevels: ["ultra"] }],
+        executionModes: ["single-agent"], accessModes: ["full-access"],
+      };
+    },
+    async start(request) { return binding(request.profile); },
+    async resume(request) { return binding(request.profile); },
+  };
+  let backend = await createWorkbenchBackend({ projectDirectory, databasePath, adapter });
+  let view: WorkbenchProjectResult | undefined;
+  const currentView = () => view;
+  backend.observeProject((result) => { view = result; });
+  const profile = await backend.loadDirectSessionProfile();
+  assert.equal((await backend.submitDirectInput(startRequest(profile, "/auto-continue 3\nDo the next verified step."))).ok, true);
+  await waitFor(() => !!view?.ok && view.view.commands[0]?.continuationStop?.reason === "turn-not-completed");
+  const beforeRestart = currentView();
+  assert.ok(beforeRestart?.ok);
+  assert.deepEqual(beforeRestart.view.commands[0]?.continuationStop, { step: 2, limit: 3, reason: "turn-not-completed" },
+    "before restart: the in-memory report shows the stop reason");
+  await backend.close();
+
+  view = undefined;
+  backend = await createWorkbenchBackend({ projectDirectory, databasePath, adapter });
+  t.after(async () => { await backend.close(); await rm(root, { recursive: true, force: true }); });
+  backend.observeProject((result) => { view = result; });
+  await waitFor(() => !!view?.ok && view.view.commands[0]?.status === "failed");
+  const afterRestart = currentView();
+  assert.ok(afterRestart?.ok);
+  assert.deepEqual(afterRestart.view.commands[0]?.continuationStop, { step: 2, limit: 3, reason: "turn-not-completed" },
+    "after restart: the stop reason is read back from the ledger, not just kept in memory");
 });
