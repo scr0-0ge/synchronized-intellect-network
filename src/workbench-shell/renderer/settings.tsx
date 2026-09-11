@@ -1097,10 +1097,11 @@ type FamilySideRows = Readonly<
  * orders the facade's automatic resolution. The head carries one plain-words
  * badge for the side being shown; the discovery facts and the detail
  * sentence sit behind "Details". The actions strip keeps the subscription
- * login controls, the API-key block, the codex-api base URL and the catalog
- * freshness controls exactly as before. Everything about the CLI itself --
- * version, path, install, update -- lives in the Tools section (step 2); a
- * card whose CLI is missing says so in one line and points there.
+ * login controls, the API-key block and the catalog freshness controls. The
+ * optional base URL sits behind its own Details disclosure instead of
+ * competing with Save key. Everything about the CLI itself -- version, path,
+ * install, update -- lives in the Tools section (step 2); a card whose CLI is
+ * missing says so in one line and takes the reader there.
  */
 const ProviderCard: Component<{
   readonly row: WorkbenchRuntimeEndpointStatusRow;
@@ -1374,26 +1375,35 @@ const ProviderCard: Component<{
                 </Show>
                 <div class="provider-binding-actions">
                   <Show when={entry().confirmation === null}>
-                    <button
-                      type="button"
-                      class="btn sm"
-                      disabled={
-                        props.onBind === undefined ||
-                        bindingValue().pending ||
-                        bindingValue().inspectionPending ||
-                        bindingValue().blockedStatement !== null
+                    <Show
+                      when={activeRow().category === "runtime-not-located"}
+                      fallback={
+                        <button
+                          type="button"
+                          class="btn sm"
+                          disabled={
+                            props.onBind === undefined ||
+                            bindingValue().pending ||
+                            bindingValue().inspectionPending ||
+                            bindingValue().blockedStatement !== null
+                          }
+                          aria-busy={
+                            bindingValue().pending || bindingValue().inspectionPending
+                          }
+                          aria-label={bindActionAriaCopy(
+                            bindingValue().actionLabel,
+                            props.row.runtimeFamilyLabel,
+                          )}
+                          onClick={() => props.onBind?.(activeEndpointId())}
+                        >
+                          {bindingValue().actionLabel}
+                        </button>
                       }
-                      aria-busy={
-                        bindingValue().pending || bindingValue().inspectionPending
-                      }
-                      aria-label={bindActionAriaCopy(
-                        bindingValue().actionLabel,
-                        props.row.runtimeFamilyLabel,
-                      )}
-                      onClick={() => props.onBind?.(activeEndpointId())}
                     >
-                      {bindingValue().actionLabel}
-                    </button>
+                      <a class="btn sm" href={`#tool-${activeRow().runtime}`}>
+                        {toolsCopy.goToInstallAction}
+                      </a>
+                    </Show>
                   </Show>
                 </div>
               </div>
@@ -1489,6 +1499,7 @@ const ToolRow: Component<{
   const installing = () => props.installPhase?.status === "installing";
   return (
     <section
+      id={`tool-${props.runtime}`}
       class={`provider tool-row tool-${props.runtime}`}
       aria-labelledby={headingId()}
     >
@@ -2235,11 +2246,11 @@ const EndpointKeyControls: Component<{
  * A base-URL endpoint card's "Base URL (optional)" field (ticket 21/w223
  * shipped Codex · API alone; w232 generalizes the same control across GLM,
  * DeepSeek, Kimi Code and Codex · API instead of copying it four times):
- * plain text, not a secret, so it renders below the API key row instead of
- * inside it. Empty means that endpoint's own official default applies; a
- * non-blank draft is validated for http(s):// shape only, at save time,
- * main-process side -- no connectivity probe here (out of scope for this
- * field).
+ * plain text, not a secret, so it renders below the API key row, behind its
+ * own Details disclosure, instead of competing with Save key. Empty means
+ * that endpoint's own official default applies; a non-blank draft is
+ * validated for http(s):// shape only, at save time, main-process side -- no
+ * connectivity probe here (out of scope for this field).
  */
 const EndpointBaseUrlControls: Component<{
   readonly endpointId: WorkbenchBaseUrlEndpointId;
@@ -2262,42 +2273,45 @@ const EndpointBaseUrlControls: Component<{
     }
   };
   return (
-    <div class="provider-binding-copy endpoint-base-url-copy">
-      <span class="provider-binding-status endpoint-base-url-status" role="status">
-        <span>{copy().savedLabel}</span>
-        <strong>{statusLabel()}</strong>
-      </span>
-      <p>{copy().hint}</p>
-      <div class="endpoint-key-entry endpoint-base-url-entry">
-        <label for={inputId()}>{copy().label}</label>
-        <input
-          id={inputId()}
-          type="text"
-          autocomplete="off"
-          spellcheck={false}
-          placeholder={copy().placeholder}
-          value={props.panel.draft}
-          disabled={props.panel.busy}
-          onInput={(event) => props.panel.onDraft(event.currentTarget.value)}
-        />
+    <details class="settings-details endpoint-base-url-details">
+      <summary>{copy().label}</summary>
+      <div class="provider-binding-copy endpoint-base-url-copy">
+        <span class="provider-binding-status endpoint-base-url-status" role="status">
+          <span>{copy().savedLabel}</span>
+          <strong>{statusLabel()}</strong>
+        </span>
+        <p>{copy().hint}</p>
+        <div class="endpoint-key-entry endpoint-base-url-entry">
+          <label for={inputId()}>{copy().label}</label>
+          <input
+            id={inputId()}
+            type="text"
+            autocomplete="off"
+            spellcheck={false}
+            placeholder={copy().placeholder}
+            value={props.panel.draft}
+            disabled={props.panel.busy}
+            onInput={(event) => props.panel.onDraft(event.currentTarget.value)}
+          />
+        </div>
+        <div class="provider-binding-actions endpoint-base-url-actions">
+          <button
+            type="button"
+            class="btn ghost sm"
+            disabled={props.panel.busy}
+            onClick={() => props.panel.onSave()}
+          >
+            {copy().saveAction}
+          </button>
+        </div>
+        <Show when={feedbackSentence()}>
+          {(sentence) => (
+            <p class="endpoint-base-url-feedback" role="alert">
+              {sentence()}
+            </p>
+          )}
+        </Show>
       </div>
-      <div class="provider-binding-actions endpoint-base-url-actions">
-        <button
-          type="button"
-          class="btn sm"
-          disabled={props.panel.busy}
-          onClick={() => props.panel.onSave()}
-        >
-          {copy().saveAction}
-        </button>
-      </div>
-      <Show when={feedbackSentence()}>
-        {(sentence) => (
-          <p class="endpoint-base-url-feedback" role="alert">
-            {sentence()}
-          </p>
-        )}
-      </Show>
-    </div>
+    </details>
   );
 };

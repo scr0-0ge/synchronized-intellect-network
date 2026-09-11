@@ -10,8 +10,15 @@ const driverPath = fileURLToPath(
   ),
 );
 const driverSource = readFileSync(driverPath, "utf8");
+const settingsObservationSource = readFileSync(
+  new URL(
+    "../e2e/settings-subscription-authentication-production/settings-observation.ts",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
-test("production Settings auth proof is a read-only exact two-card observation", () => {
+test("production Settings auth proof reads the two subscription cards from the fixed five-card layout", () => {
   // Issue 161: the same three arguments, now one per line and carrying the
   // offscreen placement switch, which the product honours only because the
   // isolated --user-data-dir is on the same line-up.
@@ -20,43 +27,43 @@ test("production Settings auth proof is a read-only exact two-card observation",
     /args: \[\s+repositoryRoot,\s+`--user-data-dir=\$\{userData\}`,\s+OFFSCREEN_PLACEMENT_ARGUMENT,\s+`--project-directory=\$\{projectDirectory\}`,\s+\]/u,
   );
   assert.match(
-    driverSource,
+    settingsObservationSource,
     /getByRole\("button", \{ name: "Settings", exact: true \}\)[\s\S]*?\.click\(\)/u,
   );
-  assert.match(driverSource, /assert\.equal\(await providerCards\.count\(\), 2\)/u);
+  assert.match(settingsObservationSource, /assert\.equal\(await providerCards\.count\(\), 5\)/u);
   assert.match(driverSource, /Object\.freeze\(\["Codex", "Claude"\] as const\)/u);
-  assert.match(driverSource, /assert\.equal\(renderedName, provider\);/u);
-  assert.match(driverSource, /name: provider,/u);
+  assert.match(settingsObservationSource, /assert\.equal\(renderedName, provider\);/u);
+  assert.match(settingsObservationSource, /name: provider,/u);
   assert.doesNotMatch(
-    driverSource,
+    settingsObservationSource,
     /renderedName\s*===\s*provider\s*\?\s*provider\s*:\s*provider/u,
   );
   assert.match(
-    driverSource,
-    /availability: "Catalog available"[\s\S]*?status: "Catalog ready"[\s\S]*?catalog: "Available"[\s\S]*?subscription: "Bound"/u,
+    settingsObservationSource,
+    /availability: "Ready"[\s\S]*?status: "Catalog ready"[\s\S]*?catalog: "Available"[\s\S]*?subscription: "Bound"/u,
   );
   assert.match(
-    driverSource,
+    settingsObservationSource,
     /getByRole\("status", \{[\s\S]*?name: `\$\{provider\} subscription authentication: Bound`,[\s\S]*?exact: true,[\s\S]*?\}\)/u,
   );
-  assert.match(driverSource, /assert\.equal\(await bindButtons\.count\(\), 0\)/u);
-  assert.match(driverSource, /assert\.equal\(await cancelButtons\.count\(\), 0\)/u);
-  assert.doesNotMatch(driverSource, /getByRole\("button", \{ name: \/\^Bind/u);
-  assert.doesNotMatch(driverSource, /getByRole\("button", \{ name: \/\^Cancel/u);
-  assert.doesNotMatch(driverSource, /(?:bindButtons|cancelButtons)\.click\(/u);
+  assert.match(settingsObservationSource, /assert\.equal\(await bindButtons\.count\(\), 0\)/u);
+  assert.match(settingsObservationSource, /assert\.equal\(await cancelButtons\.count\(\), 0\)/u);
+  assert.doesNotMatch(settingsObservationSource, /getByRole\("button", \{ name: \/\^Bind/u);
+  assert.doesNotMatch(settingsObservationSource, /getByRole\("button", \{ name: \/\^Cancel/u);
+  assert.doesNotMatch(settingsObservationSource, /(?:bindButtons|cancelButtons)\.click\(/u);
 });
 
-test("Settings keeps the exact public structure and no credential or invented-provider surface", () => {
+test("Settings keeps the exact public structure and no credential fields on subscription cards", () => {
   assert.match(
-    driverSource,
+    settingsObservationSource,
     /getByRole\("heading", \{ name: "Settings", exact: true, level: 1 \}\)/u,
   );
-  assert.match(driverSource, /assert\.deepEqual\(sections, \["Data recovery", "Providers", "Appearance"\]\)/u);
-  assert.match(driverSource, /assert\.equal\(await settingsPage\.locator\("input, textarea"\)\.count\(\), 0\)/u);
-  assert.match(driverSource, /assert\.equal\(await settingsPage\.locator\('input\[type="password"\]'\)\.count\(\), 0\)/u);
-  assert.match(driverSource, /Object\.freeze\(\["API key", "Add provider", "OpenCode"\] as const\)/u);
-  assert.match(driverSource, /assert\.equal\(await titlebarSettings\.count\(\), 0\)/u);
-  assert.match(driverSource, /assert\.equal\(await settingsHeadings\.count\(\), 1\)/u);
+  assert.match(settingsObservationSource, /assert\.deepEqual\(sections, \[[\s\S]*?"Appearance",[\s\S]*?"Providers",[\s\S]*?"Tools",[\s\S]*?"Usage & resets",[\s\S]*?"Claude permissions",?[\s\S]*?\]\)/u);
+  assert.match(settingsObservationSource, /subscriptionProviderCards\.locator\("input, textarea"\)\.count\(\)/u);
+  assert.match(settingsObservationSource, /subscriptionProviderCards\.locator\('input\[type="password"\]'\)\.count\(\)/u);
+  assert.match(settingsObservationSource, /Object\.freeze\(\["Add provider", "OpenCode"\] as const\)/u);
+  assert.match(settingsObservationSource, /assert\.equal\(await titlebarSettings\.count\(\), 0\)/u);
+  assert.match(settingsObservationSource, /assert\.equal\(await settingsHeadings\.count\(\), 1\)/u);
 });
 
 test("normal subscription discovery context is preserved while credential env is scrubbed", () => {

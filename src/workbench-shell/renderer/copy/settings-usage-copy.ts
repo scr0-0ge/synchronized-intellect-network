@@ -34,7 +34,7 @@ const simplifiedChineseCopy = {
   resets: (value: string) => `重置时间：${value}`,
   labelled: (label: string, value: string) => `${label}：${value}`,
   notYetObserved: "尚未观测",
-  notReported: "此 provider 的 CLI 不报告用量",
+  notReported: "此提供方的 CLI 不报告用量",
   providerName: {
     codex: "Codex",
     claude: "Claude · 订阅",

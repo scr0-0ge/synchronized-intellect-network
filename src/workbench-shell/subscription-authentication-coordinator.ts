@@ -48,7 +48,7 @@ export const WORKBENCH_SUBSCRIPTION_AUTHENTICATION_COPY = Object.freeze({
   // that it "asked" left the reader with a control that appeared to lead
   // nowhere.
   loginRequested:
-    "The Workbench asked the provider CLI to log in. The sign-in itself happens in the provider CLI, which runs here with no window and no console, so the Workbench cannot show anything it prints or asks. This card reports the sign-in state once that CLI exits. If you are still not signed in, run the provider CLI's own sign-in command in a terminal, then use Re-check sign-in.",
+    "The Workbench asked the provider CLI to log in. The sign-in itself happens in the provider CLI, which runs here with no window and no console, so the Workbench cannot show anything it prints or asks. This card reports the sign-in state once that CLI exits. If you are still not signed in, run the provider CLI's own sign-in command in a terminal, then use Check sign-in.",
   loginPartiallyCompleted:
     "The Workbench asked the provider CLI to log in but could not record the sign-in change. Sessions started before this login can no longer be resumed, even where the Workbench still offers to resume them.",
   logoutBlocked: "Log out is blocked.",
@@ -764,7 +764,7 @@ function renderCard(
       ? "Log out"
       : state.authentication === "sign-in-required"
         ? "Login"
-        : "Re-check sign-in";
+        : "Check sign-in";
   const confirmation = state.confirmation;
   return Object.freeze({
     label,

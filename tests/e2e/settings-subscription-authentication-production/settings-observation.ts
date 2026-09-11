@@ -79,20 +79,47 @@ export function createSettingsObservation(context: SettingsObservationContext) {
       0,
     );
 
+    setActiveStep("settings/structure/sections");
     const sections = (await settingsPage.getByRole("heading", { level: 2 }).allTextContents())
       .map((value) => value.trim());
-    assert.deepEqual(sections, ["Data recovery", "Providers", "Appearance"]);
+    assert.deepEqual(sections, [
+      "Appearance",
+      "Providers",
+      "Tools",
+      "Usage & resets",
+      "Claude permissions",
+    ]);
 
-    assert.equal(await settingsPage.locator("input, textarea").count(), 0);
-    assert.equal(await settingsPage.locator('input[type="password"]').count(), 0);
-    const unsupportedSurfaceLabels = Object.freeze(["API key", "Add provider", "OpenCode"] as const);
+    setActiveStep("settings/structure/provider-cards");
+    const providerCards = settingsPage.locator(
+      ".provider-endpoint-list > section.provider",
+    );
+    assert.equal(await providerCards.count(), 5);
+    assert.deepEqual(
+      (await providerCards.locator(":scope > .provider-head .ph-name").allTextContents())
+        .map((value) => value.trim()),
+      ["Codex", "Claude", "GLM", "DeepSeek", "Kimi"],
+    );
+    setActiveStep("settings/structure/subscription-cards");
+    const subscriptionProviderCards = settingsPage.locator(
+      ".provider-endpoint-list > section.provider.provider-codex, " +
+        ".provider-endpoint-list > section.provider.provider-claude",
+    );
+    assert.equal(await subscriptionProviderCards.count(), 2);
+    assert.equal(await subscriptionProviderCards.locator("input, textarea").count(), 0);
+    assert.equal(
+      await subscriptionProviderCards.locator('input[type="password"]').count(),
+      0,
+    );
+    setActiveStep("settings/structure/unsupported-actions");
+    const unsupportedSurfaceLabels = Object.freeze(["Add provider", "OpenCode"] as const);
     for (const label of unsupportedSurfaceLabels) {
       assert.equal(await settingsPage.getByText(label, { exact: true }).count(), 0);
     }
 
     setActiveStep("settings/catalog/initial-settle");
     const recheckCatalogs = settingsPage.getByRole("button", {
-      name: "Re-check all",
+      name: "Check all",
       exact: true,
     });
     await recheckCatalogs.waitFor({ state: "visible", timeout: 30_000 });
@@ -110,12 +137,16 @@ export function createSettingsObservation(context: SettingsObservationContext) {
       (await recheckCatalogs.isEnabled()),
     30_000);
 
-    const providerCards = settingsPage.locator("section.provider");
-    assert.equal(await providerCards.count(), 2);
+    for (let index = 0; index < await subscriptionProviderCards.count(); index += 1) {
+      const details = subscriptionProviderCards.nth(index).locator("details.provider-details");
+      assert.equal(await details.getAttribute("open"), null);
+      await details.locator(":scope > summary").click();
+      assert.notEqual(await details.getAttribute("open"), null);
+    }
 
     setActiveStep("settings/providers/settle");
     await eventually(async () => {
-      const observations = await collectPublicProviderObservations(providerCards);
+      const observations = await collectPublicProviderObservations(subscriptionProviderCards);
       onProviders(observations);
       return observations.every(
         (observation) =>
@@ -128,16 +159,16 @@ export function createSettingsObservation(context: SettingsObservationContext) {
       );
     }, 30_000);
 
-    const observations = await collectPublicProviderObservations(providerCards);
+    const observations = await collectPublicProviderObservations(subscriptionProviderCards);
     onProviders(observations);
     assert.equal(observations.length, providerNames.length);
     for (const [index, provider] of providerNames.entries()) {
-      const card = providerCards.nth(index);
+      const card = subscriptionProviderCards.nth(index);
       const observation = observations[index];
       assert.ok(observation);
       assert.deepEqual(observation, {
         name: provider,
-        availability: "Catalog available",
+        availability: "Ready",
         status: "Catalog ready",
         catalog: "Available",
         subscription: "Bound",
@@ -233,7 +264,9 @@ export function createSettingsObservation(context: SettingsObservationContext) {
     card: ReturnType<Page["locator"]>,
     label: "Status" | "Catalog",
   ): Promise<string> {
-    const rows = card.locator(":scope > .provider-body > dl.kv > .kv-row");
+    const rows = card.locator(
+      ":scope > .provider-body > details.provider-details > dl.kv > .kv-row",
+    );
     const matches: string[] = [];
     for (let index = 0; index < await rows.count(); index += 1) {
       const row = rows.nth(index);

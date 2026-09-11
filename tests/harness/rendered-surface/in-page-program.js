@@ -320,7 +320,16 @@ function describeExtents() {
   for (const selector of EXTENT_TARGETS) {
     const element = document.querySelector(selector);
     if (element === null) {
-      extents.push({ selector, present: false, signature: null, rect: null, content: null, declaredMaxWidth: null });
+      extents.push({
+        selector,
+        present: false,
+        signature: null,
+        rect: null,
+        content: null,
+        declaredMaxWidth: null,
+        scrollWidth: null,
+        clientWidth: null,
+      });
       continue;
     }
     const rect = element.getBoundingClientRect();
@@ -339,6 +348,8 @@ function describeExtents() {
         width: round(Math.max(0, rect.width - leftInset - rightInset)),
       },
       declaredMaxWidth: style.maxWidth,
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
     });
   }
   return extents;

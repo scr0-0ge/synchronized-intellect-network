@@ -58,6 +58,16 @@ test("Settings English copy exposes Appearance, Providers, Tools and Claude perm
     assert.equal(keys.includes("statusMeaningsHeading"), false);
     assert.equal(keys.includes("otherProvidersHeading"), false);
     assert.equal(keys.includes("catalogAvailableHeading"), false);
+    const visibleFreshnessCopy = dictionary.endpointCatalogFreshnessCopy;
+    assert.doesNotMatch(
+      [
+        visibleFreshnessCopy.enrolledListLabel,
+        visibleFreshnessCopy.silentFailureSentence,
+        visibleFreshnessCopy.unavailableSentence,
+      ].join(" "),
+      /catalog|sanitized|inspected|projection/iu,
+      "the collapsed card face must use product language rather than internal pipeline terms",
+    );
   }
 
   const serialized = JSON.stringify({

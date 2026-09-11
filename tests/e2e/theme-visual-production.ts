@@ -251,7 +251,13 @@ const VISUAL_STATES: readonly VisualState[] = Object.freeze([
 
 const SETTINGS_CONTRACT = Object.freeze({
   heading: "Settings",
-  sections: Object.freeze(["Data recovery", "Providers", "Appearance"]),
+  sections: Object.freeze([
+    "Appearance",
+    "Providers",
+    "Tools",
+    "Usage & resets",
+    "Claude permissions",
+  ]),
   groups: Object.freeze([
     Object.freeze({ label: "Tone", choices: Object.freeze(["Dark", "Light"]) }),
     Object.freeze({
@@ -276,12 +282,17 @@ const MEASUREMENT_TARGETS = Object.freeze([
   "appearance-crt-copy",
   "appearance-phosphor-copy",
   "appearance-phosphor-tier-copy",
-  "other-providers-copy",
-  "status-meaning-detail",
+  "providers-policy-copy",
+  "providers-policy-details",
   "codex-provider-name",
   "codex-endpoint-label",
   "claude-provider-name",
   "claude-endpoint-label",
+  "glm-provider-name",
+  "deepseek-provider-name",
+  "kimi-provider-name",
+  "tool-claude-name",
+  "tool-codex-name",
   "rail-provider-label",
   "rail-model-label",
 ]);
@@ -913,24 +924,29 @@ async function chooseAppearance(
   await button.click();
   await eventually(async () => (await button.getAttribute("aria-pressed")) === "true");
   await eventually(async () =>
-    ((await page.getByText(savedScope, { exact: true }).textContent()) ?? "").trim() ===
+    ((await page.locator(".appearance-section-head .settings-scope").textContent()) ?? "").trim() ===
       savedScope,
   );
 }
 
 async function inspectSettingsStructure(page: Page): Promise<Record<string, unknown>> {
-  const heading = page.getByRole("heading", {
+  const stepPrefix = activeStep;
+  const settingsPage = page.locator("main.settings");
+  activeStep = `${stepPrefix}/heading`;
+  const heading = settingsPage.getByRole("heading", {
     name: "Settings",
     exact: true,
     level: 1,
   });
   assert.equal(await heading.count(), 1);
-  const sections = (await page.getByRole("heading", { level: 2 }).allTextContents())
+  activeStep = `${stepPrefix}/sections`;
+  const sections = (await settingsPage.getByRole("heading", { level: 2 }).allTextContents())
     .map((value) => value.trim());
   assert.deepEqual(sections, SETTINGS_CONTRACT.sections);
   const groups: Array<Readonly<{ label: string; choices: readonly string[] }>> = [];
   for (const expected of SETTINGS_CONTRACT.groups) {
-    const group = page.getByRole("group", { name: expected.label, exact: true });
+    activeStep = `${stepPrefix}/group-${expected.label}`;
+    const group = settingsPage.getByRole("group", { name: expected.label, exact: true });
     assert.equal(await group.count(), 1);
     const choices = (await group.getByRole("button").allTextContents()).map(
       (value) => value.trim(),
@@ -938,23 +954,57 @@ async function inspectSettingsStructure(page: Page): Promise<Record<string, unkn
     assert.deepEqual(choices, expected.choices);
     groups.push(Object.freeze({ label: expected.label, choices: Object.freeze(choices) }));
   }
-  assert.equal(
-    await page.getByRole("region", { name: "Codex", exact: true }).count(),
-    1,
+  const providerRegions = ["Codex", "Claude", "GLM", "DeepSeek", "Kimi"];
+  for (const name of providerRegions) {
+    activeStep = `${stepPrefix}/provider-${name}`;
+    assert.equal(
+      await settingsPage.getByRole("region", { name, exact: true }).count(),
+      1,
+    );
+  }
+  const toolRegions = ["Claude Code CLI", "Codex CLI"];
+  for (const name of toolRegions) {
+    activeStep = `${stepPrefix}/tool-${name}`;
+    assert.equal(
+      await settingsPage.getByRole("region", { name, exact: true }).count(),
+      1,
+    );
+  }
+  const detailsGroups = [
+    settingsPage.locator(".providers-policy > details.settings-details"),
+    settingsPage.locator(
+      ".provider-endpoint-list > section.provider > .provider-body > details.provider-details",
+    ),
+    settingsPage.locator(
+      "section.tool-row > .provider-body > details.tool-details",
+    ),
+  ];
+  activeStep = `${stepPrefix}/details-count`;
+  assert.deepEqual(
+    await Promise.all(detailsGroups.map((details) => details.count())),
+    [1, 5, 2],
   );
-  assert.equal(
-    await page.getByRole("region", { name: "Claude", exact: true }).count(),
-    1,
-  );
+  for (const details of detailsGroups) {
+    activeStep = `${stepPrefix}/details-closed`;
+    for (let index = 0; index < await details.count(); index += 1) {
+      assert.equal(await details.nth(index).getAttribute("open"), null);
+    }
+  }
+  activeStep = `${stepPrefix}/session-accessible-name`;
+  const projectedSession = page.locator("button.session-row");
+  assert.equal(await projectedSession.count(), 1);
+  const projectedSessionAccessibleName = await projectedSession.getAttribute("aria-label");
+  activeStep = `${stepPrefix}/session-accessible-name-${projectedSessionAccessibleName}`;
   assert.equal(
     await page
       .getByRole("button", {
-        name: "Agent Session 01, Codex, Profile Alpha, Completed",
+        name: "Render the bounded visual fixture., Codex, Profile Alpha, Completed",
         exact: true,
       })
       .count(),
     1,
   );
+  activeStep = `${stepPrefix}/settings-current`;
   assert.equal(
     await page
       .getByRole("button", { name: "Settings", exact: true })
@@ -966,7 +1016,9 @@ async function inspectSettingsStructure(page: Page): Promise<Record<string, unkn
     heading: SETTINGS_CONTRACT.heading,
     sections: Object.freeze(sections),
     groups: Object.freeze(groups),
-    providerRegions: Object.freeze(["Codex", "Claude"]),
+    providerRegions: Object.freeze(providerRegions),
+    toolRegions: Object.freeze(toolRegions),
+    detailsClosed: true,
     projectedSessionAccessibleNameExact: true,
   });
 }
@@ -977,21 +1029,26 @@ function publicTextLocators(page: Page): readonly Readonly<{
 }>[] {
   const codex = page.getByRole("region", { name: "Codex", exact: true });
   const claude = page.getByRole("region", { name: "Claude", exact: true });
+  const glm = page.getByRole("region", { name: "GLM", exact: true });
+  const deepseek = page.getByRole("region", { name: "DeepSeek", exact: true });
+  const kimi = page.getByRole("region", { name: "Kimi", exact: true });
+  const claudeTool = page.locator("section.tool-claude");
+  const codexTool = page.locator("section.tool-codex");
   const session = page.getByRole("button", {
-    name: "Agent Session 01, Codex, Profile Alpha, Completed",
+    name: "Render the bounded visual fixture., Codex, Profile Alpha, Completed",
     exact: true,
   });
   return Object.freeze([
     Object.freeze({
       id: "settings-lede",
       locator: page.getByText(
-        "Inspect the sanitized status reported by existing Agent Runtime endpoints and adjust this Workbench installation’s appearance.",
+        "Providers, tools and appearance for this Workbench.",
         { exact: true },
       ),
     }),
     Object.freeze({
       id: "settings-scope",
-      locator: page.getByText(savedScope, { exact: true }),
+      locator: page.locator(".appearance-section-head .settings-scope"),
     }),
     Object.freeze({
       id: "appearance-tone-copy",
@@ -1017,22 +1074,22 @@ function publicTextLocators(page: Page): readonly Readonly<{
       ),
     }),
     Object.freeze({
-      id: "other-providers-copy",
-      locator: page
-        .getByRole("region", { name: "Other providers", exact: true })
-        .locator("p"),
+      id: "providers-policy-copy",
+      locator: page.locator(".providers-policy-line"),
     }),
     Object.freeze({
-      id: "status-meaning-detail",
-      locator: page
-        .getByRole("region", { name: "Status meanings", exact: true })
-        .locator("dd")
-        .first(),
+      id: "providers-policy-details",
+      locator: page.locator(".providers-policy > details.settings-details > summary"),
     }),
     Object.freeze({ id: "codex-provider-name", locator: codex.locator(".ph-name") }),
     Object.freeze({ id: "codex-endpoint-label", locator: codex.locator(".ph-sub") }),
     Object.freeze({ id: "claude-provider-name", locator: claude.locator(".ph-name") }),
     Object.freeze({ id: "claude-endpoint-label", locator: claude.locator(".ph-sub") }),
+    Object.freeze({ id: "glm-provider-name", locator: glm.locator(".ph-name") }),
+    Object.freeze({ id: "deepseek-provider-name", locator: deepseek.locator(".ph-name") }),
+    Object.freeze({ id: "kimi-provider-name", locator: kimi.locator(".ph-name") }),
+    Object.freeze({ id: "tool-claude-name", locator: claudeTool.locator(".ph-name") }),
+    Object.freeze({ id: "tool-codex-name", locator: codexTool.locator(".ph-name") }),
     Object.freeze({ id: "rail-provider-label", locator: session.locator(".rt-name") }),
     Object.freeze({ id: "rail-model-label", locator: session.locator(".sr-model") }),
   ]);
@@ -1174,7 +1231,7 @@ async function inspectPhosphor(
 ): Promise<PhosphorExpectation | null> {
   if (state.phosphorExpectation === undefined) return null;
   const session = page.getByRole("button", {
-    name: "Agent Session 01, Codex, Profile Alpha, Completed",
+    name: "Render the bounded visual fixture., Codex, Profile Alpha, Completed",
     exact: true,
   });
   const model = session.locator(".sr-model");

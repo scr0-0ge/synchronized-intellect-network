@@ -1240,7 +1240,7 @@ class OracleWorkbenchSubject implements F104AcceptanceSubject {
       ]);
     } else {
       actions = Object.freeze([
-        Object.freeze({ label: "Re-check sign-in", disabled: false }),
+        Object.freeze({ label: "Check sign-in", disabled: false }),
       ]);
     }
     const confirmation =

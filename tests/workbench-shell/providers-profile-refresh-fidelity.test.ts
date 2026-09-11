@@ -199,9 +199,17 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
     const unavailableCards = providerCards(unavailableProviders);
     assert.equal(unavailableCards.length, 2);
     assert.deepEqual(unavailableCards.map(plainText), [
-      "Codex Subscription CLI missing Subscription API Details Status Runtime not located Catalog Unavailable Not found under any name that was checked. Install or locate the Codex CLI under Tools. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Check sign-in",
-      "Claude Subscription CLI missing Subscription API Details Status Runtime not located Catalog Unavailable Not found under any name that was checked. Install or locate the Claude Code CLI under Tools. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Check sign-in",
+      "Codex Subscription CLI missing Subscription API Details Status Runtime not located Catalog Unavailable Not found under any name that was checked. Install or locate the Codex CLI under Tools. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Go to Tools to install",
+      "Claude Subscription CLI missing Subscription API Details Status Runtime not located Catalog Unavailable Not found under any name that was checked. Install or locate the Claude Code CLI under Tools. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Go to Tools to install",
     ]);
+    assert.match(
+      unavailableCards[0]!,
+      /<a[^>]*class="btn sm"[^>]*href="#tool-codex"[^>]*>Go to Tools to install<\/a>/u,
+    );
+    assert.match(
+      unavailableCards[1]!,
+      /<a[^>]*class="btn sm"[^>]*href="#tool-claude"[^>]*>Go to Tools to install<\/a>/u,
+    );
     assert.equal(unavailableText.match(/Check all/gu)?.length, 1);
 
     const categorizedProviders = renderProviders(
@@ -338,6 +346,20 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
       source,
       /const refreshDirectSessionProfileFromProviders = \(\): void =>[\s\S]*?beginDirectSessionProfileRefreshFromProviders/u,
     );
+    assert.match(
+      source,
+      /const recheckProviders = \(\): void => \{\s*refreshDirectSessionProfileFromProviders\(\);\s*refreshSubscriptionAuthentication\(\);\s*\};/u,
+      "the install success path and the visible Check all action must share one provider re-check",
+    );
+    const installRuntime = source.slice(
+      source.indexOf("const installRuntimeExecutable"),
+      source.indexOf("const endpointKeyPanels"),
+    );
+    assert.match(
+      installRuntime,
+      /if \(result\.ok\) \{\s*setRuntimeExecutables\(result\.executables\);\s*recheckProviders\(\);\s*\}/u,
+      "a successful private CLI install must immediately refresh cards and the status bar from the existing provider re-check",
+    );
     const surfaceTransition = source.slice(
       source.indexOf("const changeSurface"),
       source.indexOf("const selectCommand"),
@@ -352,7 +374,7 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
     );
     assert.match(
       source,
-      /onLoadProfile=\{loadDirectSessionProfile\}[\s\S]*?onRefreshProfile=\{\(\) => \{\s*refreshDirectSessionProfileFromProviders\(\);\s*refreshSubscriptionAuthentication\(\);\s*\}\}/u,
+      /onLoadProfile=\{loadDirectSessionProfile\}[\s\S]*?onRefreshProfile=\{recheckProviders\}/u,
     );
     const providersRoute = source.slice(source.indexOf("const WorkbenchScreen"));
     assert.match(
