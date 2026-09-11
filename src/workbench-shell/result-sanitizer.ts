@@ -24,6 +24,10 @@ import {
   publicRuntimeExecutableRejected,
   publicRuntimeExecutableUnavailable,
   WORKBENCH_RUNTIME_EXECUTABLE_PATH_MAX_LENGTH,
+  publicRuntimeInstalled,
+  publicRuntimeInstallFailed,
+  WORKBENCH_RUNTIME_INSTALL_DETAIL_MAX_LENGTH,
+  WORKBENCH_RUNTIME_INSTALL_VERSION_MAX_LENGTH,
   publicClaudePermissionHandlingSaved,
   publicClaudePermissionHandlingUnavailable,
   publicEndpointPreferencesLoaded,
@@ -93,6 +97,9 @@ import {
   type WorkbenchRuntimeExecutableSaveResult,
   type WorkbenchRuntimeExecutablesLoadResult,
   type WorkbenchClaudePermissionHandlingSaveResult,
+  type WorkbenchRuntimeInstallRequest,
+  type WorkbenchRuntimeInstallResult,
+  type WorkbenchRuntimeInstallStep,
   type WorkbenchFamilyEndpointPreference,
   type WorkbenchFamilyEndpointPreferences,
   type WorkbenchEndpointPreferenceLoadResult,
@@ -949,6 +956,96 @@ export function sanitizeWorkbenchRuntimeExecutableSaveResult(
     ) {
       return publicRuntimeExecutableRejected(
         value.error.reason as WorkbenchRuntimeExecutableRejection,
+      );
+    }
+    if (isRuntimeExecutableUnavailableResult(value)) {
+      return publicRuntimeExecutableUnavailable();
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return publicRuntimeExecutableUnavailable();
+}
+
+// Tabs and newlines are the shape of npm's output; every other control
+// character is not text.
+const runtimeInstallDetailControlCharacters =
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu;
+
+const runtimeInstallSteps: ReadonlySet<string> = new Set([
+  "node-not-located",
+  "npm-not-located",
+  "install-failed",
+  "not-discovered",
+]);
+
+export type WorkbenchRuntimeInstallRequestReconstruction =
+  | { readonly ok: true; readonly request: WorkbenchRuntimeInstallRequest }
+  | { readonly ok: false };
+
+export function reconstructWorkbenchRuntimeInstallRequest(
+  value: unknown,
+): WorkbenchRuntimeInstallRequestReconstruction {
+  try {
+    if (
+      isStrictDataRecord(value, ["runtime"]) &&
+      (value.runtime === "codex" || value.runtime === "claude")
+    ) {
+      return Object.freeze({
+        ok: true,
+        request: Object.freeze({ runtime: value.runtime }),
+      });
+    }
+  } catch {
+    // Accessor-like and proxy values fail closed at the renderer boundary.
+  }
+  return Object.freeze({ ok: false });
+}
+
+/**
+ * npm's last words are the one free-text field on this boundary. They are
+ * redacted and bounded on BOTH sides: the main handler before sending, and
+ * here again, because a string that reaches the renderer is a string a user
+ * will paste into a bug report.
+ */
+export function sanitizeWorkbenchRuntimeInstallDetail(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return redactFilesystemPaths(
+    value.replace(runtimeInstallDetailControlCharacters, " "),
+  ).slice(0, WORKBENCH_RUNTIME_INSTALL_DETAIL_MAX_LENGTH);
+}
+
+export function sanitizeWorkbenchRuntimeInstallResult(
+  value: unknown,
+): WorkbenchRuntimeInstallResult {
+  try {
+    if (
+      isStrictDataRecord(value, ["executables", "ok", "runtime", "status", "version"]) &&
+      value.ok === true &&
+      value.status === "installed" &&
+      (value.runtime === "codex" || value.runtime === "claude") &&
+      typeof value.version === "string" &&
+      value.version.length > 0 &&
+      value.version.length <= WORKBENCH_RUNTIME_INSTALL_VERSION_MAX_LENGTH &&
+      !runtimeExecutablePathControlCharacters.test(value.version)
+    ) {
+      const executables = reconstructRuntimeExecutablePaths(value.executables);
+      if (executables !== undefined) {
+        return publicRuntimeInstalled(value.runtime, value.version, executables);
+      }
+    }
+    if (
+      isStrictDataRecord(value, ["error", "ok"]) &&
+      value.ok === false &&
+      isStrictDataRecord(value.error, ["category", "detail", "message", "step"]) &&
+      value.error.category === "runtime-install-failed" &&
+      value.error.message === "The private copy could not be installed." &&
+      typeof value.error.step === "string" &&
+      runtimeInstallSteps.has(value.error.step)
+    ) {
+      return publicRuntimeInstallFailed(
+        value.error.step as WorkbenchRuntimeInstallStep,
+        sanitizeWorkbenchRuntimeInstallDetail(value.error.detail),
       );
     }
     if (isRuntimeExecutableUnavailableResult(value)) {

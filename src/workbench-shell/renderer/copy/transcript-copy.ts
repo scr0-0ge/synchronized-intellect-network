@@ -23,7 +23,6 @@ const englishCopy = {
       "Try another search or clear the filter to show every turn.",
     sessionStartedRule: "Session started",
     sessionEndedRule: "Session ended",
-    turnNotStarted: "Turn not started",
     failedTitle: "The Agent Session failed",
     failedBody:
       "Unknown failure: no specific runtime failure reason was recorded. Check the endpoint settings and the Project before starting replacement work.",
@@ -71,7 +70,7 @@ const englishCopy = {
     fileChangeLineCounts: (additions: number, deletions: number): string =>
       `+${additions}/-${deletions}`,
     fileChangesOmitted: (count: number): string =>
-      `${count} more ${count === 1 ? "file" : "files"} (collapsed)`,
+      `and ${count} more ${count === 1 ? "file" : "files"}`,
     interruptedBeforeMessage:
       "This turn was interrupted before an agent message was recorded.",
     noAgentMessageRecorded: "No agent message text was recorded for this turn.",
@@ -116,6 +115,9 @@ const englishCopy = {
     `${visible} of ${total} turns`,
   turnOrdinalCopy: (index: number): string => `Turn ${index}`,
   guidanceTurnOrdinalCopy: (index: number): string => `Guidance · Turn ${index}`,
+  /** Pairs with the recovery card's `Turn N · Outcome unknown` so the two
+   * never state opposite things about the same turn (issue w195). */
+  turnNotStartedOrdinalCopy: (index: number): string => `Turn ${index} · Not started`,
   eventsDisclosureCopy: (count: number): string =>
     `${count} ${count === 1 ? "event" : "events"}`,
   effectiveNotRecordedCopy: (noun: string): string =>
@@ -157,7 +159,6 @@ const simplifiedChineseCopy = {
     noSearchResultsBody: "请尝试其他搜索词，或清除筛选以显示全部回合。",
     sessionStartedRule: "会话已开始",
     sessionEndedRule: "会话已结束",
-    turnNotStarted: "回合未启动",
     failedTitle: "智能体会话失败",
     failedBody:
       "未知失败：未记录具体的运行时失败原因。开始替代工作前，请检查端点设置及项目状态。",
@@ -203,7 +204,7 @@ const simplifiedChineseCopy = {
     fileChangeLineCounts: (additions: number, deletions: number): string =>
       `+${additions}/-${deletions}`,
     fileChangesOmitted: (count: number): string =>
-      `另 ${count} 个文件（已折叠）`,
+      `另有 ${count} 个文件`,
     interruptedBeforeMessage: "此回合在记录智能体消息前已中断。",
     noAgentMessageRecorded: "此回合没有记录智能体消息文本。",
     eventLogAria: "回合的标准化持久化事件",
@@ -247,6 +248,7 @@ const simplifiedChineseCopy = {
     `显示 ${visible} / ${total} 个回合`,
   turnOrdinalCopy: (index: number): string => `回合 ${index}`,
   guidanceTurnOrdinalCopy: (index: number): string => `引导 · 回合 ${index}`,
+  turnNotStartedOrdinalCopy: (index: number): string => `回合 ${index} · 未启动`,
   eventsDisclosureCopy: (count: number): string => `${count} 个事件`,
   effectiveNotRecordedCopy: (noun: string): string => `未记录${noun}`,
   effectiveUnobservedCopy: (noun: string): string => `未观测到生效${noun}`,
@@ -334,6 +336,10 @@ export function turnOrdinalCopy(index: number): string {
 
 export function guidanceTurnOrdinalCopy(index: number): string {
   return currentLocaleCopy(copyLocaleDictionaries).guidanceTurnOrdinalCopy(index);
+}
+
+export function turnNotStartedOrdinalCopy(index: number): string {
+  return currentLocaleCopy(copyLocaleDictionaries).turnNotStartedOrdinalCopy(index);
 }
 
 export function eventsDisclosureCopy(count: number): string {

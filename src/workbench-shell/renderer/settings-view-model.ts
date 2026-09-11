@@ -4,6 +4,7 @@ import type {
   WorkbenchRuntimeEndpointDiscoveryCategory,
   WorkbenchRuntimeEndpointId,
   WorkbenchRuntimeExecutableRejection,
+  WorkbenchRuntimeInstallStep,
   WorkbenchSubscriptionAuthenticationAction,
   WorkbenchSubscriptionAuthenticationBlockers,
   WorkbenchSubscriptionAuthenticationPublicResponse,
@@ -545,6 +546,36 @@ export function settingsRailPresentation(
 export interface SettingsRuntimeExecutablePhase {
   readonly status: "saving" | "saved" | "cleared" | "rejected" | "unavailable";
   readonly rejection?: WorkbenchRuntimeExecutableRejection;
+}
+
+/**
+ * The product installing the runtime for the user. Four states; absence is
+ * "not installed". `installing` carries only when it started, because npm
+ * reports no real progress and a bar without one would be a fiction --
+ * elapsed time is the truth available. A `failed` phase without a `step` is
+ * the installer being unreachable, not a step it reached.
+ */
+export type SettingsRuntimeInstallPhase =
+  | { readonly status: "installing"; readonly startedAt: number }
+  | { readonly status: "installed"; readonly version: string }
+  | {
+      readonly status: "failed";
+      readonly step?: WorkbenchRuntimeInstallStep;
+      readonly detail: string;
+    };
+
+const privateCliInstallMarker = "\\synchronized-intellect-network\\runtime\\cli\\";
+
+/**
+ * Whether a configured path is the product's own private install. After a
+ * restart the session phase is gone but the durable path remains, and it says
+ * "installed" on its own.
+ */
+export function isPrivateCliInstallPath(executablePath: string | undefined): boolean {
+  return (
+    typeof executablePath === "string" &&
+    executablePath.toLowerCase().includes(privateCliInstallMarker)
+  );
 }
 
 export function appearancePersistencePresentation(

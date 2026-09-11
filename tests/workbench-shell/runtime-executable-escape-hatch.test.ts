@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
+  WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL,
   WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
   WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
   defaultWorkbenchRuntimeExecutablePaths,
@@ -340,7 +341,7 @@ test("no rejection reason carries a filesystem path across the boundary [8 asser
   );
 });
 
-test("both fixed channels are registered and released", () => {
+test("all three fixed channels are registered and released", () => {
   const ipcMain = new FakeIpcMain();
   const sender = new FakeSender();
   const binding = installWorkbenchRuntimeExecutableIpc({
@@ -355,6 +356,7 @@ test("both fixed channels are registered and released", () => {
   assert.deepEqual([...ipcMain.handlers.keys()].sort(), [
     WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
     WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
+    WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL,
   ].sort());
   binding.dispose();
   assert.deepEqual([...ipcMain.handlers.keys()], []);

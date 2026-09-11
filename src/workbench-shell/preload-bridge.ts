@@ -23,6 +23,7 @@ import {
   WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL,
   WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
   WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
+  WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL,
   publicRuntimeExecutableUnavailable,
   WORKBENCH_LOAD_PROFILE_CHANNEL,
   WORKBENCH_INTERRUPT_CHANNEL,
@@ -72,6 +73,8 @@ import {
   type WorkbenchClaudePermissionHandlingLoadResult,
   type WorkbenchRuntimeExecutableSaveRequest,
   type WorkbenchRuntimeExecutableSaveResult,
+  type WorkbenchRuntimeInstallRequest,
+  type WorkbenchRuntimeInstallResult,
   type WorkbenchRuntimeExecutablesLoadResult,
   type WorkbenchClaudePermissionHandlingSaveResult,
   type WorkbenchFamilyEndpointPreference,
@@ -146,6 +149,8 @@ import {
   sanitizeWorkbenchRuntimeExecutablesLoadResult,
   sanitizeWorkbenchRuntimeExecutableSaveResult,
   reconstructWorkbenchRuntimeExecutableSaveRequest,
+  reconstructWorkbenchRuntimeInstallRequest,
+  sanitizeWorkbenchRuntimeInstallResult,
   sanitizeWorkbenchClaudePermissionHandlingSaveResult,
   sanitizeWorkbenchEndpointPreferenceLoadResult,
   sanitizeWorkbenchEndpointPreferenceSaveResult,
@@ -256,6 +261,7 @@ export interface FixedProjectViewIpc {
       | WorkbenchEndpointKeyChannel
       | typeof WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL
       | typeof WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL
+      | typeof WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL
       | typeof WORKBENCH_HISTORY_RECOVERY_BROWSE_CHANNEL
       | typeof WORKBENCH_HISTORY_RECOVERY_CANCEL_CHANNEL
       | typeof WORKBENCH_HISTORY_RECOVERY_PERFORM_CHANNEL
@@ -879,6 +885,22 @@ export function createWorkbenchPreloadBridge(
         return sanitizeWorkbenchRuntimeExecutableSaveResult(
           await ipc.invoke(
             WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
+            reconstructed.request,
+          ),
+        );
+      } catch {
+        return publicRuntimeExecutableUnavailable();
+      }
+    },
+    async installRuntimeExecutable(
+      request: WorkbenchRuntimeInstallRequest,
+    ): Promise<WorkbenchRuntimeInstallResult> {
+      const reconstructed = reconstructWorkbenchRuntimeInstallRequest(request);
+      if (!reconstructed.ok) return publicRuntimeExecutableUnavailable();
+      try {
+        return sanitizeWorkbenchRuntimeInstallResult(
+          await ipc.invoke(
+            WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL,
             reconstructed.request,
           ),
         );

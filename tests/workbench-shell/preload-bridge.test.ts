@@ -68,6 +68,7 @@ const expectedWorkbenchPreloadBridgeKeys = Object.freeze([
   "getSnapshot",
   "hideProjectHistory",
   "inspectSubscriptionAuthentication",
+  "installRuntimeExecutable",
   "interruptActiveTurn",
   "loadAppearancePreference",
   "loadClaudePermissionHandling",

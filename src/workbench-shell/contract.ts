@@ -65,6 +65,8 @@ export const WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL =
   "workbench:load-runtime-executables";
 export const WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL =
   "workbench:save-runtime-executable";
+export const WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL =
+  "workbench:install-runtime-executable";
 export const WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL =
   "workbench:inspect-subscription-authentication";
 export const WORKBENCH_BIND_SUBSCRIPTION_AUTHENTICATION_CHANNEL =
@@ -421,6 +423,48 @@ export interface WorkbenchRuntimeExecutableSaveRequest {
   /** An empty string clears the override and returns to ordinary discovery. */
   readonly executablePath: string;
 }
+
+/**
+ * The product installing a runtime for the user, into its own private
+ * directory, then pointing the escape hatch at it. Same durable store, same
+ * discovery seam, one more way to fill the field.
+ */
+export interface WorkbenchRuntimeInstallRequest {
+  readonly runtime: WorkbenchConfigurableRuntime;
+}
+
+/** Which step an install stopped at; a FIXED vocabulary, like the rejections. */
+export type WorkbenchRuntimeInstallStep =
+  | "node-not-located"
+  | "npm-not-located"
+  | "install-failed"
+  | "not-discovered";
+
+/** npm's own last words, path-redacted and bounded before they cross. */
+export const WORKBENCH_RUNTIME_INSTALL_DETAIL_MAX_LENGTH = 2_048;
+export const WORKBENCH_RUNTIME_INSTALL_VERSION_MAX_LENGTH = 64;
+
+export interface WorkbenchRuntimeInstallFailedFailure {
+  readonly category: "runtime-install-failed";
+  readonly message: "The private copy could not be installed.";
+  readonly step: WorkbenchRuntimeInstallStep;
+  readonly detail: string;
+}
+
+export type WorkbenchRuntimeInstallResult =
+  | {
+      readonly ok: true;
+      readonly status: "installed";
+      readonly runtime: WorkbenchConfigurableRuntime;
+      readonly version: string;
+      readonly executables: WorkbenchRuntimeExecutablePaths;
+    }
+  | {
+      readonly ok: false;
+      readonly error:
+        | WorkbenchRuntimeInstallFailedFailure
+        | WorkbenchRuntimeExecutableUnavailableFailure;
+    };
 
 /**
  * Same closed activity vocabulary as the runtime's progress events; the
@@ -1788,6 +1832,9 @@ export interface WorkbenchRendererBridge
   saveRuntimeExecutable(
     request: WorkbenchRuntimeExecutableSaveRequest,
   ): Promise<WorkbenchRuntimeExecutableSaveResult>;
+  installRuntimeExecutable?(
+    request: WorkbenchRuntimeInstallRequest,
+  ): Promise<WorkbenchRuntimeInstallResult>;
   createProject(): Promise<WorkbenchCreateProjectResult>;
   openProject(): Promise<WorkbenchOpenProjectResult>;
   selectProject(
@@ -1981,6 +2028,38 @@ export function publicRuntimeExecutableUnavailable(): Extract<
       category: "runtime-executable-unavailable",
       message:
         "The executable path could not be loaded or saved. Keep the current value and try again.",
+    }),
+  });
+}
+
+export function publicRuntimeInstalled(
+  runtime: WorkbenchConfigurableRuntime,
+  version: string,
+  executables: WorkbenchRuntimeExecutablePaths,
+): WorkbenchRuntimeInstallResult {
+  return Object.freeze({
+    ok: true,
+    status: "installed",
+    runtime,
+    version,
+    executables: Object.freeze({
+      codex: executables.codex,
+      claude: executables.claude,
+    }),
+  });
+}
+
+export function publicRuntimeInstallFailed(
+  step: WorkbenchRuntimeInstallStep,
+  detail: string,
+): Extract<WorkbenchRuntimeInstallResult, { readonly ok: false }> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "runtime-install-failed",
+      message: "The private copy could not be installed.",
+      step,
+      detail,
     }),
   });
 }

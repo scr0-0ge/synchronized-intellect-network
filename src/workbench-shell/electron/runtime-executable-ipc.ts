@@ -4,23 +4,34 @@ import {
   type LaunchRejection,
   type WindowsRuntimeLaunchAdmission,
 } from "../../agent-runtime/windows-executable-admission.ts";
+import {
+  provisionRuntimeCli,
+  type CliProvisioningOutcome,
+} from "../../agent-runtime/cli-provisioning.ts";
 import { setConfiguredRuntimeExecutable } from "../../agent-runtime/configured-executable.ts";
 import {
   CLAUDE_RUNTIME_LOOKUP_SURFACE,
   CODEX_RUNTIME_LOOKUP_SURFACE,
 } from "../../agent-runtime/runtime-lookup-surface.ts";
 import {
+  WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL,
   WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
   WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
   publicRuntimeExecutableRejected,
   publicRuntimeExecutableSaved,
   publicRuntimeExecutableUnavailable,
   publicRuntimeExecutablesLoaded,
+  publicRuntimeInstallFailed,
+  publicRuntimeInstalled,
   type WorkbenchConfigurableRuntime,
   type WorkbenchRuntimeExecutablePaths,
   type WorkbenchRuntimeExecutableRejection,
 } from "../contract.ts";
-import { reconstructWorkbenchRuntimeExecutableSaveRequest } from "../result-sanitizer.ts";
+import {
+  reconstructWorkbenchRuntimeExecutableSaveRequest,
+  reconstructWorkbenchRuntimeInstallRequest,
+  sanitizeWorkbenchRuntimeInstallDetail,
+} from "../result-sanitizer.ts";
 
 type BoundaryListener = (...values: unknown[]) => unknown;
 
@@ -36,18 +47,14 @@ export interface RuntimeExecutableBrowserWindowBoundary {
   removeListener(event: "closed", listener: BoundaryListener): void;
 }
 
+type RuntimeExecutableChannel =
+  | typeof WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL
+  | typeof WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL
+  | typeof WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL;
+
 export interface RuntimeExecutableIpcMainBoundary {
-  handle(
-    channel:
-      | typeof WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL
-      | typeof WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
-    listener: BoundaryListener,
-  ): void;
-  removeHandler(
-    channel:
-      | typeof WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL
-      | typeof WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL,
-  ): void;
+  handle(channel: RuntimeExecutableChannel, listener: BoundaryListener): void;
+  removeHandler(channel: RuntimeExecutableChannel): void;
 }
 
 export interface WorkbenchRuntimeExecutableSource {
@@ -98,6 +105,15 @@ export type RuntimeExecutableAdmission = (
   executablePath: string,
 ) => Promise<WindowsRuntimeLaunchAdmission>;
 
+/** Installs the runtime into the private directory; production runs npm. */
+export type RuntimeExecutableProvisioning = (
+  runtime: WorkbenchConfigurableRuntime,
+  publish: (runtime: WorkbenchConfigurableRuntime, value: string) => void,
+) => Promise<CliProvisioningOutcome>;
+
+const productionProvisioning: RuntimeExecutableProvisioning = (runtime, publish) =>
+  provisionRuntimeCli(runtime, { publish });
+
 const productionAdmission: RuntimeExecutableAdmission = (
   runtime,
   executablePath,
@@ -115,15 +131,20 @@ export function installWorkbenchRuntimeExecutableIpc(options: {
   readonly window: RuntimeExecutableBrowserWindowBoundary;
   readonly source: WorkbenchRuntimeExecutableSource;
   readonly admit?: RuntimeExecutableAdmission;
+  readonly provision?: RuntimeExecutableProvisioning;
   readonly publish?: (
     runtime: WorkbenchConfigurableRuntime,
     value: string | undefined,
   ) => void;
 }): WorkbenchRuntimeExecutableIpcBinding {
   const admit = options.admit ?? productionAdmission;
+  const provision = options.provision ?? productionProvisioning;
   const publish = options.publish ?? setConfiguredRuntimeExecutable;
   let disposed = false;
   let actionOpen = true;
+  // One npm at a time per runtime: two installs into the same directory would
+  // race each other's files.
+  const installing = new Set<WorkbenchConfigurableRuntime>();
 
   const loadHandler: BoundaryListener = async (...values) => {
     const sender = owningSender(values[0], options.window);
@@ -180,12 +201,52 @@ export function installWorkbenchRuntimeExecutableIpc(options: {
     }
   };
 
+  // The product installing the runtime for the user. The result is the same
+  // durable store write the Save button makes, with the path the installer
+  // produced; "installed" means the product's own discovery located that copy.
+  const installHandler: BoundaryListener = async (...values) => {
+    const sender = owningSender(values[0], options.window);
+    if (values.length !== 2 || disposed || !actionOpen || sender === undefined) {
+      return publicRuntimeExecutableUnavailable();
+    }
+    const reconstructed = reconstructWorkbenchRuntimeInstallRequest(values[1]);
+    if (!reconstructed.ok) return publicRuntimeExecutableUnavailable();
+    const { runtime } = reconstructed.request;
+    if (installing.has(runtime)) return publicRuntimeExecutableUnavailable();
+    installing.add(runtime);
+    try {
+      const outcome = await provision(runtime, publish);
+      if (outcome.kind === "failed") {
+        return publicRuntimeInstallFailed(
+          outcome.step,
+          sanitizeWorkbenchRuntimeInstallDetail(outcome.detail),
+        );
+      }
+      const current = await options.source.readRuntimeExecutables();
+      const saved = await options.source.saveRuntimeExecutables(
+        Object.freeze({
+          codex: runtime === "codex" ? outcome.configuredPath : current.codex,
+          claude: runtime === "claude" ? outcome.configuredPath : current.claude,
+        }),
+      );
+      if (disposed || !actionOpen || sender.isDestroyed()) {
+        return publicRuntimeExecutableUnavailable();
+      }
+      return publicRuntimeInstalled(runtime, outcome.version, saved);
+    } catch {
+      return publicRuntimeExecutableUnavailable();
+    } finally {
+      installing.delete(runtime);
+    }
+  };
+
   const terminalLifecycleListener: BoundaryListener = () => {
     actionOpen = false;
   };
 
   options.ipcMain.handle(WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL, loadHandler);
   options.ipcMain.handle(WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL, saveHandler);
+  options.ipcMain.handle(WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL, installHandler);
   // Captured while the window is still alive. Reading the `webContents`
   // getter on a destroyed BrowserWindow throws `Object has been destroyed`,
   // and dispose() runs from the window's own "closed" handler, where the
@@ -203,6 +264,7 @@ export function installWorkbenchRuntimeExecutableIpc(options: {
       actionOpen = false;
       options.ipcMain.removeHandler(WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL);
+      options.ipcMain.removeHandler(WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL);
       rendererSender.removeListener(
         "render-process-gone",
         terminalLifecycleListener,

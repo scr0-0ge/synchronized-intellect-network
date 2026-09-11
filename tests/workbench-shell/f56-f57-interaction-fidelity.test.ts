@@ -1256,7 +1256,7 @@ test(
   },
 );
 
-test("non-empty drafts visibly disable every prompt suggestion with a localized reason until cleared", { timeout: 45_000 }, async () => {
+test("non-empty drafts visibly disable every prompt suggestion with a localized reason until cleared, and whitespace-only drafts do not count as a draft", { timeout: 45_000 }, async () => {
   for (const [locale, reason] of [
     ["en", "Clear the current draft before choosing a suggested follow-up."],
     ["zh-CN", "请先清空当前草稿，再选择追问建议。"],
@@ -1265,23 +1265,37 @@ test("non-empty drafts visibly disable every prompt suggestion with a localized 
     try {
       const suggestions = page.locator(".prompt-suggestion");
       const input = page.locator("#direct-input");
+      const blockedReason = page.locator("#prompt-suggestions-blocked-reason");
       await suggestions.first().waitFor({ state: "visible" });
       const labels = await suggestions.allTextContents();
       assert.equal(labels.length, 2);
 
-      for (const draft of ["Keep this draft exactly as written.", "   "]) {
-        await input.fill(draft);
-        assert.deepEqual(
-          await suggestions.evaluateAll((buttons) => buttons.map((button) => ({
-            disabled: (button as HTMLButtonElement).disabled,
-            title: (button as HTMLButtonElement).title,
-          }))),
-          labels.map(() => ({ disabled: true, title: reason })),
-          `${locale}: a non-empty draft must visibly disable every suggestion and explain why`,
-        );
-        await suggestions.evaluateAll((buttons) => buttons.forEach((button) => (button as HTMLButtonElement).click()));
-        assert.equal(await input.inputValue(), draft, "disabled suggestions preserve the exact draft");
-      }
+      await input.fill("Keep this draft exactly as written.");
+      assert.deepEqual(
+        await suggestions.evaluateAll((buttons) => buttons.map((button) => ({
+          disabled: (button as HTMLButtonElement).disabled,
+          title: (button as HTMLButtonElement).title,
+          describedBy: button.getAttribute("aria-describedby"),
+        }))),
+        labels.map(() => ({ disabled: true, title: reason, describedBy: "prompt-suggestions-blocked-reason" })),
+        `${locale}: a non-empty draft must visibly disable every suggestion, explain why in the title, and reference a visible reason`,
+      );
+      assert.equal(await blockedReason.innerText(), reason, `${locale}: the disabled reason must also be visible text, not only a title`);
+      await suggestions.evaluateAll((buttons) => buttons.forEach((button) => (button as HTMLButtonElement).click()));
+      assert.equal(await input.inputValue(), "Keep this draft exactly as written.", "disabled suggestions preserve the exact draft");
+
+      await input.fill("   ");
+      assert.deepEqual(
+        await suggestions.evaluateAll((buttons) => buttons.map((button) => ({
+          disabled: (button as HTMLButtonElement).disabled,
+          title: (button as HTMLButtonElement).title,
+        }))),
+        labels.map((label) => ({ disabled: false, title: label })),
+        `${locale}: a whitespace-only draft is not a real draft and must not block the suggestions`,
+      );
+      assert.equal(await blockedReason.count(), 0, `${locale}: no blocked reason is shown when the draft is whitespace-only`);
+      await suggestions.first().click();
+      assert.equal(await input.inputValue(), "Check the remaining tests", "clicking a suggestion over a whitespace-only draft replaces it");
 
       await input.fill("");
       assert.deepEqual(
@@ -1296,6 +1310,34 @@ test("non-empty drafts visibly disable every prompt suggestion with a localized 
       assert.equal(await input.inputValue(), "Check the remaining tests");
       assert.equal(await page.evaluate(() => document.documentElement.dataset.qaSubmissionCalls), "0");
     } finally { await application.close(); }
+  }
+});
+
+test("the follow-up suggestion row never overflows and every suggestion stays fully readable at 1440, 900 and 620 wide (w195)", { timeout: 45_000 }, async () => {
+  for (const width of [1_440, 900, 620]) {
+    const { application, page } = await openHarness(width, 900, "scenario=prompt-suggestions");
+    try {
+      const list = page.locator(".prompt-suggestion-list");
+      await list.waitFor({ state: "visible" });
+      const overflow = await list.evaluate((element) => ({
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      }));
+      assert.ok(
+        overflow.scrollWidth <= overflow.clientWidth,
+        `${width}px wide: scrollWidth ${overflow.scrollWidth} must not exceed clientWidth ${overflow.clientWidth}`,
+      );
+      assert.deepEqual(
+        await page.locator(".prompt-suggestion").allTextContents(),
+        [
+          "Check the remaining tests",
+          "Explain the implementation trade-off",
+        ],
+        `${width}px wide: every suggestion must render its full text, none clipped out of view`,
+      );
+    } finally {
+      await application.close();
+    }
   }
 });
 

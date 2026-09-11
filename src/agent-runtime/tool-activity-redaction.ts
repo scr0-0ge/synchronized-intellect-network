@@ -6,24 +6,36 @@ const quotedCredentialHeader = new RegExp(
   "giu",
 );
 const unquotedCredentialHeader = new RegExp(
-  `(\\b${credentialHeaderNames}\\s*:\\s*)(?:(?:bearer|basic|token|apikey)\\s+)?[^\\s"';&|]+`,
+  `(\\b${credentialHeaderNames}\\s*:\\s*)(?:(?:bearer|basic|token|apikey)\\s+)?[^\\s"';&|<>]+`,
   "giu",
 );
 const ghTokenArgument =
-  /(^|[\s;&|])(gh(?:\.exe)?\s+auth\s+login\b[^;&|\r\n]*?--with-token)(\s+)(?:"[^"]*"|'[^']*'|(?!-)[^\s"';&|]+)/giu;
+  /(^|[\s;&|])(gh(?:\.exe)?\s+auth\s+login\b[^;&|\r\n]*?--with-token)(\s+)(?:"[^"]*"|'[^']*'|(?!-)[^\s"';&|<>]+)/giu;
+const echoedGhTokenInput =
+  /(^|[\s;&|])(echo)(\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)(\s*\|\s*gh(?:\.exe)?\s+auth\s+login\b[^;&|\r\n]*?--with-token\b)/giu;
 const curlUserInfoFlag =
-  /(^|[\s;&|])(curl(?:\.exe)?\b[^;&|\r\n]*?\s(?:-u|--user))(\s*=\s*|\s+)(?:"[^"]*:[^"]*"|'[^']*:[^']*'|[^\s"';&|]+:[^\s"';&|]+)/giu;
+  /(^|[\s;&|])(curl(?:\.exe)?\b[^;&|\r\n]*?\s(?:-u|--user))(\s*=\s*|\s+)(?:"[^"]*:[^"]*"|'[^']*:[^']*'|[^\s"';&|<>]+:[^\s"';&|<>]+)/giu;
 const shortPasswordFlag =
-  /(^|[\s;&|])((?:docker\s+login|az\s+login)\b[^;&|\r\n]*?\s-p)(\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|]+)/giu;
+  /(^|[\s;&|])((?:docker\s+login|az\s+login)\b[^;&|\r\n]*?\s-p)(\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
+const sshpassPasswordFlag =
+  /(^|[\s;&|])(sshpass(?:\.exe)?\b[^;&|\r\n]*?\s-p)(\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
+const redisPasswordFlag =
+  /(^|[\s;&|])(redis-cli(?:\.exe)?\b[^;&|\r\n]*?\s-a)(\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
+const vaultLoginToken =
+  /(^|[\s;&|])(vault(?:\.exe)?\s+login\b)(\s+)(?:"[^"]*"|'[^']*'|(?!-)[^\s"';&|<>]+)/giu;
+const ghSecretBody =
+  /(^|[\s;&|])(gh(?:\.exe)?\s+secret\s+set\b[^;&|\r\n]*?\s--body)(\s*=\s*|\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
+const dockerPasswordStdinHereString =
+  /(^|[\s;&|])(docker(?:\.exe)?\s+login\b[^;&|\r\n]*?--password-stdin\b[^;&|\r\n]*?)(\s*<<<\s*)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
 const attachedMysqlPassword =
-  /(^|[\s;&|])(mysql(?:\.exe)?\b[^;&|\r\n]*?\s-p)(?:"[^"]*"|'[^']*'|[^\s"';&|]+)/giu;
+  /(^|[\s;&|])(mysql(?:\.exe)?\b[^;&|\r\n]*?\s-p)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
 const positionalCredentialValue =
-  /(^|[\s;&|])((?:aws(?:\.exe)?\s+configure\s+set\s+(?:aws_secret_access_key|aws_access_key_id|aws_session_token)|npm(?:\.cmd|\.exe)?\s+config\s+set\s+(?:(?:\/\/[^\s;&|]+:)?_authToken)))(\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|]+)/giu;
+  /(^|[\s;&|])((?:aws(?:\.exe)?\s+configure\s+set\s+(?:aws_secret_access_key|aws_access_key_id|aws_session_token)|npm(?:\.cmd|\.exe)?\s+config\s+set\s+(?:(?:\/\/[^\s;&|]+:)?_authToken)))(\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
 const credentialFlag =
-  /(^|[\s;&|])(--?(?:api[-_]?key|auth(?:orization)?|auth[-_]?token|access[-_]?token|refresh[-_]?token|client[-_]?secret|secret[-_]?key|private[-_]?key|token|password|passwd|secret|credentials?))(\s*=\s*|\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|]+)/giu;
+  /(^|[\s;&|])(--?(?:api[-_]?key|auth(?:orization)?|auth[-_]?token|access[-_]?token|refresh[-_]?token|client[-_]?secret|secret[-_]?key|private[-_]?key|token|password|passwd|secret|credentials?))(\s*=\s*|\s+)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
 const credentialEnvironmentAssignment =
-  /(^|[\s;&|=])((?:\$env:)?(?:[A-Za-z][A-Za-z0-9_]*_)?(?:api_key|apikey|access_key|secret_key|private_key|auth|authorization|token|auth_token|access_token|refresh_token|secret|client_secret|password|passwd|credentials?))(\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s"';&|]+)/giu;
-const credentialUrlUserInfo = /(:\/\/)[^/\s:@]+:[^@\s/]+@/gu;
+  /(^|[\s;&|=])((?:\$env:)?(?:[A-Za-z][A-Za-z0-9_]*_)?(?:api_key|apikey|access_key|secret_key|private_key|auth|authorization|token|auth_token|access_token|refresh_token|secret|client_secret|password|passwd|credentials?))(\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s"';&|<>]+)/giu;
+const credentialUrlUserInfo = /(:\/\/)[^/\s:@|]+:[^@\s/|]+@/gu;
 
 /** Replaces recognizable command-line credential values before display truncation. */
 export function redactToolActivityCredentials(value: string): string {
@@ -34,9 +46,15 @@ export function redactToolActivityCredentials(value: string): string {
         `${quote}${header} <redacted>${quote}`,
     )
     .replace(unquotedCredentialHeader, "$1<redacted>")
+    .replace(echoedGhTokenInput, "$1$2$3<redacted>$4")
     .replace(ghTokenArgument, "$1$2$3<redacted>")
     .replace(curlUserInfoFlag, "$1$2$3<redacted>")
     .replace(shortPasswordFlag, "$1$2$3<redacted>")
+    .replace(sshpassPasswordFlag, "$1$2$3<redacted>")
+    .replace(redisPasswordFlag, "$1$2$3<redacted>")
+    .replace(vaultLoginToken, "$1$2$3<redacted>")
+    .replace(ghSecretBody, "$1$2$3<redacted>")
+    .replace(dockerPasswordStdinHereString, "$1$2$3<redacted>")
     .replace(attachedMysqlPassword, "$1$2<redacted>")
     .replace(positionalCredentialValue, "$1$2$3<redacted>")
     .replace(

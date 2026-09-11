@@ -2,7 +2,9 @@ import { SettingsSubscriptionUsage } from "./settings-subscription-usage.tsx";
 import {
   For,
   Show,
+  createEffect,
   createSignal,
+  on,
   onCleanup,
   onMount,
   useContext,
@@ -49,7 +51,9 @@ import {
   settingsProviderAvailabilityPresentation,
   settingsProviderStatusMeanings,
   settingsSubscriptionAuthenticationPresentation,
+  isPrivateCliInstallPath,
   type SettingsRuntimeExecutablePhase,
+  type SettingsRuntimeInstallPhase,
   type SettingsSubscriptionAuthenticationEntry,
   type SettingsSubscriptionAuthenticationState,
 } from "./settings-view-model.ts";
@@ -63,6 +67,8 @@ import { endpointIdentityCopy } from "./copy/runtime-profile-copy.ts";
 import {
   runtimeExecutableCopy,
   runtimeExecutableRejectionCopy,
+  runtimeInstallCopy,
+  runtimeInstallStepCopy,
   runtimeLookupCopy,
   runtimeLookupPlaceCopy,
 } from "./copy/runtime-lookup-copy.ts";
@@ -255,6 +261,12 @@ export const SettingsScreen: Component<{
   readonly onSaveRuntimeExecutable?: (
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
+  ) => void;
+  readonly runtimeInstallPhases?: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
+  >;
+  readonly onInstallRuntimeExecutable?: (
+    runtime: WorkbenchConfigurableRuntime,
   ) => void;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly claudePermissionHandlingPersistencePhase: WorkbenchClaudePermissionHandlingPersistencePhase;
@@ -620,6 +632,8 @@ export const SettingsScreen: Component<{
                 runtimeExecutables={props.runtimeExecutables}
                 runtimeExecutablePhases={props.runtimeExecutablePhases}
                 onSaveExecutablePath={props.onSaveRuntimeExecutable}
+                runtimeInstallPhases={props.runtimeInstallPhases}
+                onInstallExecutable={props.onInstallRuntimeExecutable}
                 onBind={props.onBindSubscriptionAuthentication}
                 onBegin={props.onBeginSubscriptionAuthentication}
                 onCancel={props.onCancelSubscriptionAuthentication}
@@ -639,6 +653,8 @@ export const SettingsScreen: Component<{
                 runtimeExecutables={props.runtimeExecutables}
                 runtimeExecutablePhases={props.runtimeExecutablePhases}
                 onSaveExecutablePath={props.onSaveRuntimeExecutable}
+                runtimeInstallPhases={props.runtimeInstallPhases}
+                onInstallExecutable={props.onInstallRuntimeExecutable}
                 onBind={props.onBindSubscriptionAuthentication}
                 onBegin={props.onBeginSubscriptionAuthentication}
                 onCancel={props.onCancelSubscriptionAuthentication}
@@ -658,6 +674,8 @@ export const SettingsScreen: Component<{
                 runtimeExecutables={props.runtimeExecutables}
                 runtimeExecutablePhases={props.runtimeExecutablePhases}
                 onSaveExecutablePath={props.onSaveRuntimeExecutable}
+                runtimeInstallPhases={props.runtimeInstallPhases}
+                onInstallExecutable={props.onInstallRuntimeExecutable}
                 onBind={props.onBindSubscriptionAuthentication}
                 onBegin={props.onBeginSubscriptionAuthentication}
                 onCancel={props.onCancelSubscriptionAuthentication}
@@ -1056,6 +1074,10 @@ const ProviderGroup: Component<{
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
   ) => void;
+  readonly runtimeInstallPhases?: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
+  >;
+  readonly onInstallExecutable?: (runtime: WorkbenchConfigurableRuntime) => void;
   readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
   readonly onBegin?: (
     endpointId: WorkbenchRuntimeEndpointId,
@@ -1097,6 +1119,8 @@ const ProviderGroup: Component<{
                     executablePath={props.runtimeExecutables?.[row.runtime]}
                     executablePhase={props.runtimeExecutablePhases?.[row.runtime]}
                     onSaveExecutablePath={props.onSaveExecutablePath}
+                    installPhase={props.runtimeInstallPhases?.[row.runtime]}
+                    onInstallExecutable={props.onInstallExecutable}
                     onBind={props.onBind}
                     onBegin={props.onBegin}
                     onCancel={props.onCancel}
@@ -1119,6 +1143,8 @@ const ProviderGroup: Component<{
                       executablePath={props.runtimeExecutables}
                       executablePhases={props.runtimeExecutablePhases}
                       onSaveExecutablePath={props.onSaveExecutablePath}
+                      runtimeInstallPhases={props.runtimeInstallPhases}
+                      onInstallExecutable={props.onInstallExecutable}
                       onBind={props.onBind}
                       onBegin={props.onBegin}
                       onCancel={props.onCancel}
@@ -1323,6 +1349,10 @@ const SubscriptionFacadeProviderCard: Component<{
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
   ) => void;
+  readonly runtimeInstallPhases?: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
+  >;
+  readonly onInstallExecutable?: (runtime: WorkbenchConfigurableRuntime) => void;
   readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
   readonly onBegin?: (
     endpointId: WorkbenchRuntimeEndpointId,
@@ -1503,6 +1533,8 @@ const SubscriptionFacadeProviderCard: Component<{
               value={configuredExecutablePath()}
               phase={props.executablePhases?.[props.family]}
               onSave={props.onSaveExecutablePath}
+              installPhase={props.runtimeInstallPhases?.[props.family]}
+              onInstall={props.onInstallExecutable}
             />
           </div>
         </Show>
@@ -1676,10 +1708,16 @@ const RuntimeExecutableField: Component<{
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
   ) => void;
+  readonly installPhase?: SettingsRuntimeInstallPhase;
+  readonly onInstall?: (runtime: WorkbenchConfigurableRuntime) => void;
 }> = (props) => {
   const [draft, setDraft] = createSignal(props.value);
+  // The stored value only changes when a save or an install has answered, and
+  // an install answers with a path the user never typed: show it.
+  createEffect(on(() => props.value, (value) => setDraft(value), { defer: true }));
   const fieldId = () => `runtime-executable-${props.runtime}`;
   const saving = () => props.phase?.status === "saving";
+  const installing = () => props.installPhase?.status === "installing";
   return (
     <form
       class="runtime-executable-form"
@@ -1752,7 +1790,98 @@ const RuntimeExecutableField: Component<{
           </p>
         )}
       </Show>
+      <Show when={props.onInstall}>
+        <RuntimeInstallControl
+          runtime={props.runtime}
+          configuredPath={props.value}
+          phase={props.installPhase}
+          disabled={saving() || installing()}
+          onInstall={props.onInstall!}
+        />
+      </Show>
     </form>
+  );
+};
+
+/**
+ * The product installing the runtime itself, into its private directory.
+ *
+ * Four states and nothing invented: absent, installing (elapsed time only --
+ * npm reports no real progress, so no bar is drawn), installed (version; the
+ * field above shows the path), failed (the step it stopped at and where to go
+ * instead). After a restart the session phase is gone; the durable path alone
+ * says a private copy is installed.
+ */
+const RuntimeInstallControl: Component<{
+  readonly runtime: WorkbenchConfigurableRuntime;
+  readonly configuredPath: string;
+  readonly phase?: SettingsRuntimeInstallPhase;
+  readonly disabled: boolean;
+  readonly onInstall: (runtime: WorkbenchConfigurableRuntime) => void;
+}> = (props) => {
+  const [now, setNow] = createSignal(Date.now());
+  const timer = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => clearInterval(timer));
+  const elapsedSeconds = () =>
+    props.phase?.status === "installing"
+      ? Math.max(0, Math.floor((now() - props.phase.startedAt) / 1000))
+      : 0;
+  const privateCopyConfigured = () => isPrivateCliInstallPath(props.configuredPath);
+  const installedByPath = () => props.phase === undefined && privateCopyConfigured();
+  const sentence = (): string | undefined => {
+    const phase = props.phase;
+    if (phase === undefined) {
+      return installedByPath() ? runtimeInstallCopy.installedPathSentence : undefined;
+    }
+    switch (phase.status) {
+      case "installing":
+        return runtimeInstallCopy.installingSentence(elapsedSeconds());
+      case "installed":
+        return runtimeInstallCopy.installedSentence(phase.version);
+      case "failed":
+        return phase.step === undefined
+          ? runtimeInstallCopy.unavailableSentence
+          : `${runtimeInstallStepCopy(phase.step)} ${runtimeInstallCopy.manualSentence}`;
+    }
+  };
+  const failed = () => props.phase?.status === "failed";
+  return (
+    <div
+      class="runtime-install"
+      data-install-status={
+        props.phase?.status ?? (installedByPath() ? "installed" : "absent")
+      }
+    >
+      <Show when={!privateCopyConfigured()}>
+        <button
+          type="button"
+          class="btn sm"
+          disabled={props.disabled}
+          onClick={() => props.onInstall(props.runtime)}
+        >
+          {props.runtime === "codex"
+            ? runtimeInstallCopy.installActionCodex
+            : runtimeInstallCopy.installActionClaude}
+        </button>
+      </Show>
+      <Show when={sentence()}>
+        {(text) => (
+          <p
+            class={failed() ? "runtime-executable-error" : "runtime-executable-note"}
+            role="status"
+            aria-live="polite"
+          >
+            {text()}
+            <Show when={failed() && props.phase?.status === "failed" && props.phase.detail.length > 0}>
+              <br />
+              <code class="runtime-install-detail">
+                {props.phase?.status === "failed" ? props.phase.detail : ""}
+              </code>
+            </Show>
+          </p>
+        )}
+      </Show>
+    </div>
   );
 };
 
@@ -1777,6 +1906,8 @@ const ProviderCard: Component<{
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
   ) => void;
+  readonly installPhase?: SettingsRuntimeInstallPhase;
+  readonly onInstallExecutable?: (runtime: WorkbenchConfigurableRuntime) => void;
   readonly onBind?: (endpointId: WorkbenchRuntimeEndpointId) => void;
   readonly onBegin?: (
     endpointId: WorkbenchRuntimeEndpointId,
@@ -1899,6 +2030,8 @@ const ProviderCard: Component<{
                 value={props.executablePath ?? ""}
                 phase={props.executablePhase}
                 onSave={props.onSaveExecutablePath}
+                installPhase={props.installPhase}
+                onInstall={props.onInstallExecutable}
               />
             </div>
           )}
