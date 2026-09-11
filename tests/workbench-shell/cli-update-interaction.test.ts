@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import test, { after, before } from "node:test";
+import test, { after, before, type TestContext } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
 import solid from "vite-plugin-solid";
 import type { ViteDevServer } from "vite";
@@ -57,12 +57,25 @@ const available = {
 } as const;
 const noCheck = { cliId: "codex", status: "no-check" } as const;
 
+/* The first page.goto of this file pays Vite's cold dependency pre-bundle and the first
+   transform of the probe page: the server runs on an isolated cacheDir
+   (tests/helpers/vite-server.ts), so nothing is ever warm. 5s covered that on the machine
+   this file was written on and nowhere else: on a clean GitHub runner the first test of the
+   file died at the bound on 2 of 3 runs of the same tree (main 34533189195 attempt 2,
+   PR #7 run 34535514948) and passed the third at 6.3s, inside a second of it. The bound
+   only has to tell "still loading" from "never loads", and 60s still does that. Every
+   openSettings reports what the navigation cost, green runs included, so a slower machine
+   shows up as a number before it shows up as a red. */
+const PAGE_ACTION_TIMEOUT_MS = 60_000;
+
 async function openSettings(
+  t: TestContext,
   bridge: WorkbenchCliUpdateBridge,
   locale: "en" | "zh-CN" = "en",
 ): Promise<Page> {
+  const started = performance.now();
   const page = await browser.newPage();
-  page.setDefaultTimeout(5_000);
+  page.setDefaultTimeout(PAGE_ACTION_TIMEOUT_MS);
   page.on("pageerror", (error) => console.error(error.message));
   await page.exposeFunction("probeCheck", bridge.checkCliUpdates);
   await page.exposeFunction("probeRun", bridge.runCliUpdate);
@@ -77,11 +90,12 @@ async function openSettings(
   });
   await page.goto(`${url}?locale=${locale}`);
   await page.locator("main.settings").waitFor();
+  t.diagnostic(`openSettings(${locale}): elapsed=${Math.round(performance.now() - started)}ms limit=${PAGE_ACTION_TIMEOUT_MS}ms`);
   return page;
 }
 
-test("Chinese Claude retry buttons name the sign-in and update checks", async () => {
-  const page = await openSettings({
+test("Chinese Claude retry buttons name the sign-in and update checks", async t => {
+  const page = await openSettings(t, {
     checkCliUpdates: async () => publicCliUpdateCheckCompleted([
       { cliId: "claude-code", status: "check-failed" },
       noCheck,
@@ -100,10 +114,10 @@ test("Chinese Claude retry buttons name the sign-in and update checks", async ()
   } finally { await page.close(); }
 });
 
-test("Settings restart button invokes relaunchApp and waits for the queued restart (issue 184)", async () => {
+test("Settings restart button invokes relaunchApp and waits for the queued restart (issue 184)", async t => {
   let updated = false;
   let restarts = 0;
-  const page = await openSettings({
+  const page = await openSettings(t, {
     checkCliUpdates: async () => publicCliUpdateCheckCompleted([
       updated ? { cliId: "claude-code", status: "up-to-date" } : available, noCheck,
     ]),
@@ -124,7 +138,7 @@ test("Settings restart button invokes relaunchApp and waits for the queued resta
   } finally { await page.close(); }
 });
 
-test("Settings replaces a failed post-run check with an actionable retry and fresh versions (issue 184)", async () => {
+test("Settings replaces a failed post-run check with an actionable retry and fresh versions (issue 184)", async t => {
   let sourceAvailable = true;
   let current = "2.1.220";
   let checks = 0;
@@ -142,7 +156,7 @@ test("Settings replaces a failed post-run check with an actionable retry and fre
         : { exit: "non-zero", stderr: "" };
     } },
   });
-  const page = await openSettings({
+  const page = await openSettings(t, {
     checkCliUpdates: async () => publicCliUpdateCheckCompleted(await service.check()),
     runCliUpdate: (cliId) => service.run(cliId),
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),
@@ -166,10 +180,10 @@ test("Settings replaces a failed post-run check with an actionable retry and fre
   } finally { await page.close(); }
 });
 
-test("Settings discards stale versions when the post-run check IPC is unavailable or rejects (issue 184)", async () => {
+test("Settings discards stale versions when the post-run check IPC is unavailable or rejects (issue 184)", async t => {
   for (const failure of ["unavailable", "rejected"] as const) {
     let updated = false;
-    const page = await openSettings({
+    const page = await openSettings(t, {
       checkCliUpdates: async () => {
         if (!updated) return publicCliUpdateCheckCompleted([available, noCheck]);
         if (failure === "rejected") throw new Error("test IPC unavailable");
@@ -188,9 +202,9 @@ test("Settings discards stale versions when the post-run check IPC is unavailabl
   }
 });
 
-test("Settings offers Update after Not now and a successful retry finds a newer version (issue 184)", async () => {
+test("Settings offers Update after Not now and a successful retry finds a newer version (issue 184)", async t => {
   let checks = 0;
-  const page = await openSettings({
+  const page = await openSettings(t, {
     checkCliUpdates: async () => publicCliUpdateCheckCompleted([
       ++checks === 2 ? { cliId: "claude-code", status: "check-failed" } : available, noCheck,
     ]),
@@ -212,8 +226,8 @@ test("Settings offers Update after Not now and a successful retry finds a newer 
  * the background. Two things are asserted here and they are separate: that the
  * row SAYS what pressing it will do, and that pressing it once does NOT do it.
  */
-test("w120: the codex row states what the update will do before it is pressed", async () => {
-  const page = await openSettings({
+test("w120: the codex row states what the update will do before it is pressed", async t => {
+  const page = await openSettings(t, {
     checkCliUpdates: async () => publicCliUpdateCheckCompleted([available, noCheck]),
     runCliUpdate: async (cliId) => publicCliUpdateRunUpdated(cliId),
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),
@@ -237,9 +251,9 @@ test("w120: the codex row states what the update will do before it is pressed", 
   } finally { await page.close(); }
 });
 
-test("w120: a codex update does not start until it is confirmed", async () => {
+test("w120: a codex update does not start until it is confirmed", async t => {
   let runs = 0;
-  const page = await openSettings({
+  const page = await openSettings(t, {
     checkCliUpdates: async () => publicCliUpdateCheckCompleted([available, noCheck]),
     runCliUpdate: async (cliId) => { runs += 1; return publicCliUpdateRunUpdated(cliId); },
     relaunchApp: async () => publicCliUpdateRelaunchQueued(),

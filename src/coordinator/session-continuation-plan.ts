@@ -29,8 +29,9 @@ export function parseSessionContinuationPlan(input: string): SessionContinuation
   return Object.freeze({ steps: Number(match[1]), input: match[2]! });
 }
 
-export function sessionContinuationStepInput(plan: SessionContinuationPlanRequest, step: number): string {
-  return `[Workbench 自动续办 ${step}/${plan.steps}]\n${plan.input}`;
+/** The Runtime always receives the plan's instruction verbatim; step/limit are product-side observation data, never prompt text. */
+export function sessionContinuationStepInput(plan: SessionContinuationPlanRequest, _step: number): string {
+  return plan.input;
 }
 
 /** One explicit, bounded plan per open Project; reopening history never arms it. */

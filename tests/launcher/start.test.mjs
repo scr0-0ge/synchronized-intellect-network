@@ -392,7 +392,7 @@ test('a stranger with node and pnpm gets a fresh build and a started app', (t) =
   assert.equal(readIfPresent(path.join(root, 'install-ran.txt')), null, text);
   assert.ok(fs.existsSync(path.join(root, 'electron-args.txt')), text);
   assert.equal(
-    fs.existsSync(path.join(root, 'local-app-data', 'unified-agent-workbench', 'runtime', 'node')),
+    fs.existsSync(path.join(root, 'local-app-data', 'synchronized-intellect-network', 'runtime', 'node')),
     false,
     'a qualified PATH node must not create or download a private runtime',
   );
@@ -586,7 +586,7 @@ test('no node on PATH provisions the private LTS runtime, then builds and starts
       path.join(
         root,
         'local-app-data',
-        'unified-agent-workbench',
+        'synchronized-intellect-network',
         'runtime',
         'node',
         'bin',

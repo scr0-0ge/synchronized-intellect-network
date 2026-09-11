@@ -44,13 +44,15 @@ test("composer-authored automatic continuation completes exactly the bounded ste
   const profile = await backend.loadDirectSessionProfile();
   assert.equal((await backend.submitDirectInput(startRequest(profile, "/auto-continue 3\nDo the next verified step."))).ok, true);
   await waitFor(() => sent.length >= 1);
-  assert.equal(sent[0], "[Workbench 自动续办 1/3]\nDo the next verified step.");
+  assert.equal(sent[0], "Do the next verified step.");
   await waitFor(() => !!view?.ok && view.view.commands[0]?.session?.turns?.length === 3 && view.view.commands[0]?.status === "completed");
-  const expected = [1, 2, 3].map((step) => `[Workbench 自动续办 ${step}/3]\nDo the next verified step.`);
+  const expected = [1, 2, 3].map(() => "Do the next verified step.");
   assert.deepEqual(sent, expected);
   assert.ok(view?.ok);
   const terminal = view;
   assert.equal(terminal.view.commands.length, 1, "all steps continue the same Session");
+  assert.equal(terminal.view.commands[0]?.label, "Do the next verified step.",
+    "the rail label derives from the user's own instruction, not a step-count marker");
   assert.deepEqual(terminal.view.commands[0]?.session?.turns?.map((turn) => turn.timeline[0]), expected.map((text) => ({ kind: "user-message", text })));
   await backend.loadDirectSessionProfile();
   await delay(0);
@@ -63,7 +65,7 @@ test("composer-authored automatic continuation completes exactly the bounded ste
   const reopened = currentView();
   assert.ok(reopened?.ok);
   assert.deepEqual(reopened.view.commands[0]?.session?.turns, terminal.view.commands[0]?.session?.turns,
-    "readback keeps every automatic prefix and terminal result");
+    "readback keeps every automatic step and terminal result");
   assert.equal(sent.length, 3, "opening stored history never restarts automation");
 });
 
@@ -156,7 +158,7 @@ for (const outcome of ["failed", "interrupted", "unknown-confirmed", "unknown-un
     await waitFor(() => fixture.command()?.continuationStop?.reason === "turn-not-completed");
     assert.equal(fixture.sent.length, 2);
     const turn = fixture.command()?.session?.turns?.[1];
-    assert.deepEqual(turn?.timeline[0], { kind: "user-message", text: "[Workbench 自动续办 2/4]\nDo one next step and summarize it." });
+    assert.deepEqual(turn?.timeline[0], { kind: "user-message", text: "Do one next step and summarize it." });
     if (outcome === "failed") assert.ok(turn?.timeline.some((event) => event.kind === "failed" && event.category === "turn-failed"));
     if (outcome === "interrupted") assert.ok(turn?.timeline.some((event) => event.kind === "turn-interrupted"));
     if (outcome.startsWith("unknown")) assert.equal(turn?.recovery?.resume, outcome === "unknown-confirmed" ? "confirmed" : "unconfirmed");
@@ -206,7 +208,7 @@ for (const takeover of ["steer", "interrupt", "composer"] as const) {
     }
     fixture.release();
     await waitFor(() => fixture.backend.readTurnActivity() === "idle");
-    assert.deepEqual(fixture.sent, ["[Workbench 自动续办 1/4]\nProceed one step.", "[Workbench 自动续办 2/4]\nProceed one step.",
+    assert.deepEqual(fixture.sent, ["Proceed one step.", "Proceed one step.",
       ...(takeover === "composer" ? ["Human starts a separate Session."] : [])]);
   });
 }
@@ -216,14 +218,14 @@ for (const steps of [1, 10]) {
     const fixture = await controlledBackend(t);
     assert.equal((await fixture.start(`/auto-continue ${steps}\nOne step.`)).ok, true);
     await waitFor(() => fixture.command()?.status === "completed" && fixture.sent.length === steps);
-    assert.deepEqual(fixture.sent, Array.from({ length: steps }, (_, i) => `[Workbench 自动续办 ${i + 1}/${steps}]\nOne step.`));
+    assert.deepEqual(fixture.sent, Array.from({ length: steps }, () => "One step."));
   });
 }
 
-test("invalid explicit plans and overlong marked inputs never reach Runtime", async (t) => {
+test("invalid explicit plans and overlong inputs never reach Runtime", async (t) => {
   const fixture = await controlledBackend(t);
   for (const input of ["/auto-continue", "/auto-continue 0\nOne step.", "/auto-continue 11\nOne step.",
-    "/auto-continue Infinity\nOne step.", "/auto-continue 2", "/auto-continue 2\n   ", `/auto-continue 2\n${"x".repeat(7980)}`]) {
+    "/auto-continue Infinity\nOne step.", "/auto-continue 2", "/auto-continue 2\n   ", `/auto-continue 2\n${"x".repeat(8001)}`]) {
     const result = await fixture.start(input);
     assert.ok(!result.ok && result.error.category === "invalid-input", input.slice(0, 40));
   }

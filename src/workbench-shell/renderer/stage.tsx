@@ -100,6 +100,7 @@ export const WorkbenchStage: Component<{
     mode() === "continue"
       ? latestTurnPromptSuggestions(props.selected)
       : Object.freeze([]);
+  const suggestionsBlocked = () => props.composer.draft.trim().length > 0;
 
   return (
     <main
@@ -184,10 +185,15 @@ export const WorkbenchStage: Component<{
                           <button
                             type="button"
                             class="prompt-suggestion"
-                            disabled={props.composer.draft.length > 0}
-                            title={props.composer.draft.length > 0 ? composerFeedbackCopy.suggestionRequiresEmptyDraft : suggestion}
+                            disabled={suggestionsBlocked()}
+                            aria-describedby={
+                              suggestionsBlocked()
+                                ? "prompt-suggestions-blocked-reason"
+                                : undefined
+                            }
+                            title={suggestionsBlocked() ? composerFeedbackCopy.suggestionRequiresEmptyDraft : suggestion}
                             onClick={() => {
-                              if (props.composer.draft.length > 0) return;
+                              if (suggestionsBlocked()) return;
                               props.onDraft(suggestion);
                             }}
                           >
@@ -196,6 +202,14 @@ export const WorkbenchStage: Component<{
                         )}
                       </For>
                     </div>
+                    <Show when={suggestionsBlocked()}>
+                      <p
+                        id="prompt-suggestions-blocked-reason"
+                        class="prompt-suggestions-note"
+                      >
+                        {composerFeedbackCopy.suggestionRequiresEmptyDraft}
+                      </p>
+                    </Show>
                   </section>
                 </Show>
                 <Show

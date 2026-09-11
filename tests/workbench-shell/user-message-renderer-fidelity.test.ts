@@ -29,6 +29,8 @@ import {
   copyLocaleDictionaries,
   transcriptCopy,
   turnStateCopy,
+  turnOrdinalCopy,
+  turnNotStartedOrdinalCopy,
 } from "../../src/workbench-shell/renderer/copy/transcript-copy.ts";
 import { copyLocaleDictionaries as inspectorCopyLocaleDictionaries } from "../../src/workbench-shell/renderer/copy/inspector-copy.ts";
 import { eventTitle } from "../../src/workbench-shell/renderer/view-model.ts";
@@ -686,7 +688,7 @@ test("message-only accepted, failed, recovery, and not-yet-attached commands sta
     assertOrdered(failedHtml, [
       transcriptCopy.actorUser,
       "failed input",
-      transcriptCopy.turnNotStarted,
+      turnNotStartedOrdinalCopy(1),
       turnStateCopy.failed,
     ]);
     assert.match(failedHtml, new RegExp(transcriptCopy.failedTitle, "u"));
@@ -720,7 +722,7 @@ test("message-only accepted, failed, recovery, and not-yet-attached commands sta
     assertOrdered(recoveryHtml, [
       transcriptCopy.actorUser,
       "recover input",
-      transcriptCopy.turnNotStarted,
+      turnNotStartedOrdinalCopy(1),
       turnStateCopy["recovery-required"],
       transcriptCopy.recoveryTitle,
     ]);
@@ -805,6 +807,52 @@ test("Inspector total includes user events while Turns and agent disclosure stay
       /<button[^>]*class="disclosure"[^>]*>[\s\S]*?<\/button>/u,
     )?.[0];
     assert.equal(plainText(disclosure ?? ""), "4 events ▴");
+  });
+});
+
+test("a turn that died before turn-started agrees with its own recovery card on the turn number", async () => {
+  await withUserMessageRendererModule(async ({ SessionTranscript }) => {
+    const seed = visualFixture.commands[0];
+    assert.ok(seed?.session);
+    // The input reached the runtime and the command was accepted, but the
+    // process died before a turn-started event landed: zero events recorded.
+    const timeline = Object.freeze([
+      Object.freeze({ kind: "user-message" as const, text: "died before turn-started" }),
+    ] satisfies readonly WorkbenchTimelineEvent[]);
+    const command: WorkbenchCommandView = Object.freeze({
+      ...seed,
+      key: "command-crashed-before-turn-started",
+      label: "Agent Session crashed early",
+      status: "recovery-required",
+      session: Object.freeze({
+        ...seed.session,
+        timeline,
+        resumable: false,
+        selectionKey: null,
+        turns: Object.freeze([
+          Object.freeze({
+            profile: seed.session.profile,
+            recovery: Object.freeze({
+              resume: "unconfirmed",
+              reason: "resume-timeout",
+            } as const),
+            timeline,
+          }),
+        ]),
+      }),
+    });
+    const html = withoutSolidMarkers(renderToString(() => SessionTranscript({ command })));
+    // Both the rule-label title and the recovery card below it must name the
+    // same turn (issue w195): neither "Turn not started" bare nor a mismatched
+    // ordinal may appear.
+    assertOrdered(html, [
+      transcriptCopy.actorUser,
+      "died before turn-started",
+      turnNotStartedOrdinalCopy(1),
+      turnStateCopy["recovery-required"],
+      `${turnOrdinalCopy(1)} · ${transcriptCopy.outcomeUnknownRule}`,
+    ]);
+    assert.doesNotMatch(html, /Turn not started<\/span>/u);
   });
 });
 

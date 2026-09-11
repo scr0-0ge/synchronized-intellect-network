@@ -52,7 +52,7 @@ set "NODE_ARCHIVE_NAME=%NODE_PACKAGE%.zip"
 set "NODE_DOWNLOAD_ROOT=https://nodejs.org/dist/v%NODE_LTS_VERSION%"
 set "NODE_ARCHIVE_URL=%NODE_DOWNLOAD_ROOT%/%NODE_ARCHIVE_NAME%"
 set "NODE_SHASUMS_URL=%NODE_DOWNLOAD_ROOT%/SHASUMS256.txt"
-set "NODE_CACHE_ROOT=%LOCALAPPDATA%\unified-agent-workbench\runtime\node"
+set "NODE_CACHE_ROOT=%LOCALAPPDATA%\synchronized-intellect-network\runtime\node"
 
 echo.
 echo   Synchronized Intellect Network

@@ -53,6 +53,8 @@ import {
   publicEndpointCatalogFreshnessLoaded,
   publicRuntimeExecutablesLoaded,
   publicRuntimeExecutableSaved,
+  publicRuntimeInstallFailed,
+  publicRuntimeInstalled,
   defaultWorkbenchRuntimeExecutablePaths,
   publicRuntimeEndpointDiscovery,
 } from "../../../src/workbench-shell/contract.ts";
@@ -225,6 +227,11 @@ function glmHarnessKeyConfigured(): boolean {
   return new URLSearchParams(window.location.search).get("glm") !== "empty";
 }
 
+// What the install stub has "installed" so far, so a second runtime keeps the first.
+const installedPrivateCopies: { codex: string; claude: string } = {
+  ...defaultWorkbenchRuntimeExecutablePaths,
+};
+
 const bridge: WorkbenchRendererBridge = Object.freeze({
   writeClipboardText(text: string) {
     document.documentElement.dataset.qaCopiedCode = text;
@@ -376,6 +383,33 @@ const bridge: WorkbenchRendererBridge = Object.freeze({
     return Promise.resolve(
       publicRuntimeExecutableSaved(defaultWorkbenchRuntimeExecutablePaths),
     );
+  },
+  // `?install=fail` answers the install button with a failure after a short
+  // installing phase; anything else answers with a private-copy path.
+  installRuntimeExecutable(request) {
+    const mode = new URLSearchParams(window.location.search).get("install");
+    const current = installedPrivateCopies;
+    const privateShim = [
+      "C:\\Users\\you\\AppData\\Local\\synchronized-intellect-network\\runtime\\cli",
+      request.runtime,
+      `${request.runtime}.cmd`,
+    ].join("\\");
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        if (mode !== "fail") current[request.runtime] = privateShim;
+        resolve(
+          mode === "fail"
+            ? publicRuntimeInstallFailed(
+                "install-failed",
+                "npm error code ECONNRESET\nnpm error network request to https://registry.npmjs.org/@openai%2fcodex failed",
+              )
+            : publicRuntimeInstalled(request.runtime, "2.1.268", {
+                ...current,
+                [request.runtime]: privateShim,
+              }),
+        );
+      }, 2500);
+    });
   },
   observeProject(listener: WorkbenchProjectTransferListener) {
     encodeProjectResult = createWorkbenchProjectTransferEncoder();

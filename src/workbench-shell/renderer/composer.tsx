@@ -986,6 +986,7 @@ export const DirectInputComposer: Component<{
         >
           <Show
             when={continuationIssue()}
+            keyed
             fallback={
               props.selected?.status === "quota-paused" && mode() === "continue" &&
               props.composer.phase !== "error" && props.composer.phase !== "pending"
@@ -1001,7 +1002,7 @@ export const DirectInputComposer: Component<{
                     : composerFeedbackCopy.startFoot)
             }
           >
-            {(issue) => automaticContinuationIssueMessage(issue())}
+            {(issue) => automaticContinuationIssueMessage(issue)}
           </Show>
         </span>
         <span class="grow" />

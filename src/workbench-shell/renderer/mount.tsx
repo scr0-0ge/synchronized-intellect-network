@@ -162,6 +162,7 @@ import {
   initialSettingsSubscriptionAuthenticationState,
   subscriptionAuthenticationSelectionKey,
   type SettingsRuntimeExecutablePhase,
+  type SettingsRuntimeInstallPhase,
   type SettingsSubscriptionAuthenticationState,
   type WorkbenchSurface,
 } from "./settings-view-model.ts";
@@ -341,6 +342,11 @@ const WorkbenchApp: Component<{
   const [runtimeExecutablePhases, setRuntimeExecutablePhases] = createSignal<
     Readonly<
       Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeExecutablePhase>>
+    >
+  >(Object.freeze({}));
+  const [runtimeInstallPhases, setRuntimeInstallPhases] = createSignal<
+    Readonly<
+      Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
     >
   >(Object.freeze({}));
   const [subscriptionAuthentication, setSubscriptionAuthentication] =
@@ -1523,6 +1529,34 @@ const WorkbenchApp: Component<{
       });
   };
 
+  const installRuntimeExecutable = (
+    runtime: WorkbenchConfigurableRuntime,
+  ): void => {
+    const install = props.bridge.installRuntimeExecutable;
+    if (install === undefined) return;
+    setRuntimeInstallPhases((current) =>
+      Object.freeze({
+        ...current,
+        [runtime]: { status: "installing" as const, startedAt: Date.now() },
+      }),
+    );
+    void install
+      .call(props.bridge, Object.freeze({ runtime }))
+      .catch(() => publicRuntimeExecutableUnavailable())
+      .then((result) => {
+        if (!active) return;
+        if (result.ok) setRuntimeExecutables(result.executables);
+        const phase: SettingsRuntimeInstallPhase = result.ok
+          ? { status: "installed", version: result.version }
+          : result.error.category === "runtime-install-failed"
+            ? { status: "failed", step: result.error.step, detail: result.error.detail }
+            : { status: "failed", detail: "" };
+        setRuntimeInstallPhases((current) =>
+          Object.freeze({ ...current, [runtime]: phase }),
+        );
+      });
+  };
+
   const changeEndpointKeyDraft =
     (endpointId: WorkbenchEndpointKeyEndpointId) =>
     (draft: string): void => {
@@ -1955,6 +1989,8 @@ const WorkbenchApp: Component<{
           runtimeExecutables={runtimeExecutables()}
           runtimeExecutablePhases={runtimeExecutablePhases()}
           onSaveRuntimeExecutable={saveRuntimeExecutable}
+          runtimeInstallPhases={runtimeInstallPhases()}
+          onInstallRuntimeExecutable={installRuntimeExecutable}
           claudePermissionHandling={
             claudePermissionHandlingPersistence().permissionHandling
           }
@@ -2108,6 +2144,12 @@ const ResolvedWorkbench: Component<{
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
   ) => void;
+  readonly runtimeInstallPhases: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
+  >;
+  readonly onInstallRuntimeExecutable: (
+    runtime: WorkbenchConfigurableRuntime,
+  ) => void;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly claudePermissionHandlingPersistencePhase: WorkbenchClaudePermissionHandlingPersistencePhase;
   readonly onClaudePermissionHandling: (
@@ -2233,6 +2275,8 @@ const ResolvedWorkbench: Component<{
           runtimeExecutables={props.runtimeExecutables}
           runtimeExecutablePhases={props.runtimeExecutablePhases}
           onSaveRuntimeExecutable={props.onSaveRuntimeExecutable}
+          runtimeInstallPhases={props.runtimeInstallPhases}
+          onInstallRuntimeExecutable={props.onInstallRuntimeExecutable}
           claudePermissionHandling={props.claudePermissionHandling}
           claudePermissionHandlingPersistencePhase={
             props.claudePermissionHandlingPersistencePhase
@@ -2332,6 +2376,12 @@ interface WorkbenchScreenProps {
   readonly onSaveRuntimeExecutable: (
     runtime: WorkbenchConfigurableRuntime,
     executablePath: string,
+  ) => void;
+  readonly runtimeInstallPhases: Readonly<
+    Partial<Record<WorkbenchConfigurableRuntime, SettingsRuntimeInstallPhase>>
+  >;
+  readonly onInstallRuntimeExecutable: (
+    runtime: WorkbenchConfigurableRuntime,
   ) => void;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly claudePermissionHandlingPersistencePhase: WorkbenchClaudePermissionHandlingPersistencePhase;
@@ -2603,6 +2653,8 @@ const WorkbenchScreen: Component<WorkbenchScreenProps> = (props) => {
             runtimeExecutables={props.runtimeExecutables}
             runtimeExecutablePhases={props.runtimeExecutablePhases}
             onSaveRuntimeExecutable={props.onSaveRuntimeExecutable}
+            runtimeInstallPhases={props.runtimeInstallPhases}
+            onInstallRuntimeExecutable={props.onInstallRuntimeExecutable}
             claudePermissionHandling={props.claudePermissionHandling}
             claudePermissionHandlingPersistencePhase={
               props.claudePermissionHandlingPersistencePhase

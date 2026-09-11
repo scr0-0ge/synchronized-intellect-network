@@ -330,7 +330,7 @@ test("the live progress row follows tool name, safe parameter, truncation and fa
         transcript.SessionTranscript({ command: completedChanges }),
       ),
     ),
-    "改了 4 个文件：a.ts +12/-4；b.ts；long/path/to/c… （已截断） +1/-0；另 1 个文件（已折叠）",
+    "改了 4 个文件：a.ts +12/-4；b.ts；long/path/to/c… （已截断） +1/-0；另有 1 个文件",
   );
 
   const noChanges = sanitizedCommand([

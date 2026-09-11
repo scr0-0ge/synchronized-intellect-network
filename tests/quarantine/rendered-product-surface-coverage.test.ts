@@ -13,7 +13,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import test, { after } from "node:test";
+import test, { after, type TestContext } from "node:test";
 
 import {
   judgeText,
@@ -516,10 +516,22 @@ const REQUESTS = Object.freeze(
 );
 
 let sweep: Promise<ReadonlyMap<string, MeasurementOutcome>> | undefined;
+let sweepElapsedMs: number | undefined;
 let breadthAudit: Promise<BreadthAudit> | undefined;
+
+/* Every per-surface test awaits the same sweep, so whichever runs first carries the whole
+   cost: one Chromium, every surface in REQUESTS measured in series. That cost is a property
+   of the machine, not of the surfaces. 180s covered it on the machine this file was written
+   on; on a clean GitHub runner three green runs spent 127-137s of it (main runs 34519070212,
+   34520553827, 34533189195) and PR #7 run 34535514948 spent ~182s and was killed, while
+   the 68 tests behind it passed on the very sweep that had just finished. The bound only
+   has to tell "still measuring" from "hung", and 600s still does that. The test that paid
+   for the sweep reports what it cost, green runs included. */
+const SWEEP_TEST_TIMEOUT_MS = 600_000;
 
 function measureAll(): Promise<ReadonlyMap<string, MeasurementOutcome>> {
   sweep ??= (async () => {
+    const started = performance.now();
     const server = await startSurfaceServer();
     const outcomes = new Map<string, MeasurementOutcome>();
     try {
@@ -541,9 +553,20 @@ function measureAll(): Promise<ReadonlyMap<string, MeasurementOutcome>> {
       return outcomes;
     } finally {
       await server.close();
+      sweepElapsedMs = Math.round(performance.now() - started);
     }
   })();
   return sweep;
+}
+
+/* Only the test that started the sweep reports it: the others find it finished. */
+async function measureAllReporting(t: TestContext): Promise<ReadonlyMap<string, MeasurementOutcome>> {
+  const paying = sweep === undefined;
+  const outcomes = await measureAll();
+  if (paying) {
+    t.diagnostic(`sweep of ${REQUESTS.length} surfaces: elapsed=${sweepElapsedMs}ms limit=${SWEEP_TEST_TIMEOUT_MS}ms`);
+  }
+  return outcomes;
 }
 
 function auditAll(): Promise<BreadthAudit> {
@@ -611,9 +634,9 @@ test("F123-DC1: the light archived-session failure glyph reaches AA while the ro
 
 for (const { definition, tone, request } of REQUESTS) {
   test(`${request.surfaceId} resolves computed ink and compositor-painted glyphs`, {
-    timeout: 180_000,
-  }, async () => {
-    const outcome = (await measureAll()).get(request.surfaceId);
+    timeout: SWEEP_TEST_TIMEOUT_MS,
+  }, async (t) => {
+    const outcome = (await measureAllReporting(t)).get(request.surfaceId);
     assert.ok(outcome, `${request.surfaceId}: no measurement outcome`);
     assert.equal(outcome.ok, true, outcome.ok ? undefined : outcome.message);
     if (!outcome.ok) return;

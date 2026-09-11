@@ -47,6 +47,7 @@ import {
   transcriptSearchCountCopy,
   turnOrdinalCopy,
   guidanceTurnOrdinalCopy,
+  turnNotStartedOrdinalCopy,
   eventsDisclosureCopy,
   effectiveNotRecordedCopy,
   effectivePendingObservationCopy,
@@ -1408,7 +1409,7 @@ const TimelineTurns: Component<{
           !group().guidance &&
           (status() === "failed" || status() === "recovery-required") &&
           !group().events.some((event) => event.kind === "turn-started")
-            ? transcriptCopy.turnNotStarted
+            ? turnNotStartedOrdinalCopy(group().turnOrdinal)
             : group().guidance
               ? guidanceTurnOrdinalCopy(group().turnOrdinal)
               : turnOrdinalCopy(group().turnOrdinal);

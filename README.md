@@ -73,8 +73,10 @@ into `%LOCALAPPDATA%`, installs from the lockfile, builds, and starts the app. N
 globally, and if a step fails the window stays open and tells you what it was looking for.
 
 You need Windows and at least one of [Codex CLI](https://github.com/openai/codex) or
-[Claude Code](https://claude.com/claude-code) already installed and signed in. Those are the tools
-the app drives; it finds them, it doesn't install them.
+[Claude Code](https://claude.com/claude-code). Those are the tools the app drives. It finds an
+existing install, and if there is none, one button in Settings installs a private copy into
+`%LOCALAPPDATA%` — no sign-in needed for the GLM, Kimi or DeepSeek endpoints, which run on
+your own API key.
 
 Arguments go straight through to Electron, so a throwaway profile is one flag away:
 
