@@ -355,8 +355,13 @@ function readIfPresent(file) {
 }
 
 async function observeProductionStart(t) {
+  // start.bat passes --user-data-dir through cmd.exe, where spaces split the
+  // value, so the smoke root must stay space-free even when the temp path is not.
+  const scratchParent = [process.env.RUNNER_TEMP, os.tmpdir()].find(
+    (candidate) => candidate && !/\s/u.test(candidate),
+  );
   const scratch = path.join(
-    path.parse(repositoryRoot).root,
+    scratchParent ?? path.parse(repositoryRoot).root,
     `uaw-start-smoke-${String(process.pid)}-${Date.now().toString(36)}`,
   );
   const profile = path.join(scratch, 'profile');
@@ -372,7 +377,18 @@ async function observeProductionStart(t) {
     path.join(scratch, 'codex'),
     path.join(scratch, 'claude'),
   ]) {
-    fs.mkdirSync(directory, { recursive: true });
+    try {
+      fs.mkdirSync(directory, { recursive: true });
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'unknown';
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Could not create launcher smoke scratch directory "${directory}" (${code}). ` +
+          `Set RUNNER_TEMP to a writable path without spaces. ${detail}`,
+        { cause: error },
+      );
+    }
   }
   t.after(() =>
     fs.rmSync(scratch, {
