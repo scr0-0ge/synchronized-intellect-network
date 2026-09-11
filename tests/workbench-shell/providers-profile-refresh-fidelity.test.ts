@@ -222,7 +222,7 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
     );
     assert.match(
       configuredFailureCards[1] ?? "",
-      /<input[^>]*id="runtime-executable-claude"[^>]*value="C:\\Windows\\System32\\where\.exe"/u,
+      /<input[^>]*id="runtime-executable-claude-family"[^>]*value="C:\\Windows\\System32\\where\.exe"/u,
       "a failed configured CLI must keep its executable path input visible",
     );
     assert.match(

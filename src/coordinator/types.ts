@@ -19,6 +19,7 @@ import type {
   RequestedSessionProfileProjection,
 } from "./profile-projection.ts";
 import type { DurableRuntimeEndpointId } from "./work-ledger-auth-generation.ts";
+import type { SessionContinuationStop } from "./session-continuation-plan.ts";
 
 export type Cursor = number;
 
@@ -198,6 +199,8 @@ export interface ProjectCommandSummary {
   readonly recovery?: ProjectCommandRecovery;
   /** Exact accepted command input; absent only for legacy digest-v1 rows. */
   readonly input?: string;
+  /** Durable record of why an automatic continuation plan stopped on this command. */
+  readonly continuationStop?: SessionContinuationStop;
   readonly session?: ProjectSessionSummary;
 }
 
@@ -266,7 +269,8 @@ interface DurableProjectUpdateBase {
 
 export type DurableProjectUpdate =
   | (DurableProjectUpdateBase & {
-      readonly kind: "accepted" | "in-flight" | "completed" | "quota-paused" | "recovery-required";
+      /** `continuation-stop` is a resync signal only; its payload lives in `ProjectCommandSummary`. */
+      readonly kind: "accepted" | "in-flight" | "completed" | "quota-paused" | "recovery-required" | "continuation-stop";
     })
   | (DurableProjectUpdateBase & {
       readonly kind: "profile-resolved";
@@ -363,6 +367,8 @@ export interface ProjectChannel {
   snapshot(): Promise<ProjectSnapshot>;
   /** Optional for non-durable channel implementations; production supplies it. */
   snapshotChanges?(after: Cursor): Promise<ProjectSnapshotChanges>;
+  /** Best-effort durable annotation; its absence never blocks a plan from stopping. */
+  recordContinuationStop?(commandId: string, stop: SessionContinuationStop): void;
   /**
    * Without a cursor yields one current snapshot, then follows later durable
    * updates. With a cursor, catches up from SQLite before following live

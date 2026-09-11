@@ -627,8 +627,11 @@ export type WorkbenchSteerControl =
       readonly reason: "Same-turn guidance is unavailable. Your draft stays local.";
     };
 
-/** In-memory product status; never substitutes for a Runtime turn result. */
+/** Durable product status; never substitutes for a Runtime turn result. */
 export type WorkbenchContinuationStop = import("../coordinator/session-continuation-plan.ts").SessionContinuationStop;
+
+/** In-memory only: which step of a running plan is in flight. */
+export type WorkbenchContinuationProgress = import("../coordinator/session-continuation-plan.ts").SessionContinuationProgress;
 
 export interface WorkbenchCommandView {
   readonly key: string;
@@ -637,6 +640,8 @@ export interface WorkbenchCommandView {
   readonly status: ProjectCommandStatus;
   readonly failureCategory?: ProjectCommandFailureCategory;
   readonly continuationStop?: WorkbenchContinuationStop;
+  /** Present only while this projected command owns the running turn. */
+  readonly continuationProgress?: WorkbenchContinuationProgress;
   /** Present only while this projected command owns the running turn. */
   readonly interrupt?: WorkbenchInterruptControl;
   /** Same-turn semantics only; unsupported Runtimes never reinterpret this as queueing. */

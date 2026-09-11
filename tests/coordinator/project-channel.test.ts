@@ -535,6 +535,68 @@ test("runtime ingress still rejects malformed known fields alongside unknown add
   }
 });
 
+test("an unrecognized ledger update kind is skipped with a diagnostic instead of breaking live observation (w207)", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-unknown-update-kind-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  const warnings = t.mock.method(console, "warn", () => {});
+
+  const channel = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingAdapter(),
+  }).openProject(projectDirectory);
+  t.after(async () => {
+    await channel.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const firstReceipt = await channel.act(directCommand({ idempotencyKey: "before-future-kind" }));
+  await waitForTerminalCommand(channel, firstReceipt);
+
+  // Same shape rules the store enforces on every row (a known status, a real
+  // command_id) with a `kind` this build has never heard of: what an older
+  // build sees when it reopens a ledger a newer build already wrote to.
+  const writer = new DatabaseSync(databasePath);
+  const insertedFutureRow = writer
+    .prepare(
+      `INSERT INTO updates (project_id, command_id, kind, status, session_id, data_json)
+       SELECT project_id, command_id, 'from-the-future', 'accepted', NULL, NULL
+         FROM commands WHERE command_id = ?`,
+    )
+    .run(firstReceipt.commandId);
+  const futureRowCursor = Number(insertedFutureRow.lastInsertRowid);
+  writer.close();
+
+  const secondReceipt = await channel.act(directCommand({ idempotencyKey: "after-future-kind" }));
+  const secondCompleted = await waitForTerminalCommand(channel, secondReceipt);
+  assert.equal(
+    secondCompleted.status,
+    "completed",
+    "command processing does not read updates through hydrateUpdate, so it is unaffected by the unrecognized row",
+  );
+
+  const snapshot = await channel.snapshot();
+  const replay = await collectUpdatesThrough(channel.observe({ after: 0 }), snapshot.cursor);
+  assert.ok(
+    replay.some(
+      (update) => update.commandId === secondReceipt.commandId && update.kind === "completed",
+    ),
+    "a single observation pass starting before the unrecognized row still reaches later, recognized updates",
+  );
+  assert.ok(
+    replay.every((update) => update.cursor !== futureRowCursor),
+    "the unrecognized row itself is never projected as an update",
+  );
+
+  const diagnostics = warnings.mock.calls.map((call) => call.arguments);
+  assert.deepEqual(
+    diagnostics,
+    [["[coordinator] Skipped unknown ledger update kind", { kind: "from-the-future", cursor: futureRowCursor }]],
+    "the unrecognized row is diagnosed exactly once for this single read pass",
+  );
+});
+
 const requestedProfileProjection = Object.freeze({
   kind: "recorded" as const,
   runtimeFamilyLabel: "Codex",

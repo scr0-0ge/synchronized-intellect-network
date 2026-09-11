@@ -25,8 +25,8 @@ import type {
 import { normalizeSessionDisplayName } from "../session-metadata.ts";
 import type { ProjectCommandRecovery } from "../coordinator/types.ts";
 import { redactFilesystemPaths } from "./path-redaction.ts";
-import { sanitizeWorkbenchContinuationStop } from "./result-sanitizer.ts";
-import type { WorkbenchContinuationStop } from "./contract.ts";
+import { sanitizeWorkbenchContinuationStop, sanitizeWorkbenchContinuationProgress } from "./result-sanitizer.ts";
+import type { WorkbenchContinuationStop, WorkbenchContinuationProgress } from "./contract.ts";
 import {
   cloneEffectiveSessionProfileProjection,
   cloneRequestedSessionProfileProjection,
@@ -94,6 +94,8 @@ export interface WorkbenchLiveView {
   observe(listener: WorkbenchProjectListener): () => void;
   /** Trusted product state, projected only on the last command of an open Session. */
   reportContinuationStop(commandId: string, stop: WorkbenchContinuationStop): void;
+  /** Trusted product state, projected only while the reported command is running. */
+  reportContinuationProgress(commandId: string, progress: WorkbenchContinuationProgress): void;
   /** Reprojects a same-cursor snapshot after a trusted Session mutation. */
   refreshAfterSessionMutation(): Promise<void>;
   resolveSessionRemoval(removalKey: string):
@@ -152,6 +154,7 @@ export function createWorkbenchLiveView(options: {
   const sessionOrdinals = new Map<string, number>();
   const observations = new Set<ObservationState>();
   const continuationStops = new Map<string, WorkbenchContinuationStop>();
+  const continuationProgresses = new Map<string, WorkbenchContinuationProgress>();
   let nextSessionOrdinal = 1;
   let selectionCursor: number | undefined;
   let selectionSignature: string | undefined;
@@ -302,6 +305,9 @@ export function createWorkbenchLiveView(options: {
         !isFailureCategory(command.failureCategory)
       ) {
         throw new Error("invalid-failure");
+      }
+      if (command.continuationStop !== undefined) {
+        continuationStops.set(commandId, sanitizeWorkbenchContinuationStop(command.continuationStop));
       }
       const commandTimeline = projectCommandTimeline(command);
       const sessionId = command.session?.sessionId;
@@ -697,6 +703,9 @@ export function createWorkbenchLiveView(options: {
         if (cached.completed) context = cached.value;
       }
       const continuationStop = continuationStops.get(entry.latestCommandId);
+      const continuationProgress = entry.status === "in-flight"
+        ? continuationProgresses.get(entry.latestCommandId)
+        : undefined;
       const projected: WorkbenchCommandView = {
         key: commandKey,
         label:
@@ -705,6 +714,7 @@ export function createWorkbenchLiveView(options: {
         runtime: entry.runtimeLabel,
         status: entry.status,
         ...(continuationStop === undefined ? {} : { continuationStop }),
+        ...(continuationProgress === undefined ? {} : { continuationProgress }),
         ...(entry.status === "in-flight"
           ? {
               interrupt: projectInterruptControl(
@@ -890,6 +900,9 @@ export function createWorkbenchLiveView(options: {
     reportContinuationStop(commandId: string, stop: WorkbenchContinuationStop) {
       if (closed) return;
       continuationStops.set(commandId, sanitizeWorkbenchContinuationStop(stop));
+      // A stop always ends the run that owned any progress annotation on this
+      // exact command: yield to the stop notice, never show both at once.
+      continuationProgresses.delete(commandId);
       // Only annotate the last public view: rebuilding an older raw snapshot
       // against today's Runtime controls would falsely report snapshot drift.
       // An observer still catching up picks up the stored annotation normally.
@@ -899,8 +912,27 @@ export function createWorkbenchLiveView(options: {
         if (command === undefined) continue;
         const identity = command.session === undefined ? `command:${commandId}` : `session:${command.session.sessionId}`;
         const key = `command-${sessionOrdinals.get(identity)}`;
+        const view = deepFreeze({ ...state.view, commands: state.view.commands.map((entry) => {
+          if (entry.key !== key) return entry;
+          const { continuationProgress: _drop, ...rest } = entry;
+          return { ...rest, continuationStop: continuationStops.get(commandId)! };
+        }) });
+        if (!emitState(state, { ok: true, view })) state.dispose();
+      }
+    },
+    reportContinuationProgress(commandId: string, progress: WorkbenchContinuationProgress) {
+      if (closed) return;
+      continuationProgresses.set(commandId, sanitizeWorkbenchContinuationProgress(progress));
+      for (const state of [...observations]) {
+        if (state.disposed || state.view === undefined) continue;
+        const command = state.snapshot?.commands.find(entry => entry.commandId === commandId);
+        if (command === undefined) continue;
+        const identity = command.session === undefined ? `command:${commandId}` : `session:${command.session.sessionId}`;
+        const key = `command-${sessionOrdinals.get(identity)}`;
         const view = deepFreeze({ ...state.view, commands: state.view.commands.map(entry =>
-          entry.key === key ? { ...entry, continuationStop: continuationStops.get(commandId)! } : entry),
+          entry.key === key && entry.status === "in-flight"
+            ? { ...entry, continuationProgress: continuationProgresses.get(commandId)! }
+            : entry),
         });
         if (!emitState(state, { ok: true, view })) state.dispose();
       }
