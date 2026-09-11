@@ -23,12 +23,11 @@ import {
 } from "./copy/rail-copy.ts";
 import {
   appearancePersistenceLabels,
-  providerGroupHeadingCopy,
-  settingsProviderStatusMeaningsData,
+  endpointKeyProviderCopy,
+  settingsCopy,
   subscriptionAuthCopy as authCopy,
   type AppearancePersistenceLabel,
-  type ProviderGroupHeading,
-  type SettingsProviderStatusMeaningLabel,
+  type SettingsProviderBadgeLabel,
   type SubscriptionAuthenticationActionLabel,
   type SubscriptionAuthenticationLabel,
 } from "./copy/settings-copy.ts";
@@ -54,16 +53,21 @@ export interface AppearancePersistencePresentation {
   readonly error: boolean;
 }
 
-export interface SettingsProviderAvailabilityPresentation {
-  readonly group: "catalog-available" | "catalog-unavailable" | "not-inspected";
-  readonly label: ProviderGroupHeading;
+/**
+ * The one state word on a provider card (w233). `kind` is what the card's
+ * primary action answers to; the internal discovery category itself stays in
+ * the card's collapsed details.
+ */
+export interface SettingsProviderBadgePresentation {
+  readonly kind:
+    | "ready"
+    | "sign-in-needed"
+    | "api-key-needed"
+    | "cli-missing"
+    | "check-failed"
+    | "not-checked";
+  readonly label: SettingsProviderBadgeLabel;
   readonly tone: "ok" | "warn" | "off";
-}
-
-export interface SettingsProviderStatusMeaning {
-  readonly category: WorkbenchRuntimeEndpointDiscoveryCategory;
-  readonly label: SettingsProviderStatusMeaningLabel;
-  readonly detail: string;
 }
 
 export interface SettingsSubscriptionAuthenticationEntry {
@@ -521,11 +525,6 @@ function replaceAuthenticationEntry(
 
 export { settingsTopLevelSectionLabels } from "./copy/settings-copy.ts";
 
-export { settingsOtherProvidersCopy } from "./copy/settings-copy.ts";
-
-export const settingsProviderStatusMeanings: readonly SettingsProviderStatusMeaning[] =
-  settingsProviderStatusMeaningsData;
-
 export function settingsRailPresentation(
   surface: WorkbenchSurface,
   runtimeUnavailable: boolean,
@@ -609,61 +608,77 @@ export function appearancePersistencePresentation(
   }
 }
 
-export function settingsProviderAvailabilityPresentation(
-  category: WorkbenchRuntimeEndpointDiscoveryCategory,
-): SettingsProviderAvailabilityPresentation {
-  if (category === "catalog-ready") {
-    return Object.freeze({
-      group: "catalog-available",
-      label: providerGroupHeadingCopy.catalogAvailable,
-      tone: "ok",
-    });
-  }
-  if (category === "not-inspected") {
-    return Object.freeze({
-      group: "not-inspected",
-      label: providerGroupHeadingCopy.notChecked,
-      tone: "off",
-    });
-  }
-  return Object.freeze({
-    group: "catalog-unavailable",
-    label: providerGroupHeadingCopy.catalogUnavailable,
-    tone:
-      category === "authentication-required" || category === "inspection-failed"
-        ? "warn"
-        : "off",
-  });
+/** Whether an endpoint authenticates with a saved API key rather than a login. */
+export function isApiKeyEndpointId(endpointId: WorkbenchRuntimeEndpointId): boolean {
+  return Object.prototype.hasOwnProperty.call(endpointKeyProviderCopy, endpointId);
 }
 
-export function groupSettingsProviderRows<
-  Row extends Readonly<{
-    category: WorkbenchRuntimeEndpointDiscoveryCategory;
-  }>,
->(rows: readonly Row[]): Readonly<{
-  catalogAvailable: readonly Row[];
-  catalogUnavailable: readonly Row[];
-  notInspected: readonly Row[];
-}> {
-  const catalogAvailable: Row[] = [];
-  const catalogUnavailable: Row[] = [];
-  const notInspected: Row[] = [];
-  for (const row of rows) {
-    switch (settingsProviderAvailabilityPresentation(row.category).group) {
-      case "catalog-available":
-        catalogAvailable.push(row);
-        break;
-      case "catalog-unavailable":
-        catalogUnavailable.push(row);
-        break;
-      case "not-inspected":
-        notInspected.push(row);
-        break;
-    }
+/**
+ * Card badge from the endpoint's discovery category. "Authentication
+ * required" reads as a missing key on an API-key face and as a missing
+ * login on a subscription face -- the only two things a person can do about it.
+ */
+export function settingsProviderBadgePresentation(
+  category: WorkbenchRuntimeEndpointDiscoveryCategory,
+  endpointId: WorkbenchRuntimeEndpointId,
+): SettingsProviderBadgePresentation {
+  switch (category) {
+    case "catalog-ready":
+      return Object.freeze({ kind: "ready", label: settingsCopy.badgeReady, tone: "ok" });
+    case "runtime-not-located":
+      return Object.freeze({
+        kind: "cli-missing",
+        label: settingsCopy.badgeCliMissing,
+        tone: "warn",
+      });
+    case "authentication-required":
+      return isApiKeyEndpointId(endpointId)
+        ? Object.freeze({
+            kind: "api-key-needed",
+            label: settingsCopy.badgeApiKeyNeeded,
+            tone: "warn",
+          })
+        : Object.freeze({
+            kind: "sign-in-needed",
+            label: settingsCopy.badgeSignInNeeded,
+            tone: "warn",
+          });
+    case "inspection-failed":
+      return Object.freeze({
+        kind: "check-failed",
+        label: settingsCopy.badgeCheckFailed,
+        tone: "warn",
+      });
+    case "not-inspected":
+      return Object.freeze({
+        kind: "not-checked",
+        label: settingsCopy.badgeNotChecked,
+        tone: "off",
+      });
   }
-  return Object.freeze({
-    catalogAvailable: Object.freeze(catalogAvailable),
-    catalogUnavailable: Object.freeze(catalogUnavailable),
-    notInspected: Object.freeze(notInspected),
-  });
+}
+
+/**
+ * The fixed card order the owner ruled (w233): Codex, Claude, GLM, DeepSeek,
+ * Kimi. Cards never move when a status changes.
+ */
+const SETTINGS_CARD_ORDER: readonly WorkbenchRuntimeEndpointId[] = Object.freeze([
+  "codex-desktop",
+  "codex-api",
+  "claude-code-desktop",
+  "claude-api",
+  "glm-coding-plan",
+  "deepseek-api",
+  "kimi-code",
+  "kimi-platform",
+]);
+
+export function orderSettingsProviderRows<
+  Row extends Readonly<{ endpointId: WorkbenchRuntimeEndpointId }>,
+>(rows: readonly Row[]): readonly Row[] {
+  const rank = (row: Row): number => {
+    const index = SETTINGS_CARD_ORDER.indexOf(row.endpointId);
+    return index === -1 ? SETTINGS_CARD_ORDER.length : index;
+  };
+  return Object.freeze([...rows].sort((left, right) => rank(left) - rank(right)));
 }

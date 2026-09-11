@@ -10,13 +10,13 @@ import {
 /**
  * Ticket 18 fidelity pins: the Settings surface renders the 副主管裁决
  * button semantics (claude = check-driven Update; codex = constant
- * "Check and update"; never automatic), the inline running/success/failure
+ * "Update" that asks first (w120, w233); never automatic), the inline running/success/failure
  * presentation with the optional relaunch action ("Not now"), the close-and-retry
  * failure advice, and the bilingual copy is pinned byte-exact in both
  * dictionaries.
  */
 
-test("Settings renders the check-driven claude button and the constant codex check-and-update button", async () => {
+test("Settings renders the check-driven claude button and the constant codex update button", async () => {
   const settings = await readFile(
     new URL("../../src/workbench-shell/renderer/settings.tsx", import.meta.url),
     "utf8",
@@ -149,7 +149,7 @@ test("the bilingual CLI update copy is pinned byte-exact in both locales", async
   );
 
   // English pins (source of truth for the surface).
-  assert.match(copy, /checkAndUpdateAction: "Check and update",/u);
+  assert.match(copy, /checkAndUpdateAction: "Update",/u);
   assert.match(copy, /updateAction: "Update",/u);
   assert.match(copy, /runningAction: "Updating…",/u);
   assert.match(
@@ -167,7 +167,7 @@ test("the bilingual CLI update copy is pinned byte-exact in both locales", async
     copy,
     /checkFailedSentence:\s*\n\s*"Could not check whether a newer version is available\. Check again for current version information\.",/u,
   );
-  assert.match(copy, /checkAgainAction: "Check for updates again",/u);
+  assert.match(copy, /checkAgainAction: "Check updates again",/u);
   assert.match(copy, /checkingAction: "Checking…",/u);
   assert.match(
     copy,
@@ -195,7 +195,7 @@ test("the bilingual CLI update copy is pinned byte-exact in both locales", async
   );
 
   // zh-CN pins, including the ruled failure advice wording.
-  assert.match(copy, /checkAndUpdateAction: "检查并更新",/u);
+  assert.match(copy, /checkAndUpdateAction: "更新",/u);
   assert.match(copy, /updateAction: "更新",/u);
   assert.match(copy, /runningAction: "正在更新…",/u);
   assert.match(copy, /succeededSentence: "更新完成。下一个新会话将启动新版本；现有会话不会切换版本。",/u);
@@ -210,7 +210,7 @@ test("the bilingual CLI update copy is pinned byte-exact in both locales", async
     copy,
     /checkFailedSentence: "无法检查是否有更新版本。请重新检查以获取当前版本信息。",/u,
   );
-  assert.match(copy, /checkAgainAction: "重新检查更新",/u);
+  assert.match(copy, /checkAgainAction: "检查更新",/u);
   assert.match(copy, /checkingAction: "正在检查…",/u);
   assert.match(copy, /failedTimeoutSentence: "更新超时未完成。没有任何更改。",/u);
   assert.match(copy, /failedLaunchSentence: "无法启动更新命令。没有任何更改。",/u);
@@ -242,7 +242,7 @@ test("the bilingual CLI update copy is pinned byte-exact in both locales", async
   );
   assert.equal(cliUpdateCopy.restartLaterAction, "Not now");
   assert.equal(cliUpdateCopy.restartNowAction, "Restart now");
-  assert.equal(cliUpdateCopy.checkAgainAction, "Check for updates again");
+  assert.equal(cliUpdateCopy.checkAgainAction, "Check updates again");
 });
 
 test("Claude retry buttons name the sign-in and update checks in both locales", () => {
@@ -251,13 +251,13 @@ test("Claude retry buttons name the sign-in and update checks in both locales", 
       settingsCopyLocaleDictionaries.en.subscriptionAuthCopy.recheckAction,
       settingsCopyLocaleDictionaries.en.cliUpdateCopy.checkAgainAction,
     ],
-    ["Re-check sign-in", "Check for updates again"],
+    ["Check sign-in", "Check updates again"],
   );
   assert.deepEqual(
     [
       settingsCopyLocaleDictionaries["zh-CN"].subscriptionAuthCopy.recheckAction,
       settingsCopyLocaleDictionaries["zh-CN"].cliUpdateCopy.checkAgainAction,
     ],
-    ["重新检查登录", "重新检查更新"],
+    ["检查登录", "检查更新"],
   );
 });

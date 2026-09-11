@@ -190,7 +190,7 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
   assert.equal(inspecting["codex-desktop"]!.inspectionPending, true);
   assert.match(
     presentationText(inspecting["codex-desktop"]!.feedback) ?? "",
-    /re-check subscription sign-in/u,
+    /check subscription sign-in/u,
   );
   const signedOut = completeSettingsSubscriptionAuthenticationResponse(
     inspecting,
@@ -309,7 +309,7 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
   assert.match(requestedFeedback ?? "", /no window and no console/);
   assert.match(requestedFeedback ?? "", /reports the sign-in state once that CLI exits/);
   assert.match(requestedFeedback ?? "", /run the provider CLI's own sign-in command in a terminal/);
-  assert.match(requestedFeedback ?? "", /Re-check sign-in/);
+  assert.match(requestedFeedback ?? "", /Check sign-in/);
   assert.equal(
     typeof requested["codex-desktop"]!.feedback === "string"
       ? null
@@ -570,9 +570,11 @@ test("existing provider cards render independent states, exact copy, blockers, a
     assert.match(visibleHtml, /Resumable Sessions:\s*3; Projects:\s*2/u);
     assert.match(visibleHtml, />Continue with Login</u);
     assert.match(visibleHtml, />Cancel</u);
+    // w233: one line under the Providers heading, the full sentence behind
+    // "Details" (still in the markup, so still pinned).
     assert.match(
       visibleHtml,
-      /Subscription credentials never pass through the Workbench/u,
+      /Subscription sign-in stays in each provider's own app; API keys are stored encrypted on this device\./u,
     );
     assert.match(
       visibleHtml,

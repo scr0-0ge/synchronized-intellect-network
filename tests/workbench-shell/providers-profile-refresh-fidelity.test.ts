@@ -173,7 +173,7 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
         renderProviders(renderedModule.WorkbenchScreen, permitted),
       );
       assert.equal(button.disabled, false);
-      assert.equal(button.label, "Re-check all");
+      assert.equal(button.label, "Check all");
     }
 
     for (const blocked of [
@@ -199,10 +199,10 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
     const unavailableCards = providerCards(unavailableProviders);
     assert.equal(unavailableCards.length, 2);
     assert.deepEqual(unavailableCards.map(plainText), [
-      "Codex Subscription Catalog unavailable Subscription API Status Runtime not located Catalog Unavailable Not found under any name that was checked. Looked for codex.exe, codex.cmd, codex.bat, codex on your PATH codex.exe, codex.cmd, codex.bat, codex in %APPDATA%\\npm codex.exe in %LOCALAPPDATA%\\OpenAI\\Codex\\bin Get it https://developers.openai.com/codex/cli Executable path Somewhere else on this machine? Type the full path to the runtime here. The shim an npm install writes works, and so does the program itself. Use this path Clear Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
-      "Claude Subscription Catalog unavailable Subscription API Status Runtime not located Catalog Unavailable Not found under any name that was checked. Looked for claude.exe, claude.cmd, claude.bat, claude on your PATH claude.exe, claude.cmd, claude.bat, claude in %APPDATA%\\npm claude.exe in %USERPROFILE%\\.local\\bin claude.exe in %APPDATA%\\Claude\\claude-code Get it https://docs.claude.com/en/docs/claude-code/setup Executable path Somewhere else on this machine? Type the full path to the runtime here. The shim an npm install writes works, and so does the program itself. Use this path Clear Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
+      "Codex Subscription CLI missing Subscription API Details Status Runtime not located Catalog Unavailable Not found under any name that was checked. Install or locate the Codex CLI under Tools. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Check sign-in",
+      "Claude Subscription CLI missing Subscription API Details Status Runtime not located Catalog Unavailable Not found under any name that was checked. Install or locate the Claude Code CLI under Tools. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Check sign-in",
     ]);
-    assert.equal(unavailableText.match(/Re-check all/gu)?.length, 1);
+    assert.equal(unavailableText.match(/Check all/gu)?.length, 1);
 
     const categorizedProviders = renderProviders(
       renderedModule.WorkbenchScreen,
@@ -211,29 +211,35 @@ test("Providers Re-check all follows the pure refresh gate and the one existing 
     const categorizedCards = providerCards(categorizedProviders);
     assert.equal(categorizedCards.length, 2);
     assert.deepEqual(categorizedCards.map(plainText), [
-      "Codex Subscription Catalog unavailable Subscription API Status Authentication required Catalog Unavailable Sign-in remains in the official provider flow. Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
-      "Claude Subscription Catalog unavailable Subscription API Status Inspection failed Catalog Unavailable No private error detail is exposed. Subscription sign-in Unknown Subscription sign-in could not be verified. Re-check before taking an authentication action. Re-check sign-in",
+      "Codex Subscription Sign-in needed Subscription API Details Status Authentication required Catalog Unavailable Sign-in remains in the official provider flow. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Check sign-in",
+      "Claude Subscription Check failed Subscription API Details Status Inspection failed Catalog Unavailable No private error detail is exposed. Subscription sign-in Unknown Subscription sign-in could not be verified. Check sign-in before logging in or out. Check sign-in",
     ]);
-    const configuredFailureCards = providerCards(
-      renderProviders(renderedModule.WorkbenchScreen, categorizedFailure, {
-        codex: "",
-        claude: "C:\\Windows\\System32\\where.exe",
-      }),
+    // w233 step 2: the executable path lives on the Tools row, not the card.
+    const configuredFailureHtml = renderProviders(
+      renderedModule.WorkbenchScreen,
+      categorizedFailure,
+      { codex: "", claude: "C:\\Windows\\System32\\where.exe" },
+    );
+    const claudeTool = toolRow(configuredFailureHtml, "claude");
+    assert.match(
+      claudeTool,
+      /<input[^>]*id="runtime-executable-claude"[^>]*value="C:\\Windows\\System32\\where\.exe"/u,
+      "a failed configured CLI must keep its executable path input on its Tools row",
     );
     assert.match(
-      configuredFailureCards[1] ?? "",
-      /<input[^>]*id="runtime-executable-claude-family"[^>]*value="C:\\Windows\\System32\\where\.exe"/u,
-      "a failed configured CLI must keep its executable path input visible",
-    );
-    assert.match(
-      plainText(configuredFailureCards[1] ?? ""),
+      plainText(claudeTool),
       /Use this path Clear/u,
-      "a failed configured CLI must keep its save and clear actions visible",
+      "a failed configured CLI must keep its save and clear actions",
     );
     assert.doesNotMatch(
-      plainText(configuredFailureCards[1] ?? ""),
+      plainText(claudeTool),
       /Looked for|Get it/u,
       "inspection failure must not invent missing-runtime lookup guidance",
+    );
+    assert.doesNotMatch(
+      providerCards(configuredFailureHtml).join(" "),
+      /runtime-executable-|Use this path/u,
+      "no provider card repeats the Tools row's executable path",
     );
     assert.equal(
       categorizedCards.filter((card) => /Authentication required/u.test(card)).length,
@@ -459,6 +465,17 @@ function providersButton(html: string): {
       .replace(/\s+/gu, " ")
       .trim(),
   };
+}
+
+function toolRow(html: string, runtime: "claude" | "codex"): string {
+  const row = html.match(
+    new RegExp(
+      `<section[^>]*class="provider tool-row tool-${runtime}"[^>]*>[\\s\\S]*?</section>`,
+      "u",
+    ),
+  )?.[0];
+  assert.ok(row, `the Tools section renders the ${runtime} row`);
+  return row;
 }
 
 function providerCards(html: string): readonly string[] {

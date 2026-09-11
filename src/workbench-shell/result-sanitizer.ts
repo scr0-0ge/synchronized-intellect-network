@@ -1,5 +1,5 @@
 import type { WorkbenchProjectPathFailure, WorkbenchProjectPathFailureReason } from "./contract.ts";
-import type { WorkbenchSubscriptionUsageObservation, WorkbenchSubscriptionUsageResult } from "./contract.ts";
+import type { WorkbenchSubscriptionUsageObservation, WorkbenchSubscriptionUsageResult, WorkbenchUsageObservation } from "./contract.ts";
 import type {
   ProjectCommandFailureCategory,
   ProjectCommandStatus,
@@ -4685,11 +4685,71 @@ export function reconstructWorkbenchSubscriptionUsage(value: unknown): Workbench
   } catch { return undefined; }
 }
 
+const usageWindowLabels = ["five-hour", "quota-window", "seven-day"] as const;
+
+/** Exact public/stored shape for one provider-agnostic window; absent optional fields stay absent. */
+function reconstructWorkbenchUsageWindow(value: unknown): WorkbenchUsageObservation["windows"][number] | undefined {
+  if (!isRecord(value) || typeof value.label !== "string" ||
+      !(usageWindowLabels as readonly string[]).includes(value.label)) return undefined;
+  const hasUtilization = "utilization" in value;
+  const hasResetsAt = "resetsAt" in value;
+  const keys = Object.keys(value).sort();
+  const expected = ["label", ...(hasResetsAt ? ["resetsAt"] : []), ...(hasUtilization ? ["utilization"] : [])].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) return undefined;
+  if (hasUtilization && (typeof value.utilization !== "number" || !Number.isFinite(value.utilization) ||
+      value.utilization < 0 || value.utilization > 1)) return undefined;
+  if (hasResetsAt && (!Number.isSafeInteger(value.resetsAt) || (value.resetsAt as number) <= 0 ||
+      (value.resetsAt as number) > 8_640_000_000_000_000)) return undefined;
+  return Object.freeze({
+    label: value.label as WorkbenchUsageObservation["windows"][number]["label"],
+    ...(hasUtilization ? { utilization: value.utilization as number } : {}),
+    ...(hasResetsAt ? { resetsAt: value.resetsAt as number } : {}),
+  });
+}
+
+/** Exact public/stored shape. Vendor tolerance belongs in the runtime parser. */
+export function reconstructWorkbenchUsageObservation(value: unknown): WorkbenchUsageObservation | undefined {
+  try {
+    if (!isRecord(value) || !hasExactKeys(value, ["endpointKey", "observedAt", "source", "windows"]) ||
+        typeof value.endpointKey !== "string" || value.endpointKey.length === 0 || value.endpointKey.length > 64 ||
+        (value.source !== "rate-limit-event" && value.source !== "exhaustion-message") ||
+        !Number.isSafeInteger(value.observedAt) || (value.observedAt as number) <= 0 ||
+        (value.observedAt as number) > 8_640_000_000_000_000 || !Array.isArray(value.windows)) return undefined;
+    const windows: WorkbenchUsageObservation["windows"][number][] = [];
+    for (const raw of value.windows) {
+      const window = reconstructWorkbenchUsageWindow(raw);
+      if (window === undefined) return undefined;
+      windows.push(window);
+    }
+    return Object.freeze({
+      endpointKey: value.endpointKey, windows: Object.freeze(windows),
+      observedAt: value.observedAt as number, source: value.source,
+    });
+  } catch { return undefined; }
+}
+
+/** Exact public/stored shape: every value's own endpointKey matches its map key. */
+export function reconstructWorkbenchUsageObservations(
+  value: unknown,
+): Readonly<Record<string, WorkbenchUsageObservation>> | undefined {
+  try {
+    if (!isRecord(value)) return undefined;
+    const entries: (readonly [string, WorkbenchUsageObservation])[] = [];
+    for (const [key, raw] of Object.entries(value)) {
+      const observation = reconstructWorkbenchUsageObservation(raw);
+      if (observation === undefined || observation.endpointKey !== key) return undefined;
+      entries.push([key, observation]);
+    }
+    return Object.freeze(Object.fromEntries(entries));
+  } catch { return undefined; }
+}
+
 export function sanitizeWorkbenchSubscriptionUsageResult(value: unknown): WorkbenchSubscriptionUsageResult {
   try {
-    if (isRecord(value) && value.ok === true && hasExactKeys(value, ["observation", "ok"])) {
+    if (isRecord(value) && value.ok === true && hasExactKeys(value, ["observation", "ok", "usage"])) {
       const observation = value.observation === null ? null : reconstructWorkbenchSubscriptionUsage(value.observation);
-      if (observation !== undefined) return Object.freeze({ ok: true, observation });
+      const usage = reconstructWorkbenchUsageObservations(value.usage);
+      if (observation !== undefined && usage !== undefined) return Object.freeze({ ok: true, observation, usage });
     }
   } catch { /* Unavailable, not a fabricated zero-usage observation. */ }
   return Object.freeze({ ok: false });

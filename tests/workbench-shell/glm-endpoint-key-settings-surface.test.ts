@@ -293,13 +293,23 @@ test("the GLM key block lives inside the GLM provider row and renders the stored
     assert.match(html, />Save key</u);
     assert.match(html, />Reveal key</u);
     assert.match(html, />Remove key</u);
-    assert.match(html, />Test connection</u);
+    assert.match(html, />Check connection</u);
     // Exactly one credential entry input exists on the whole page — the
-    // disclosed GLM one.
+    // disclosed GLM one. The only other inputs are the two Tools rows'
+    // typed executable paths (w233 step 2), which are plain text, not
+    // secrets.
     assert.equal(
-      (html.match(/<input/gu) ?? []).length,
+      (html.match(/<input[^>]*type="password"/gu) ?? []).length,
       1,
-      "exactly one input on the settings page",
+      "exactly one credential input on the settings page",
+    );
+    assert.deepEqual(
+      [...html.matchAll(/<input[^>]*\sid="([^"]+)"/gu)]
+        .map((match) => match[1])
+        .filter((id) => !id.startsWith("endpoint-key-input-"))
+        .sort(),
+      ["runtime-executable-claude", "runtime-executable-codex"],
+      "the only non-credential inputs are the two Tools executable paths",
     );
   } finally {
     await server.close();
@@ -348,9 +358,9 @@ test("the Kimi key block renders its own placeholder, env fallback, and the show
       /<label for="endpoint-key-input-kimi-code">API key<\/label>/u,
     );
     assert.equal(
-      (html.match(/<input/gu) ?? []).length,
+      (html.match(/<input[^>]*type="password"/gu) ?? []).length,
       2,
-      "one input per rendered key block",
+      "one credential input per rendered key block",
     );
     // The DeepSeek key block renders the same structure, and its copy never
     // says "plan" (ticket 12: the endpoint deliberately carries no
@@ -520,7 +530,7 @@ test("unconfigured, degraded, environment-fallback, probe outcome, and absence r
     assert.doesNotMatch(without, /endpoint-key-input-/u);
     assert.doesNotMatch(without, /type="password"/u);
     assert.doesNotMatch(without, />Save key</u);
-    assert.doesNotMatch(without, />Test connection</u);
+    assert.doesNotMatch(without, />Check connection</u);
     assert.doesNotMatch(withoutGlm, /endpoint-key-/u);
   } finally {
     await server.close();

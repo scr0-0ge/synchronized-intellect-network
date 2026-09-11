@@ -7,6 +7,7 @@ import type {
   RuntimeModel,
   RuntimeResume,
   RuntimeStart,
+  RuntimeUsageObserver,
   SessionProfile,
 } from "../index.ts";
 import { RuntimeAdapterError } from "../index.ts";
@@ -294,6 +295,8 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
   readonly #requestToolPermission: ClaudeToolPermissionHandler | undefined;
   readonly #onCatalogObservation: ClaudeCatalogObserver | undefined;
   readonly #observeSubscriptionUsage: import("../index.ts").RuntimeSubscriptionUsageObserver | undefined;
+  readonly #observeUsage: RuntimeUsageObserver | undefined;
+  readonly #usageEndpointKey: string | undefined;
   readonly #sessions = new Map<string, ClaudeSessionCapability>();
   readonly #sessionCapabilityStore: ClaudeSessionCapabilityStore | undefined;
   readonly #endpointContext: ClaudeEndpointContext | undefined;
@@ -308,9 +311,15 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
     sessionCapabilityStore?: ClaudeSessionCapabilityStore,
     endpointContext?: ClaudeEndpointContext,
     observeSubscriptionUsage?: import("../index.ts").RuntimeSubscriptionUsageObserver,
+    /** Provider-agnostic usage sink; runs alongside `observeSubscriptionUsage`, never in place of it. */
+    observeUsage?: RuntimeUsageObserver,
+    /** Row identity `observeUsage` observations carry. Composition supplies one per endpoint. */
+    usageEndpointKey?: string,
   ) {
     this.#sessionCapabilityStore = sessionCapabilityStore;
     this.#observeSubscriptionUsage = observeSubscriptionUsage;
+    this.#observeUsage = observeUsage;
+    this.#usageEndpointKey = usageEndpointKey;
     if (sessionCapabilityStore !== undefined) {
       try {
         for (const [reference, persisted] of sessionCapabilityStore.load()) {
@@ -495,6 +504,8 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
       return new ClaudeRuntimeBinding({
         transport,
         observeSubscriptionUsage: this.#observeSubscriptionUsage,
+        observeUsage: this.#observeUsage,
+        usageEndpointKey: this.#usageEndpointKey,
         endpointUrl,
         profile: capability.profile,
         opaqueSessionReference,
@@ -569,6 +580,8 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
       return new ClaudeRuntimeBinding({
         transport,
         observeSubscriptionUsage: this.#observeSubscriptionUsage,
+        observeUsage: this.#observeUsage,
+        usageEndpointKey: this.#usageEndpointKey,
         endpointUrl,
         profile: request.profile,
         opaqueSessionReference: request.opaqueSessionReference,

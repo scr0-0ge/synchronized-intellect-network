@@ -6,13 +6,22 @@ import test from "node:test";
 import { createTestDirectory, registerTestClosable } from "../helpers/test-lifecycle.ts";
 import { replayUsage } from "../agent-runtime/claude-usage-replay.ts";
 import { createWorkbenchAppearancePreferenceStore } from "../../src/workbench-shell/appearance-preference-store.ts";
-import { reconstructWorkbenchSubscriptionUsage, sanitizeWorkbenchSubscriptionUsageResult } from "../../src/workbench-shell/result-sanitizer.ts";
+import {
+  reconstructWorkbenchSubscriptionUsage,
+  reconstructWorkbenchUsageObservation,
+  reconstructWorkbenchUsageObservations,
+  sanitizeWorkbenchSubscriptionUsageResult,
+} from "../../src/workbench-shell/result-sanitizer.ts";
 import { defaultWorkbenchAppearancePreference, defaultWorkbenchRuntimeExecutablePaths,
   WORKBENCH_LOAD_SUBSCRIPTION_USAGE_CHANNEL as load, WORKBENCH_SUBSCRIPTION_USAGE_CHANGED_CHANNEL as changed } from "../../src/workbench-shell/contract.ts";
 import { createWorkbenchPreloadBridge } from "../../src/workbench-shell/preload-bridge.ts";
 import { installWorkbenchSubscriptionUsageIpc } from "../../src/workbench-shell/electron/subscription-usage-ipc.ts";
 
 const observation = { five_hour: { utilization: 0, resetsAt: 1788888000 }, seven_day: null, observedAt: 1788880000000 };
+const glmUsageObservation = Object.freeze({
+  endpointKey: "glm", windows: [{ label: "quota-window" as const, resetsAt: 1788888000000 }],
+  observedAt: 1788880000000, source: "exhaustion-message" as const,
+});
 
 test("real wire persists globally across Projects/reopen and other settings writes, without changing observation time or schema", async t => {
   const root = await createTestDirectory(t, join(tmpdir(), "uaw123-usage-"));
@@ -39,9 +48,45 @@ test("real wire persists globally across Projects/reopen and other settings writ
   registerTestClosable(t, reopened);
   assert.deepEqual(await reopened.readClaudeSubscriptionUsage(), second);
   const document = JSON.parse(await readFile(filePath, "utf8"));
-  assert.equal(document.schemaVersion, 9);
+  assert.equal(document.schemaVersion, 10);
   assert.deepEqual(document.claudeSubscriptionUsage, second);
   assert.equal(document.endpointPreference.claude, "claude-api");
+});
+
+test("the GLM/Kimi/DeepSeek usage slot is keyed by endpointKey, survives restart, and rejects a stale write", async t => {
+  const root = await createTestDirectory(t, join(tmpdir(), "uaw234-usage-"));
+  const filePath = join(root, "preferences.json");
+  const store = createWorkbenchAppearancePreferenceStore({ filePath });
+  registerTestClosable(t, store);
+  assert.deepEqual(await store.readUsageObservations(), {});
+  await store.saveUsageObservation(glmUsageObservation);
+  const kimiObservation = Object.freeze({ ...glmUsageObservation, endpointKey: "kimi" });
+  await store.saveUsageObservation(kimiObservation);
+  assert.deepEqual(await store.readUsageObservations(), {
+    glm: glmUsageObservation, kimi: kimiObservation,
+  });
+  // Claude's own field is untouched by the generic slot.
+  assert.equal(await store.readClaudeSubscriptionUsage(), null);
+  const staleGlm = Object.freeze({ ...glmUsageObservation, observedAt: glmUsageObservation.observedAt - 1000 });
+  assert.deepEqual(await store.saveUsageObservation(staleGlm), glmUsageObservation, "an older observedAt for the same endpointKey cannot roll back the snapshot");
+  await store.close();
+  const reopened = createWorkbenchAppearancePreferenceStore({ filePath });
+  registerTestClosable(t, reopened);
+  assert.deepEqual(await reopened.readUsageObservations(), { glm: glmUsageObservation, kimi: kimiObservation });
+  const document = JSON.parse(await readFile(filePath, "utf8"));
+  assert.equal(document.schemaVersion, 10);
+  assert.deepEqual(document.usageObservations, { glm: glmUsageObservation, kimi: kimiObservation });
+});
+
+test("an empty usage-observation map is omitted from the written document, not written as {}", async t => {
+  const root = await createTestDirectory(t, join(tmpdir(), "uaw234-usage-empty-"));
+  const filePath = join(root, "preferences.json");
+  const store = createWorkbenchAppearancePreferenceStore({ filePath });
+  registerTestClosable(t, store);
+  await store.save(defaultWorkbenchAppearancePreference);
+  await store.close();
+  const document = JSON.parse(await readFile(filePath, "utf8"));
+  assert.equal("usageObservations" in document, false);
 });
 
 test("unknown and real zero are distinct, and malformed or raw vendor data never crosses the snapshot boundary", () => {
@@ -54,8 +99,34 @@ test("unknown and real zero are distinct, and malformed or raw vendor data never
     { ...observation, five_hour: { utilization: 0.3, resetsAt: -1 } },
     { ...observation, five_hour: { ...observation.five_hour, status: "allowed" } },
   ]) assert.equal(reconstructWorkbenchSubscriptionUsage(value), undefined);
-  assert.deepEqual(sanitizeWorkbenchSubscriptionUsageResult({ ok: true, observation: null }), { ok: true, observation: null });
-  assert.deepEqual(sanitizeWorkbenchSubscriptionUsageResult({ ok: true, observation, raw: "private" }), { ok: false });
+  assert.deepEqual(
+    sanitizeWorkbenchSubscriptionUsageResult({ ok: true, observation: null, usage: {} }),
+    { ok: true, observation: null, usage: {} },
+  );
+  assert.deepEqual(
+    sanitizeWorkbenchSubscriptionUsageResult({ ok: true, observation, usage: {}, raw: "private" }),
+    { ok: false },
+  );
+  assert.deepEqual(
+    sanitizeWorkbenchSubscriptionUsageResult({ ok: true, observation: null, usage: { glm: glmUsageObservation } }),
+    { ok: true, observation: null, usage: { glm: glmUsageObservation } },
+  );
+});
+
+test("the generic usage-observation shape is reconstructed exactly, and mismatches/malformed windows never cross the boundary", () => {
+  assert.deepEqual(reconstructWorkbenchUsageObservation(glmUsageObservation), glmUsageObservation);
+  for (const value of [
+    { ...glmUsageObservation, endpointKey: "" },
+    { ...glmUsageObservation, source: "polling" },
+    { ...glmUsageObservation, observedAt: -1 },
+    { ...glmUsageObservation, windows: [{ label: "not-a-real-label", resetsAt: 1 }] },
+    { ...glmUsageObservation, windows: [{ label: "quota-window", utilization: 1.5 }] },
+    { ...glmUsageObservation, windows: [{ label: "quota-window", resetsAt: 1, extra: "field" }] },
+    { ...glmUsageObservation, session_id: "private" },
+  ]) assert.equal(reconstructWorkbenchUsageObservation(value), undefined);
+  assert.deepEqual(reconstructWorkbenchUsageObservations({ glm: glmUsageObservation }), { glm: glmUsageObservation });
+  assert.equal(reconstructWorkbenchUsageObservations({ glm: { ...glmUsageObservation, endpointKey: "kimi" } }), undefined, "a value's own endpointKey must match its map key");
+  assert.equal(reconstructWorkbenchUsageObservations({ glm: { ...glmUsageObservation, extra: "field" } }), undefined);
 });
 
 test("preload reads storage once, accepts passive pushes, rejects stale initial reads and disposes its listener", async () => {
@@ -70,10 +141,10 @@ test("preload reads storage once, accepts passive pushes, rejects stale initial 
   const results: unknown[] = [];
   const dispose = bridge.observeSubscriptionUsage!(result => { results.push(result); });
   assert.deepEqual(reads, [load]);
-  listeners.get(changed)!({}, { ok: true, observation });
-  finish({ ok: true, observation: null });
+  listeners.get(changed)!({}, { ok: true, observation, usage: {} });
+  finish({ ok: true, observation: null, usage: {} });
   await Promise.resolve();
-  assert.deepEqual(results, [{ ok: true, observation }]);
+  assert.deepEqual(results, [{ ok: true, observation, usage: {} }]);
   const late = listeners.get(changed)!;
   dispose();
   late({}, { ok: false });
@@ -93,16 +164,19 @@ test("usage IPC only reads for its owning live renderer and stops publishing on 
   const binding = installWorkbenchSubscriptionUsageIpc({
     ipcMain: { handle(_, listener) { handler = listener; }, removeHandler() {} },
     window: { webContents: sender, on: sender.on, removeListener: sender.removeListener },
-    source: { async readClaudeSubscriptionUsage() { reads++; return observation; } },
+    source: {
+      async readClaudeSubscriptionUsage() { reads++; return observation; },
+      async readUsageObservations() { return { glm: glmUsageObservation }; },
+    },
   });
   assert.deepEqual(await handler({ sender: {} }), { ok: false });
   assert.deepEqual(await handler({ sender }, "extra"), { ok: false });
   assert.equal(reads, 0);
-  assert.deepEqual(await handler({ sender }), { ok: true, observation });
-  binding.publish({ ok: true, observation });
+  assert.deepEqual(await handler({ sender }), { ok: true, observation, usage: { glm: glmUsageObservation } });
+  binding.publish({ ok: true, observation, usage: { glm: glmUsageObservation } });
   assert.equal(sent.length, 1);
   lifecycle.get("closed")!();
-  binding.publish({ ok: true, observation });
+  binding.publish({ ok: true, observation, usage: { glm: glmUsageObservation } });
   assert.deepEqual(await handler({ sender }), { ok: false });
   assert.equal(sent.length, 1);
   binding.dispose();

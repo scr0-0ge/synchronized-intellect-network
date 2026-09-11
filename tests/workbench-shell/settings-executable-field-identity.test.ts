@@ -34,7 +34,7 @@ const noOp = (): void => undefined;
 const FIXTURE_ENDPOINT_IDS: readonly WorkbenchRuntimeEndpointId[] =
   Object.freeze(["codex-desktop", "claude-code-desktop"]);
 
-test("w202: the Claude family card and the GLM fallback card do not collide on one executable-path id, and a confirmed Re-check stops re-asking for one", async () => {
+test("w202/w233: each runtime has exactly one executable-path field, on its Tools row, and a confirmed check stops re-asking for one", async () => {
   const exposeWorkbenchScreen: Plugin = {
     name: "expose-settings-executable-field-screen",
     enforce: "pre",
@@ -76,8 +76,10 @@ test("w202: the Claude family card and the GLM fallback card do not collide on o
     // Neither desktop runtime is on PATH, and GLM (which piggybacks the same
     // "claude" executable, per view-model.ts's runtime assignment) is also
     // unlocated: this is the exact shape from the w190 walkthrough where the
-    // Claude family card and the "Other providers" GLM card each render an
-    // executable-path field for runtime "claude".
+    // Claude family card and the "Other providers" GLM card each rendered an
+    // executable-path field for runtime "claude" under one id. Since w233
+    // step 2 the field renders once per runtime, on the Tools row; the cards
+    // only point there.
     const runtimeNotLocated = completeDirectSessionProfileLoad(
       beginDirectSessionProfileLoad(projectReady),
       {
@@ -110,16 +112,23 @@ test("w202: the Claude family card and the GLM fallback card do not collide on o
     const executableFieldIds = [
       ...unlocatedHtml.matchAll(/<input[^>]*\sid="(runtime-executable-[^"]+)"/gu),
     ].map((match) => match[1]);
-    assert.equal(
-      executableFieldIds.length,
-      3,
-      "the Codex family card, the Claude family card, and the GLM fallback card must each render their own executable-path field",
+    assert.deepEqual(
+      [...executableFieldIds].sort(),
+      ["runtime-executable-claude", "runtime-executable-codex"],
+      "exactly one executable-path field per runtime, on its Tools row -- a <label for> can only ever resolve to the first element with an id",
     );
-    assert.equal(
-      new Set(executableFieldIds).size,
-      executableFieldIds.length,
-      "two executable-path fields for the same underlying runtime must not share one id -- a <label for> can only ever resolve to the first element with that id",
-    );
+    for (const card of providerCards(unlocatedHtml)) {
+      assert.doesNotMatch(
+        card,
+        /runtime-executable-/u,
+        "no provider card renders an executable-path field of its own",
+      );
+      assert.match(
+        plainText(card),
+        /under Tools\./u,
+        "a card whose CLI is missing points at Tools",
+      );
+    }
 
     const labelTargets = [
       ...unlocatedHtml.matchAll(/<label[^>]*\bfor="(runtime-executable-[^"]+)"/gu),
@@ -144,14 +153,15 @@ test("w202: the Claude family card and the GLM fallback card do not collide on o
       { codex: "", claude: "C:\\uaw-qa\\claude.cmd" },
       { claude: { status: "saved" } },
     );
-    const claudeCard =
-      providerCards(readyHtml).find((card) => /provider-claude/u.test(card)) ??
-      "";
-    assert.notEqual(claudeCard, "", "expected the Claude family card to render");
+    const claudeTool =
+      readyHtml.match(
+        /<section[^>]*class="provider tool-row tool-claude"[^>]*>[\s\S]*?<\/section>/u,
+      )?.[0] ?? "";
+    assert.notEqual(claudeTool, "", "expected the Claude Tools row to render");
     assert.doesNotMatch(
-      plainText(claudeCard),
-      /Saved\. Re-check to start the runtime\./u,
-      "once Re-check has confirmed the CLI (Catalog ready), the field must not keep asking for a Re-check that already happened",
+      plainText(claudeTool),
+      /Saved\. Press Check all to start the runtime\./u,
+      "once a check has confirmed the CLI (Catalog ready), the field must not keep asking for a check that already happened",
     );
   } finally {
     await server.close();

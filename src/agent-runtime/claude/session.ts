@@ -7,6 +7,8 @@ import type {
   RuntimeContextUsage,
   RuntimeSubscriptionUsageObserver,
   RuntimeSubscriptionUsageWindow,
+  RuntimeUsageObserver,
+  RuntimeUsageWindow,
   RuntimeInput,
   RuntimeProgressActivity,
   RuntimeToolActivity,
@@ -226,6 +228,8 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
   #sessionStarted = false;
   #terminal = false;
   readonly #observeSubscriptionUsage: RuntimeSubscriptionUsageObserver | undefined;
+  readonly #observeUsage: RuntimeUsageObserver | undefined;
+  readonly #usageEndpointKey: string;
   #capabilities = new Set<string>();
   #sessionIdentity: string | undefined;
   #interruptConfirmed = false;
@@ -256,6 +260,10 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
     readonly stopHookCallbackId: string;
     readonly observeSessionIdentity: (identity: string) => void;
     readonly observeSubscriptionUsage?: RuntimeSubscriptionUsageObserver;
+    /** Provider-agnostic usage-window sink; runs alongside `observeSubscriptionUsage`, never in place of it. */
+    readonly observeUsage?: RuntimeUsageObserver;
+    /** Row identity for `observeUsage` observations. Composition supplies this per endpoint. */
+    readonly usageEndpointKey?: string;
     readonly expectedSessionIdentity?: string;
     readonly providerRequestBudget?: ProviderRequestBudget;
     readonly permissionMode: ClaudePermissionMode;
@@ -266,6 +274,8 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
   }) {
     this.#transport = input.transport;
     this.#observeSubscriptionUsage = input.observeSubscriptionUsage;
+    this.#observeUsage = input.observeUsage;
+    this.#usageEndpointKey = input.usageEndpointKey ?? "unknown";
     this.profile = Object.freeze({ ...input.profile });
     this.opaqueSessionReference = input.opaqueSessionReference;
     this.#expectedModel = input.expectedModel;
@@ -758,7 +768,21 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
             await this.#transport.stop();
             terminal = true;
             this.#terminal = true;
-            const resetsAt = glmQuotaRefusalResetsAt(quotaRefusalText) ?? lastRateLimitWindowResetsAt;
+            const textResetsAt = glmQuotaRefusalResetsAt(quotaRefusalText);
+            const resetsAt = textResetsAt ?? lastRateLimitWindowResetsAt;
+            if (this.#observeUsage !== undefined && textResetsAt !== undefined) {
+              const usageObservation = Object.freeze({
+                endpointKey: this.#usageEndpointKey,
+                windows: Object.freeze([
+                  Object.freeze({ label: "quota-window" as const, resetsAt: textResetsAt }),
+                ]),
+                observedAt: Date.now(),
+                source: "exhaustion-message" as const,
+              });
+              try { await this.#observeUsage(usageObservation); } catch {
+                // Unavailable settings storage must not fail a healthy turn.
+              }
+            }
             yield resetsAt === undefined
               ? { kind: "turn-paused", reason: "quota-exhausted" }
               : { kind: "turn-paused", reason: "quota-exhausted", resetsAt };
@@ -894,6 +918,24 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
                 observedAt: Date.now(),
               });
               try { await this.#observeSubscriptionUsage(observation); } catch {
+                // Unavailable settings storage must not fail a healthy turn.
+              }
+            }
+            if (this.#observeUsage !== undefined) {
+              const windows: RuntimeUsageWindow[] = [];
+              if (fiveHourWindow !== null) {
+                windows.push({ label: "five-hour", utilization: fiveHourWindow.utilization, resetsAt: fiveHourWindow.resetsAt * 1000 });
+              }
+              if (sevenDayWindow !== null) {
+                windows.push({ label: "seven-day", utilization: sevenDayWindow.utilization, resetsAt: sevenDayWindow.resetsAt * 1000 });
+              }
+              const usageObservation = Object.freeze({
+                endpointKey: this.#usageEndpointKey,
+                windows: Object.freeze(windows),
+                observedAt: Date.now(),
+                source: "rate-limit-event" as const,
+              });
+              try { await this.#observeUsage(usageObservation); } catch {
                 // Unavailable settings storage must not fail a healthy turn.
               }
             }

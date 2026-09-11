@@ -2093,57 +2093,75 @@ kbd {
 .settings-close-button { flex: 0 0 auto; }
 .settings .lede { max-width: 60ch; color: var(--fg-1); font-size: 13px; line-height: 1.6; }
 
-.guard {
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr);
-  gap: 10px;
-  margin: 18px 0 26px;
-  padding: 12px 14px;
-  border: 1px solid var(--line-1);
-  border-left: 2px solid var(--ok);
-  border-radius: var(--r-md);
-  background: var(--bg-1);
-}
+.provider-settings { display: grid; gap: 12px; }
 
-.guard .g-glyph { color: var(--ok); font-size: 13px; }
-.guard b { display: block; margin-bottom: 3px; font-size: 12.5px; }
-.guard p { color: var(--fg-1); font-size: 12px; line-height: 1.55; }
-
-.provider-settings { display: grid; gap: 16px; }
-.provider-settings .guard { margin: 0; }
-.provider-group h3,
-.provider-status-key h3 {
-  margin-bottom: 8px;
-  color: var(--fg-1);
-  font-size: 12px;
-  font-weight: 650;
-}
-.provider-group-empty,
-.other-providers p {
-  padding: 11px 13px;
-  border: 1px solid var(--line-0);
-  border-radius: var(--r-md);
+/* w233. One line of policy under the Providers heading; the full sentence and
+   every other explanation on this page sit behind a native disclosure. */
+.providers-policy { display: grid; gap: 2px; }
+.providers-policy-line {
+  max-width: 70ch;
   color: var(--fg-2);
-  background: var(--bg-1);
   font-size: 11.5px;
   line-height: 1.5;
 }
-.provider-status-key {
-  padding: 12px 14px;
-  border: 1px solid var(--line-0);
-  border-radius: var(--r-md);
-  background: var(--bg-1);
+.settings-details { font-size: 11px; line-height: 1.45; }
+/* Chrome keeps a closed <details>' children laid out behind content-visibility,
+   so they still report client rects at their would-be positions and the
+   rendered-surface guard reads phantom strings under the actions strip. Closed
+   means gone: no box, no reading. */
+.settings-details:not([open]) > :not(summary) { display: none; }
+.settings-details > summary {
+  width: max-content;
+  max-width: 100%;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  font-weight: 620;
+  cursor: pointer;
+  user-select: none;
 }
-.provider-status-key dl { display: grid; gap: 7px; }
-.provider-status-key dl > div {
-  display: grid;
-  grid-template-columns: minmax(110px, 0.35fr) minmax(0, 1fr);
-  gap: 10px;
+.settings-details > summary:hover { color: var(--fg-1); }
+.settings-details > summary:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+.settings-details[open] > summary { margin-bottom: 6px; }
+.settings-details > p {
+  max-width: 62ch;
+  margin: 0 0 6px;
+  color: var(--fg-3);
+}
+.provider-details { margin-top: 10px; }
+.provider-details > .kv { margin-bottom: 8px; }
+.provider-details > .provider-status-detail { margin-top: 0; }
+.provider-details > .provider-lookup-label { margin-top: 8px; }
+.provider-segments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+/* w233 step 2. The Tools rows reuse the provider card shell. */
+.tools-settings { display: grid; gap: 0; }
+.tool-row .provider-body { padding-top: 10px; }
+.tool-row .runtime-install { margin-bottom: 4px; }
+.tool-details { margin-top: 6px; }
+.tool-details > .runtime-executable-form { margin-top: 6px; }
+.tool-path {
+  font-family: var(--mono, monospace);
+  overflow-wrap: anywhere;
+}
+.provider-tools-hint {
+  margin: 8px 0 0;
+  color: var(--fg-2);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.settings-foot-note {
+  margin-top: 26px;
+  color: var(--fg-3);
   font-size: 11px;
-  line-height: 1.45;
+  line-height: 1.5;
 }
-.provider-status-key dt { color: var(--fg-1); font-weight: 620; }
-.provider-status-key dd { color: var(--fg-3); }
 
 .section-head {
   display: flex;

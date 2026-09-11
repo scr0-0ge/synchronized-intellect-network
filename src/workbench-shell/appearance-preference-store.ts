@@ -1,5 +1,9 @@
-import { reconstructWorkbenchSubscriptionUsage } from "./result-sanitizer.ts";
-import type { WorkbenchSubscriptionUsageObservation } from "./contract.ts";
+import {
+  reconstructWorkbenchSubscriptionUsage,
+  reconstructWorkbenchUsageObservation,
+  reconstructWorkbenchUsageObservations,
+} from "./result-sanitizer.ts";
+import type { WorkbenchSubscriptionUsageObservation, WorkbenchUsageObservation } from "./contract.ts";
 import { randomUUID } from "node:crypto";
 import {
   lstat,
@@ -94,11 +98,16 @@ export interface WorkbenchAppearancePreferenceStore {
   ): Promise<string>;
   readClaudeSubscriptionUsage(): Promise<WorkbenchSubscriptionUsageObservation | null>;
   saveClaudeSubscriptionUsage(observation: WorkbenchSubscriptionUsageObservation): Promise<WorkbenchSubscriptionUsageObservation>;
+  /** Keyed by endpointKey ("glm"/"kimi"/"deepseek"/...); Claude's own slot stays on the field above. */
+  readUsageObservations(): Promise<Readonly<Record<string, WorkbenchUsageObservation>>>;
+  /** Merges one endpointKey's slot; an older observedAt than the stored one is a no-op (mirrors Claude's guard). */
+  saveUsageObservation(observation: WorkbenchUsageObservation): Promise<WorkbenchUsageObservation>;
   close(): Promise<void>;
 }
 
 interface WorkbenchPreferenceDocument {
   readonly claudeSubscriptionUsage: WorkbenchSubscriptionUsageObservation | null;
+  readonly usageObservations: Readonly<Record<string, WorkbenchUsageObservation>>;
   readonly appearance: WorkbenchAppearancePreference;
   readonly claudePermissionHandling: WorkbenchClaudePermissionHandling;
   readonly endpointPreference: WorkbenchFamilyEndpointPreferences;
@@ -106,9 +115,17 @@ interface WorkbenchPreferenceDocument {
   readonly endpointBaseUrls: WorkbenchEndpointBaseUrls;
 }
 
+const defaultWorkbenchUsageObservations: Readonly<Record<string, WorkbenchUsageObservation>> = Object.freeze({});
+
+/** v10's base key set; claudeSubscriptionUsage/usageObservations are each independently optional. */
+const v10BaseKeys = [
+  "appearance", "claudePermissionHandling", "endpointBaseUrls", "endpointPreference", "runtimeExecutables", "schemaVersion",
+] as const;
+
 const defaultWorkbenchPreferenceDocument: WorkbenchPreferenceDocument =
   Object.freeze({
     claudeSubscriptionUsage: null,
+    usageObservations: defaultWorkbenchUsageObservations,
     appearance: defaultWorkbenchAppearancePreference,
     claudePermissionHandling: defaultWorkbenchClaudePermissionHandling,
     endpointPreference: defaultWorkbenchFamilyEndpointPreferences,
@@ -172,6 +189,7 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             current.runtimeExecutables,
             current.claudeSubscriptionUsage,
             current.endpointBaseUrls,
+            current.usageObservations,
           ),
           atomicReplace,
         );
@@ -206,6 +224,7 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             current.runtimeExecutables,
             current.claudeSubscriptionUsage,
             current.endpointBaseUrls,
+            current.usageObservations,
           ),
           atomicReplace,
         );
@@ -243,6 +262,7 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             current.runtimeExecutables,
             current.claudeSubscriptionUsage,
             current.endpointBaseUrls,
+            current.usageObservations,
           ),
           atomicReplace,
         );
@@ -276,6 +296,7 @@ export function createWorkbenchAppearancePreferenceStore(options: {
             captured,
             current.claudeSubscriptionUsage,
             current.endpointBaseUrls,
+            current.usageObservations,
           ),
           atomicReplace,
         );
@@ -329,6 +350,27 @@ export function createWorkbenchAppearancePreferenceStore(options: {
           return current.claudeSubscriptionUsage;
         }
         await writePreference(options.filePath, Object.freeze({ ...current, claudeSubscriptionUsage: captured }), atomicReplace);
+        return captured;
+      });
+    },
+    readUsageObservations() {
+      return enqueue(async () => (await readPreferenceDocument(options.filePath)).usageObservations);
+    },
+    saveUsageObservation(observation: WorkbenchUsageObservation) {
+      let captured: WorkbenchUsageObservation;
+      try {
+        captured = captureUsageObservation(observation);
+      } catch {
+        return Promise.reject(new WorkbenchAppearancePreferenceStoreError("preferences-invalid"));
+      }
+      return enqueue(async () => {
+        const current = await readPreferenceDocument(options.filePath);
+        const existing = current.usageObservations[captured.endpointKey];
+        if (existing !== undefined && existing.observedAt > captured.observedAt) return existing;
+        await writePreference(options.filePath, Object.freeze({
+          ...current,
+          usageObservations: Object.freeze({ ...current.usageObservations, [captured.endpointKey]: captured }),
+        }), atomicReplace);
         return captured;
       });
     },
@@ -536,6 +578,25 @@ async function readPreferenceDocument(
         captureEndpointBaseUrls(document.endpointBaseUrls),
       );
     }
+    // w234 follow-up migration: usageObservations (GLM/Kimi/DeepSeek, keyed by
+    // endpointKey) is new in v10. claudeSubscriptionUsage stays its own v7 field.
+    if (
+      (isExactDataRecord(document, v10BaseKeys) ||
+        isExactDataRecord(document, [...v10BaseKeys, "claudeSubscriptionUsage"]) ||
+        isExactDataRecord(document, [...v10BaseKeys, "usageObservations"]) ||
+        isExactDataRecord(document, [...v10BaseKeys, "claudeSubscriptionUsage", "usageObservations"])) &&
+      document.schemaVersion === 10
+    ) {
+      return capturePreferenceDocument(
+        captureAppearance(document.appearance),
+        captureClaudePermissionHandling(document.claudePermissionHandling),
+        captureFamilyEndpointPreferencesRecord(document.endpointPreference),
+        captureRuntimeExecutables(document.runtimeExecutables),
+        document.claudeSubscriptionUsage === undefined ? null : captureSubscriptionUsage(document.claudeSubscriptionUsage),
+        captureEndpointBaseUrls(document.endpointBaseUrls),
+        document.usageObservations === undefined ? defaultWorkbenchUsageObservations : captureUsageObservations(document.usageObservations),
+      );
+    }
     throw new Error("invalid-appearance-preferences");
   } catch {
     throw new WorkbenchAppearancePreferenceStoreError("preferences-invalid");
@@ -560,8 +621,9 @@ async function writePreference(
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const contents = `${JSON.stringify({
-      schemaVersion: 9,
+      schemaVersion: 10,
       ...(preference.claudeSubscriptionUsage === null ? {} : { claudeSubscriptionUsage: preference.claudeSubscriptionUsage }),
+      ...(Object.keys(preference.usageObservations).length === 0 ? {} : { usageObservations: preference.usageObservations }),
       appearance: preference.appearance,
       claudePermissionHandling: preference.claudePermissionHandling,
       endpointPreference: preference.endpointPreference,
@@ -597,6 +659,7 @@ function capturePreferenceDocument(
   runtimeExecutables: WorkbenchRuntimeExecutablePaths,
   claudeSubscriptionUsage: WorkbenchSubscriptionUsageObservation | null = null,
   endpointBaseUrls: WorkbenchEndpointBaseUrls = defaultWorkbenchEndpointBaseUrls,
+  usageObservations: Readonly<Record<string, WorkbenchUsageObservation>> = defaultWorkbenchUsageObservations,
 ): WorkbenchPreferenceDocument {
   return Object.freeze({
     appearance,
@@ -605,6 +668,7 @@ function capturePreferenceDocument(
     endpointBaseUrls,
     runtimeExecutables,
     claudeSubscriptionUsage,
+    usageObservations,
   });
 }
 
@@ -987,4 +1051,17 @@ function captureSubscriptionUsage(value: unknown): WorkbenchSubscriptionUsageObs
   const observation = reconstructWorkbenchSubscriptionUsage(value);
   if (observation === undefined) throw new WorkbenchAppearancePreferenceStoreError("preferences-invalid");
   return observation;
+}
+
+function captureUsageObservation(value: unknown): WorkbenchUsageObservation {
+  const observation = reconstructWorkbenchUsageObservation(value);
+  if (observation === undefined) throw new WorkbenchAppearancePreferenceStoreError("preferences-invalid");
+  return observation;
+}
+
+/** The v10 usageObservations record: any endpointKey set, every value's own endpointKey matches its map key. */
+function captureUsageObservations(value: unknown): Readonly<Record<string, WorkbenchUsageObservation>> {
+  const observations = reconstructWorkbenchUsageObservations(value);
+  if (observations === undefined) throw new WorkbenchAppearancePreferenceStoreError("preferences-invalid");
+  return observations;
 }

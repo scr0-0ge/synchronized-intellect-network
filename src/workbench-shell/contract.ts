@@ -19,8 +19,15 @@ import { WORKBENCH_RUNTIME_ENDPOINT_IDS } from "./runtime-endpoint-identity.ts";
 
 /** Claude subscription account snapshot; null means never observed. */
 export type WorkbenchSubscriptionUsageObservation = import("../agent-runtime/index.ts").RuntimeSubscriptionUsageObservation;
+/** Provider-agnostic account-window snapshot (w234); one per observed endpointKey. */
+export type WorkbenchUsageObservation = import("../agent-runtime/index.ts").RuntimeUsageObservation;
 export type WorkbenchSubscriptionUsageResult =
-  | { readonly ok: true; readonly observation: WorkbenchSubscriptionUsageObservation | null }
+  | {
+      readonly ok: true;
+      readonly observation: WorkbenchSubscriptionUsageObservation | null;
+      /** Keyed by endpointKey ("glm"/"kimi"/"deepseek"/...); absent keys were never observed. */
+      readonly usage: Readonly<Record<string, WorkbenchUsageObservation>>;
+    }
   | { readonly ok: false };
 export const WORKBENCH_LOAD_SUBSCRIPTION_USAGE_CHANNEL = "workbench:load-subscription-usage";
 export const WORKBENCH_SUBSCRIPTION_USAGE_CHANGED_CHANNEL = "workbench:subscription-usage-changed";

@@ -16,6 +16,58 @@ export type RuntimeSubscriptionUsageObserver = (
   observation: RuntimeSubscriptionUsageObservation,
 ) => void | Promise<void>;
 
+/** Semantic window kind; the renderer owns the bilingual wording per kind. */
+export type RuntimeUsageWindowLabel = "five-hour" | "seven-day" | "quota-window";
+
+/** Provider-agnostic account-window telemetry. Absent fields are unknown, never defaulted to 0. */
+export interface RuntimeUsageWindow {
+  readonly label: RuntimeUsageWindowLabel;
+  /** 0..1. Absent when the source never reports a fraction (e.g. exhaustion text). */
+  readonly utilization?: number;
+  /** Epoch milliseconds. */
+  readonly resetsAt?: number;
+}
+
+export interface RuntimeUsageObservation {
+  readonly endpointKey: string;
+  readonly windows: readonly RuntimeUsageWindow[];
+  /** Local receipt time, epoch milliseconds; never refreshed by reading storage. */
+  readonly observedAt: number;
+  readonly source: "rate-limit-event" | "exhaustion-message";
+}
+
+export type RuntimeUsageObserver = (
+  observation: RuntimeUsageObservation,
+) => void | Promise<void>;
+
+/** Reuses the existing Claude-only observation to build the generic per-provider row. */
+export function subscriptionUsageToUsageObservation(
+  endpointKey: string,
+  observation: RuntimeSubscriptionUsageObservation,
+): RuntimeUsageObservation {
+  const windows: RuntimeUsageWindow[] = [];
+  if (observation.five_hour !== null) {
+    windows.push({
+      label: "five-hour",
+      utilization: observation.five_hour.utilization,
+      resetsAt: observation.five_hour.resetsAt * 1000,
+    });
+  }
+  if (observation.seven_day !== null) {
+    windows.push({
+      label: "seven-day",
+      utilization: observation.seven_day.utilization,
+      resetsAt: observation.seven_day.resetsAt * 1000,
+    });
+  }
+  return Object.freeze({
+    endpointKey,
+    windows: Object.freeze(windows),
+    observedAt: observation.observedAt,
+    source: "rate-limit-event",
+  });
+}
+
 export interface RuntimeWorkIntensityVariant {
   /** Runtime-owned selectable wording; it is not a native effort value. */
   readonly value: string;
