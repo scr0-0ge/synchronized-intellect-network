@@ -442,6 +442,11 @@ function projectSelectionResultText(
         "project.switch-unavailable",
         () => dynamicCopy.project.switchUnavailable,
       );
+    case "project-directory-is-drive-root":
+      return ownedText(
+        "project.drive-root-refused",
+        () => dynamicCopy.project.driveRootRefused,
+      );
   }
 }
 
@@ -449,10 +454,15 @@ function openProjectResultText(
   result: WorkbenchOpenProjectResult,
 ): WorkbenchPresentationText {
   if (!result.ok) {
-    return ownedText(
-      "project.open-unavailable",
-      () => dynamicCopy.project.openUnavailable,
-    );
+    return result.error.category === "project-directory-is-drive-root"
+      ? ownedText(
+          "project.drive-root-refused",
+          () => dynamicCopy.project.driveRootRefused,
+        )
+      : ownedText(
+          "project.open-unavailable",
+          () => dynamicCopy.project.openUnavailable,
+        );
   }
   if (result.status === "history-selection-required") {
     return ownedText(

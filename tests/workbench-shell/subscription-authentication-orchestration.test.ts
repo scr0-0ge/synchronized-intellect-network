@@ -1142,3 +1142,261 @@ function deferred<Value>() {
 async function tick(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+// F-w187 / public issue #4 -- the shell half.
+//
+// The renderer already has one inspection in flight for the whole of a login:
+// it is issued the moment the action is accepted, and it used to resolve only
+// when the CLI exited. That standing question is the channel the sign-in URL
+// travels on, so no new IPC exists. Two things have to hold: a URL answers it
+// early, and NO URL changes nothing at all.
+
+test("F-w187 a login's sign-in URL answers the pending inspection early, and the run still ends on a real inspected state", async () => {
+  const scheduler = controlledScheduler();
+  const child = controlledChildWithSignInUrl();
+  const postActionInspection = deferred<"bound">();
+  let inspections = 0;
+  const service = createSubscriptionAuthenticationService({
+    providers: [
+      Object.freeze({
+        endpointId: "codex-desktop" as const,
+        async launchLogin() {
+          return child;
+        },
+        async launchLogout() {
+          throw new Error("unused-controlled-action");
+        },
+        inspectAuthentication() {
+          inspections += 1;
+          return inspections === 1
+            ? Promise.resolve("sign-in-required" as const)
+            : postActionInspection.promise;
+        },
+      }),
+      inertProvider("claude-code-desktop"),
+    ],
+    scheduler,
+    timeoutMilliseconds: 30_000,
+    inspectionTimeoutMilliseconds: 10_000,
+  });
+  const observed: unknown[] = [];
+  const coordinator = createWorkbenchSubscriptionAuthenticationCoordinator({
+    endpoints: endpointDefinitions(),
+    authentication: service,
+    mutations: {
+      ...readyLoginMutations("opaque-signin-url-01"),
+      // The account-observation feed is the one thing here that reaches durable
+      // storage. A single-use authorisation code must never travel down it.
+      observe(request: unknown) {
+        observed.push(request);
+      },
+    },
+  });
+
+  await coordinator.request({
+    endpointSelectionKey:
+      WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+  });
+  await coordinator.request({
+    endpointSelectionKey:
+      WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+    action: "login",
+  });
+  assert.deepEqual(
+    accepted(await coordinator.request({ preparationKey: "opaque-signin-url-01" })),
+    { kind: "authentication-action-requested", action: "login" },
+  );
+
+  const firstInspection = coordinator.request({
+    endpointSelectionKey:
+      WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+  });
+  child.printSignInUrl(
+    "https://auth.example.invalid/oauth/authorize?code=SYNTHETIC-NOT-A-REAL-CODE",
+  );
+  assert.deepEqual(accepted(await firstInspection), {
+    kind: "authentication-sign-in-url",
+    url: "https://auth.example.invalid/oauth/authorize?code=SYNTHETIC-NOT-A-REAL-CODE",
+  });
+  // The login is still running: the URL was an answer, not an ending.
+  assert.equal(inspections, 1);
+
+  // Asked again, it goes back to waiting for the process, exactly as before,
+  // and the URL is not repeated -- a spent code must not keep reappearing.
+  const secondInspection = coordinator.request({
+    endpointSelectionKey:
+      WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+  });
+  child.finish();
+  await tick();
+  postActionInspection.resolve("bound");
+  assert.deepEqual(accepted(await secondInspection), {
+    kind: "authentication-state",
+    state: "bound",
+  });
+  assert.equal(observed.length > 0, true, "the state itself is still observed");
+  assert.doesNotMatch(
+    JSON.stringify(observed),
+    /auth\.example\.invalid|SYNTHETIC-NOT-A-REAL-CODE/u,
+    "the sign-in URL must never reach the durable observation feed",
+  );
+  await coordinator.close();
+});
+
+test("F-w187 a login that prints no URL leaves the pending inspection behaving exactly as it did", async () => {
+  const scheduler = controlledScheduler();
+  const child = controlledChildWithSignInUrl();
+  const postActionInspection = deferred<"sign-in-required">();
+  let inspections = 0;
+  const service = createSubscriptionAuthenticationService({
+    providers: [
+      Object.freeze({
+        endpointId: "codex-desktop" as const,
+        async launchLogin() {
+          return child;
+        },
+        async launchLogout() {
+          throw new Error("unused-controlled-action");
+        },
+        inspectAuthentication() {
+          inspections += 1;
+          return inspections === 1
+            ? Promise.resolve("sign-in-required" as const)
+            : postActionInspection.promise;
+        },
+      }),
+      inertProvider("claude-code-desktop"),
+    ],
+    scheduler,
+    timeoutMilliseconds: 30_000,
+    inspectionTimeoutMilliseconds: 10_000,
+  });
+  const coordinator = createWorkbenchSubscriptionAuthenticationCoordinator({
+    endpoints: endpointDefinitions(),
+    authentication: service,
+    mutations: readyLoginMutations("opaque-signin-url-02"),
+  });
+
+  await coordinator.request({
+    endpointSelectionKey:
+      WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+  });
+  await coordinator.request({
+    endpointSelectionKey:
+      WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+    action: "login",
+  });
+  await coordinator.request({ preparationKey: "opaque-signin-url-02" });
+
+  let settled = false;
+  const inspection = coordinator
+    .request({
+      endpointSelectionKey:
+        WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+    })
+    .then((result) => {
+      settled = true;
+      return result;
+    });
+  await tick();
+  // Nothing was printed, so nothing is claimed: no placeholder, no "waiting
+  // for sign-in", no early answer. The wait is the pre-w187 behaviour.
+  assert.equal(settled, false);
+
+  child.printNothing();
+  child.finish();
+  await tick();
+  postActionInspection.resolve("sign-in-required");
+  assert.deepEqual(accepted(await inspection), {
+    kind: "authentication-state",
+    state: "sign-in-required",
+  });
+  await coordinator.close();
+});
+
+function readyLoginMutations(preparationKey: string) {
+  return Object.freeze({
+    prepare() {
+      return { kind: "ready" as const, preparationKey };
+    },
+    begin() {
+      return {
+        kind: "begun" as const,
+        endpointSelectionKey:
+          WORKBENCH_SUBSCRIPTION_AUTHENTICATION_ENDPOINT_SELECTIONS.codex,
+        action: "login" as const,
+      };
+    },
+    cancel() {
+      return false;
+    },
+  });
+}
+
+function controlledChildWithSignInUrl() {
+  const finished = deferred<void>();
+  const url = deferred<string | undefined>();
+  return Object.freeze({
+    finished: finished.promise,
+    signInUrl: url.promise,
+    printSignInUrl: (value: string) => url.resolve(value),
+    printNothing: () => url.resolve(undefined),
+    finish: () => finished.resolve(undefined),
+    async terminate() {
+      url.resolve(undefined);
+      finished.resolve(undefined);
+    },
+  });
+}
+
+test("F-w187 only an https sign-in link crosses the boundary", async () => {
+  const coordinator = createWorkbenchSubscriptionAuthenticationCoordinator({
+    endpoints: endpointDefinitions(),
+    authentication: {
+      async inspect(endpointId) {
+        return { endpointId, authentication: "unknown" as const };
+      },
+      async startAction() {
+        throw new Error("unused-controlled-action");
+      },
+      async close() {},
+    },
+    mutations: unusedMutations(),
+  });
+
+  const admitted =
+    "https://auth.example.invalid/oauth/authorize?code=SYNTHETIC-NOT-A-REAL-CODE";
+  assert.deepEqual(
+    accepted(
+      coordinator.sanitizePublicResponse({
+        kind: "authentication-sign-in-url",
+        url: admitted,
+      }),
+    ),
+    { kind: "authentication-sign-in-url", url: admitted },
+  );
+
+  for (const refused of [
+    // The renderer shows this string to a reader who is about to trust it.
+    "javascript:alert(1)",
+    "data:text/html,<script></script>",
+    // The CLI's own callback server signs nobody in.
+    "http://localhost:1455",
+    // A value that needed repairing is not the value the CLI printed.
+    "https://auth.example.invalid/a b",
+    "https://auth.example.invalid/\u0000",
+    "https://auth.example.invalid/\u202e",
+    `https://auth.example.invalid/${"a".repeat(2_100)}`,
+    "",
+  ]) {
+    assert.deepEqual(
+      coordinator.sanitizePublicResponse({
+        kind: "authentication-sign-in-url",
+        url: refused,
+      }),
+      { accepted: false },
+      `refused: ${refused.slice(0, 40)}`,
+    );
+  }
+  await coordinator.close();
+});

@@ -78,7 +78,10 @@ test("Claude binding fixes auth login, discards all output, scrubs credentials, 
   assert.equal(executable, "private-claude-executable");
   assert.deepEqual(arguments_, ["auth", "login"]);
   assert.equal(options.shell, false);
-  assert.equal(options.stdio, "ignore");
+  // Changed deliberately (F-w187 / public issue #4): a login is READ, because
+  // the sign-in URL the CLI prints is the only way back for a reader whose
+  // browser did not open. stdin stays ignored and the console stays hidden.
+  assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(options.windowsHide, true);
   assert.equal("cwd" in options, false);
   assertClaudeOAuthOnlyEnvironment(options.env as NodeJS.ProcessEnv);
@@ -136,6 +139,7 @@ test("Claude logout fixes auth logout, discards all output, scrubs credentials, 
   assert.equal(executable, "private-claude-executable");
   assert.deepEqual(arguments_, ["auth", "logout"]);
   assert.equal(options.shell, false);
+  // A logout prints nothing a reader needs, so it stays fully discarded.
   assert.equal(options.stdio, "ignore");
   assert.equal(options.windowsHide, true);
   assert.equal("cwd" in options, false);
@@ -249,7 +253,8 @@ test("Codex binding fixes login, discards output, scrubs API credentials, and ki
   assert.equal(launchedHandle, executable);
   assert.deepEqual(arguments_, ["login"]);
   assert.equal(options.shell, false);
-  assert.equal(options.stdio, "ignore");
+  // Changed deliberately (F-w187 / public issue #4); see the Claude login test.
+  assert.deepEqual(options.stdio, ["ignore", "pipe", "pipe"]);
   assert.equal(options.windowsHide, true);
   assert.equal("cwd" in options, false);
   assertCodexOAuthOnlyEnvironment(options.env as NodeJS.ProcessEnv);
@@ -300,6 +305,7 @@ test("Codex logout fixes logout, discards output, scrubs API credentials, and ow
   assert.equal(launchedHandle, executable);
   assert.deepEqual(arguments_, ["logout"]);
   assert.equal(options.shell, false);
+  // A logout prints nothing a reader needs, so it stays fully discarded.
   assert.equal(options.stdio, "ignore");
   assert.equal(options.windowsHide, true);
   assert.equal("cwd" in options, false);
@@ -340,7 +346,11 @@ test("Codex provider exposes only fixed login and logout action entry points", a
   ]);
 });
 
-test("both provider adapters treat exit zero, nonzero, and signal as output-free lifecycle only", async () => {
+// A logout is still output-free. A login is not any more -- it is read for the
+// sign-in URL -- so the poisoned child is now pointed at logout only, and the
+// login half of this promise is pinned by the sign-in-url test file: reading
+// that output must still never become a status reading or an invented state.
+test("logout treats exit zero, nonzero, and signal as output-free lifecycle only", async () => {
   for (const exitMode of ["zero", "nonzero", "signal"] as const) {
     const claudeChild = fakeNativeChildWithPoisonedOutput();
     let claudeStatusReads = 0;
@@ -360,9 +370,9 @@ test("both provider adapters treat exit zero, nonzero, and signal as output-free
         environment: Object.freeze({}),
       }),
     );
-    const claudeOwned = await (exitMode === "zero"
-      ? claudeProvider.launchLogin(new AbortController().signal)
-      : claudeProvider.launchLogout(new AbortController().signal));
+    const claudeOwned = await claudeProvider.launchLogout(
+      new AbortController().signal,
+    );
     finishNativeChild(claudeChild, exitMode);
     await claudeOwned.finished;
     assert.equal(claudeStatusReads, 0);
@@ -385,9 +395,8 @@ test("both provider adapters treat exit zero, nonzero, and signal as output-free
         async removeCleanupDirectory() {},
         environment: Object.freeze({}),
       });
-    const codexOwned = await (exitMode === "zero"
-      ? createOfficialCodexSubscriptionLoginProcess(codexDependencies)
-      : createOfficialCodexSubscriptionLogoutProcess(codexDependencies));
+    const codexOwned =
+      await createOfficialCodexSubscriptionLogoutProcess(codexDependencies);
     finishNativeChild(codexChild, exitMode);
     await codexOwned.finished;
     assert.equal(codexChild.killCalls(), 0);

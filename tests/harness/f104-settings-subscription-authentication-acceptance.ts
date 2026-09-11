@@ -188,6 +188,11 @@ export type F104PublicResponse =
   | Readonly<{
       kind: "authentication-action-partially-completed";
       action: F104AuthenticationAction;
+    }>
+  // Mirrors the product union: the sign-in URL a running login printed.
+  | Readonly<{
+      kind: "authentication-sign-in-url";
+      url: string;
     }>;
 
 export type F104BoundaryResult<Value> =

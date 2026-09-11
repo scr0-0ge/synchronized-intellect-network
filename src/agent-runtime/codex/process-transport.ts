@@ -14,6 +14,7 @@ import type { Interface as ReadLineInterface } from "node:readline";
 
 import { RuntimeAdapterError } from "../index.ts";
 import {
+  observeSubscriptionSignInUrl,
   ownSubscriptionAuthenticationProcess,
   waitForSubscriptionAuthenticationProcessSpawn,
   type SubscriptionAuthenticationChild,
@@ -142,6 +143,20 @@ export interface CodexProcessTransportOptions {
   readonly environment?: NodeJS.ProcessEnv;
 }
 
+/**
+ * How the launched authentication process's streams are wired.
+ *
+ * `logout` keeps `"ignore"`: it prints nothing a reader needs and nothing is
+ * gained by holding two pipes open. `login` is read, because the sign-in URL
+ * the CLI prints is the only way back for a user whose browser did not open --
+ * and discarding it is what public issue #4 is about. `windowsHide: true` is
+ * unchanged either way: the console it hides is the CLI's own, never the
+ * browser, which is a separate process.
+ */
+export type CodexSubscriptionLoginStdio =
+  | "ignore"
+  | ["ignore", "pipe", "pipe"];
+
 export interface CodexSubscriptionLoginProcessDependencies {
   discoverExecutable(): Promise<CodexExecutableDiscoveryResult>;
   spawnProcess(
@@ -150,7 +165,7 @@ export interface CodexSubscriptionLoginProcessDependencies {
     options: {
       readonly env: NodeJS.ProcessEnv;
       readonly shell: false;
-      readonly stdio: "ignore";
+      readonly stdio: CodexSubscriptionLoginStdio;
       readonly windowsHide: true;
     },
   ): ChildProcess;
@@ -756,12 +771,20 @@ async function launchCodexSubscriptionLogin(
     Object.freeze({
       env: Object.freeze(environment),
       shell: false as const,
-      stdio: "ignore" as const,
+      stdio:
+        action === "login"
+          ? (["ignore", "pipe", "pipe"] as ["ignore", "pipe", "pipe"])
+          : ("ignore" as const),
       windowsHide: true as const,
     }),
   );
+  // Attached before the spawn is awaited: the CLI prints its sign-in URL within
+  // a moment of starting, and a listener added afterwards can miss the chunk
+  // that carries it.
+  const signInUrl =
+    action === "login" ? observeSubscriptionSignInUrl(child) : undefined;
   await waitForSubscriptionAuthenticationProcessSpawn(child);
-  const owned = ownSubscriptionAuthenticationProcess(child, cleanup);
+  const owned = ownSubscriptionAuthenticationProcess(child, cleanup, signInUrl);
   if (signal.aborted) {
     await owned.terminate();
     throw new Error("Subscription authentication launch was cancelled.");

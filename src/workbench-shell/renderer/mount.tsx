@@ -580,6 +580,12 @@ const WorkbenchApp: Component<{
               result,
             ),
           );
+          // The sign-in URL answers this inspection early rather than ending
+          // it: the login is still running. Ask again so the run still finishes
+          // on a real inspected state instead of stopping on the link.
+          if (result.kind === "authentication-sign-in-url") {
+            refreshSubscriptionAuthentication(targetEndpointId, true);
+          }
         })
         .catch(() => {
           if (

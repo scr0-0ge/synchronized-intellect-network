@@ -155,6 +155,7 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
     pendingAction: null,
     outcome: null,
     feedback: null,
+    signInUrl: null,
     blockers: null,
     confirmation: null,
   });
@@ -294,10 +295,21 @@ test("Settings models exact D20 inspection, guard, confirmation, pending, and fr
     { kind: "authentication-action-requested", action: "login" },
   );
   assert.equal(requested["codex-desktop"]!.pendingAction, "login");
-  assert.equal(
-    presentationText(requested["codex-desktop"]!.feedback),
-    "The Workbench asked the provider CLI to log in.",
+  // The sentence must still open by naming what the Workbench did, and must
+  // now also say where the sign-in happens, that this window cannot show it,
+  // and what the reader does if it did not work. Reporting only the first
+  // clause is F-w187 / public issue #4.
+  const requestedFeedback = presentationText(
+    requested["codex-desktop"]!.feedback,
   );
+  assert.match(
+    requestedFeedback ?? "",
+    /^The Workbench asked the provider CLI to log in\./,
+  );
+  assert.match(requestedFeedback ?? "", /no window and no console/);
+  assert.match(requestedFeedback ?? "", /reports the sign-in state once that CLI exits/);
+  assert.match(requestedFeedback ?? "", /run the provider CLI's own sign-in command in a terminal/);
+  assert.match(requestedFeedback ?? "", /Re-check sign-in/);
   assert.equal(
     typeof requested["codex-desktop"]!.feedback === "string"
       ? null
@@ -616,6 +628,68 @@ test("existing provider cards render independent states, exact copy, blockers, a
       renderSettings(module.WorkbenchScreen, state, storedFeedback),
       englishStored,
     );
+
+    // F-w187 / public issue #4. A sign-in link the CLI printed reaches the card
+    // verbatim and copyable; a card that received none shows nothing at all.
+    const syntheticSignInUrl =
+      "https://auth.example.invalid/oauth/authorize?code=SYNTHETIC-NOT-A-REAL-CODE";
+    let withLink = initialSettingsSubscriptionAuthenticationState();
+    withLink = completeSettingsSubscriptionAuthenticationResponse(
+      withLink,
+      "codex-desktop",
+      { kind: "authentication-state", state: "sign-in-required" },
+    );
+    const withoutLinkHtml = renderSettings(
+      module.WorkbenchScreen,
+      state,
+      withLink,
+    ).replace(/<!--(?:\$|\/)-->/gu, "");
+    assert.doesNotMatch(withoutLinkHtml, /provider-auth-signin-url/u);
+    assert.doesNotMatch(withoutLinkHtml, /Sign-in link from the provider CLI/u);
+
+    withLink = completeSettingsSubscriptionAuthenticationResponse(
+      withLink,
+      "codex-desktop",
+      { kind: "authentication-sign-in-url", url: syntheticSignInUrl },
+    );
+    const withLinkHtml = renderSettings(
+      module.WorkbenchScreen,
+      state,
+      withLink,
+    ).replace(/<!--(?:\$|\/)-->/gu, "");
+    assert.match(withLinkHtml, /Sign-in link from the provider CLI/u);
+    assert.match(
+      withLinkHtml,
+      /The provider CLI printed this sign-in link\. If a browser opened, finish there and ignore this\. If none opened, open this link yourself\./u,
+    );
+    // Shown whole -- a reader who has to retype it needs every character -- and
+    // never as a live anchor.
+    assert.ok(
+      withLinkHtml.includes(
+        syntheticSignInUrl.replace(/&/gu, "&amp;"),
+      ),
+      "the sign-in link must be rendered verbatim",
+    );
+    assert.doesNotMatch(withLinkHtml, /<a[^>]*auth\.example\.invalid/u);
+    assert.match(
+      withLinkHtml,
+      /aria-label="Copy the provider sign-in link"/u,
+    );
+
+    // A fresh inspected state ends the run, and a spent authorisation code must
+    // not stay on the card offering a link that signs nobody in.
+    withLink = completeSettingsSubscriptionAuthenticationResponse(
+      withLink,
+      "codex-desktop",
+      { kind: "authentication-state", state: "bound" },
+    );
+    const afterStateHtml = renderSettings(
+      module.WorkbenchScreen,
+      state,
+      withLink,
+    ).replace(/<!--(?:\$|\/)-->/gu, "");
+    assert.doesNotMatch(afterStateHtml, /auth\.example\.invalid/u);
+    assert.doesNotMatch(afterStateHtml, /provider-auth-signin-url/u);
   } finally {
     setDirectLocale("en");
     await server.close();

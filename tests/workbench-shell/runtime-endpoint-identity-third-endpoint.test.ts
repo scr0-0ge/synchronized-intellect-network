@@ -289,6 +289,7 @@ test("the settings view model derives its endpoint rows from discovery data", ()
       pendingAction: null,
       outcome: null,
       feedback: null,
+      signInUrl: null,
       blockers: null,
       confirmation: null,
     });

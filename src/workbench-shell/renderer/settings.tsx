@@ -5,6 +5,7 @@ import {
   createSignal,
   onCleanup,
   onMount,
+  useContext,
   type Component,
 } from "solid-js";
 import {
@@ -67,6 +68,7 @@ import {
 } from "./copy/runtime-lookup-copy.ts";
 import {
   settingsCopy,
+  subscriptionAuthCopy,
   bindingStatusAriaCopy,
   bindActionAriaCopy,
   authConsequencesCopy,
@@ -78,6 +80,77 @@ import {
   type WorkbenchEndpointKeyCopyEndpointId,
 } from "./copy/settings-copy.ts";
 import { defaultWorkbenchFamilyEndpointPreferences } from "../contract.ts";
+import { WorkbenchRendererBridgeContext } from "./view-types.ts";
+
+/**
+ * The sign-in link the provider CLI printed, shown verbatim and copyable.
+ *
+ * Rendered ONLY when a URL was actually received -- the caller's `Show` is the
+ * whole gate. There is deliberately no "waiting for sign-in" state here: the
+ * Workbench spawns the CLI with its console hidden and cannot observe whether a
+ * browser opened, so anything beyond "here is what the CLI printed" would be a
+ * claim about something it never saw.
+ *
+ * The value is an OAuth authorisation URL and generally carries a single-use
+ * code, so it is displayed and copied and nothing else: it is never logged and
+ * never persisted. It is not rendered as an anchor -- the shell has no in-app
+ * navigation for it, and handing a live credential to whatever would handle a
+ * click is not worth the convenience of one.
+ */
+const SubscriptionSignInLink: Component<{ readonly url: string }> = (props) => {
+  const bridge = useContext(WorkbenchRendererBridgeContext);
+  const [phase, setPhase] = createSignal<
+    "idle" | "copying" | "copied" | "failed"
+  >("idle");
+  const label = () =>
+    phase() === "copying"
+      ? subscriptionAuthCopy.signInUrlCopyingAction
+      : phase() === "copied"
+        ? subscriptionAuthCopy.signInUrlCopiedAction
+        : phase() === "failed"
+          ? subscriptionAuthCopy.signInUrlCopyFailedAction
+          : subscriptionAuthCopy.signInUrlCopyAction;
+  const copyLink = (): void => {
+    let write: Promise<boolean> | undefined;
+    try {
+      const writeClipboardText = bridge?.writeClipboardText;
+      write =
+        writeClipboardText === undefined
+          ? navigator.clipboard?.writeText(props.url).then(() => true)
+          : writeClipboardText(props.url).then((result) => result.ok);
+    } catch {
+      setPhase("failed");
+      return;
+    }
+    if (write === undefined) {
+      setPhase("failed");
+      return;
+    }
+    setPhase("copying");
+    void write.then(
+      (copied) => setPhase(copied ? "copied" : "failed"),
+      () => setPhase("failed"),
+    );
+  };
+  return (
+    <div class="provider-auth-signin-url" role="group">
+      <p class="provider-auth-signin-url-heading">
+        {subscriptionAuthCopy.signInUrlHeading}
+      </p>
+      <p>{subscriptionAuthCopy.signInUrlSentence}</p>
+      <code class="provider-auth-signin-url-value">{props.url}</code>
+      <button
+        type="button"
+        class="btn ghost sm provider-auth-signin-url-copy"
+        aria-label={subscriptionAuthCopy.signInUrlCopyAria}
+        aria-busy={phase() === "copying"}
+        onClick={copyLink}
+      >
+        <span aria-live="polite">{label()}</span>
+      </button>
+    </div>
+  );
+};
 
 export interface WorkbenchCatalogFreshnessPanel {
   readonly unavailable: boolean;
@@ -1459,6 +1532,9 @@ const SubscriptionFacadeProviderCard: Component<{
                     </p>
                   )}
                 </Show>
+                <Show when={authenticationEntry()!.signInUrl}>
+                  {(url) => <SubscriptionSignInLink url={url()} />}
+                </Show>
                 <Show when={bindingValue.blockedStatement}>
                   {(statement) => (
                     <div class="provider-auth-blockers" role="alert">
@@ -1850,6 +1926,9 @@ const ProviderCard: Component<{
                       {feedback()}
                     </p>
                   )}
+                </Show>
+                <Show when={auth().signInUrl}>
+                  {(url) => <SubscriptionSignInLink url={url()} />}
                 </Show>
                 <Show when={binding().blockedStatement}>
                   {(statement) => (

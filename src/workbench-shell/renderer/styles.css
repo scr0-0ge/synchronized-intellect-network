@@ -2235,6 +2235,7 @@ kbd {
   color: var(--fg-1);
 }
 
+.provider-auth-signin-url,
 .provider-auth-blockers,
 .provider-auth-confirmation {
   max-width: 62ch;
@@ -2247,8 +2248,28 @@ kbd {
   line-height: 1.45;
 }
 
+.provider-auth-signin-url > p,
 .provider-auth-blockers > p,
 .provider-auth-confirmation > p { margin: 0; }
+.provider-auth-signin-url > p + p { margin-top: 6px; }
+.provider-auth-signin-url-heading { font-weight: 600; color: var(--fg-1); }
+/* The link is a credential, so it is shown whole and never truncated with an
+   ellipsis: a reader who has to retype it needs every character. */
+.provider-auth-signin-url-value {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 7px;
+  border: 1px solid #3b2f18;
+  background: #12100c;
+  color: var(--fg-1);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: all;
+}
+.provider-auth-signin-url-copy { margin-top: 7px; }
 .provider-auth-blockers > ul { margin: 6px 0 0; padding-left: 18px; }
 .provider-auth-confirmation > p + p { margin-top: 6px; }
 .provider-auth-confirmation-actions {

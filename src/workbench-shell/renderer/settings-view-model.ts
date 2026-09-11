@@ -78,6 +78,16 @@ export interface SettingsSubscriptionAuthenticationEntry {
    */
   readonly outcome: WorkbenchSubscriptionAuthenticationActionOutcome | null;
   readonly feedback: WorkbenchPresentationText | null;
+  /**
+   * The sign-in URL the running provider CLI printed, or `null` when it has
+   * printed none. There is no third state: the product cannot see whether the
+   * browser opened, so it shows the link it actually received and otherwise
+   * shows nothing at all.
+   *
+   * A credential -- it lives in renderer state for the length of one sign-in
+   * and is never logged or persisted.
+   */
+  readonly signInUrl: string | null;
   readonly blockers: WorkbenchSubscriptionAuthenticationBlockers | null;
   readonly confirmation: Readonly<{
     preparationKey: string;
@@ -191,8 +201,23 @@ export function completeSettingsSubscriptionAuthenticationResponse(
         pendingAction: null,
         outcome: null,
         feedback: null,
+        // A fresh inspected state means the sign-in run this URL belonged to is
+        // over. Leaving a spent authorisation code on the card would offer the
+        // reader a link that no longer signs anyone in.
+        signInUrl: null,
         blockers: null,
         confirmation: null,
+      });
+    // The action stays pending: this response answers the standing inspection
+    // early rather than ending it, and the caller re-inspects so the run still
+    // finishes on a real state.
+    case "authentication-sign-in-url":
+      return replaceAuthenticationEntry(state, endpointId, {
+        ...current,
+        // The inspection that carried this has returned, so the card is free to
+        // ask again; the action itself is still pending and stays pending.
+        inspectionPending: false,
+        signInUrl: response.url,
       });
     case "blocked":
       return replaceAuthenticationEntry(state, endpointId, {
@@ -479,6 +504,7 @@ function entry(): SettingsSubscriptionAuthenticationEntry {
     pendingAction: null,
     outcome: null,
     feedback: null,
+    signInUrl: null,
     blockers: null,
     confirmation: null,
   });

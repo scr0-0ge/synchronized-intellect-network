@@ -828,15 +828,31 @@ export type WorkbenchProjectHistoryHideResult =
   | { readonly status: "invalid-selection" }
   | { readonly status: "unavailable" };
 
+/**
+ * The one refusal a chosen directory can earn on its own account, named.
+ *
+ * A drive root (`C:\`, `E:\`, a mapped `Z:\`, the root of a UNC share) is
+ * refused deliberately: a Project is an agent's working directory, and a whole
+ * volume is not a working directory anyone asked for. Before F-w187 the same
+ * choice failed by accident -- `basename("C:\")` is empty, so label derivation
+ * threw -- AFTER the ledger had been created and opened, and the reader got
+ * "try again", which could not work. The refusal is now explicit, happens
+ * before anything touches disk, and says what to choose instead.
+ */
+export const WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL =
+  "A drive root cannot be a Project. Choose a folder inside the drive instead." as const;
+
 export interface WorkbenchProjectSelectionFailure {
   readonly category:
     | "invalid-project-selection"
     | "project-unavailable"
-    | "project-switch-unavailable";
+    | "project-switch-unavailable"
+    | "project-directory-is-drive-root";
   readonly message:
     | "Reload the Project list and choose an available Project."
     | "This Project is unavailable. Choose another Project or restore its directory."
-    | "The Project could not be opened. Keep the current Project and try again.";
+    | "The Project could not be opened. Keep the current Project and try again."
+    | typeof WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL;
 }
 
 export type WorkbenchProjectSelectionResult =
@@ -866,11 +882,17 @@ export interface WorkbenchProjectPathFailure {
   readonly targetPath: string;
 }
 
-export interface WorkbenchOpenProjectFailure {
-  readonly failure?: WorkbenchProjectPathFailure;
-  readonly category: "project-open-unavailable";
-  readonly message: "Open Project could not be completed. Keep the current Project and try again.";
-}
+export type WorkbenchOpenProjectFailure =
+  | {
+      readonly failure?: WorkbenchProjectPathFailure;
+      readonly category: "project-open-unavailable";
+      readonly message: "Open Project could not be completed. Keep the current Project and try again.";
+    }
+  /** The chooser let the reader pick a drive root; see the selection failure. */
+  | {
+      readonly category: "project-directory-is-drive-root";
+      readonly message: typeof WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL;
+    };
 
 export type WorkbenchOpenProjectResult =
   | {
@@ -1013,6 +1035,28 @@ export type WorkbenchSubscriptionAuthenticationPublicResponse =
   | Readonly<{
       kind: "authentication-action-partially-completed";
       action: WorkbenchSubscriptionAuthenticationAction;
+    }>
+  /**
+   * The sign-in URL the running provider CLI printed.
+   *
+   * Answers the inspection the renderer already has in flight while a login
+   * runs, so no new channel exists: that request used to resolve only when the
+   * CLI exited, and it now resolves early -- once -- if a URL appears first.
+   * The renderer re-inspects afterwards, so the run still ends on a real
+   * inspected `authentication-state`.
+   *
+   * Emitted ONLY when the CLI actually printed a URL. There is no "waiting for
+   * sign-in" variant and no placeholder: the product cannot see whether the
+   * browser opened, and a state it cannot observe is one it must not claim.
+   *
+   * THE VALUE IS A CREDENTIAL. An OAuth authorisation URL generally carries a
+   * single-use code. It crosses this boundary to be displayed and for no other
+   * purpose: it is never logged, never written to the ledger or any other
+   * durable store, and never captured into a fixture.
+   */
+  | Readonly<{
+      kind: "authentication-sign-in-url";
+      url: string;
     }>;
 
 export type WorkbenchSubscriptionAuthenticationBoundaryResult<Value> =
@@ -2053,6 +2097,26 @@ export function publicProjectOpenUnavailable(failure?: WorkbenchProjectPathFailu
       ...(failure === undefined ? {} : { failure: publicProjectPathFailure(failure) }),
       message:
         "Open Project could not be completed. Keep the current Project and try again.",
+    }),
+  });
+}
+
+export function publicProjectDriveRootRefused(): WorkbenchProjectSelectionResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "project-directory-is-drive-root",
+      message: WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL,
+    }),
+  });
+}
+
+export function publicOpenProjectDriveRootRefused(): WorkbenchOpenProjectResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "project-directory-is-drive-root",
+      message: WORKBENCH_PROJECT_DRIVE_ROOT_REFUSAL,
     }),
   });
 }

@@ -13,6 +13,10 @@ const englishCopy = {
       "This Project is unavailable. Choose another Project or restore its directory.",
     switchUnavailable:
       "The Project could not be opened. Keep the current Project and try again.",
+    // The one refusal with a cause the reader can act on. "Try again" is only
+    // honest advice when trying again could work; here it never could.
+    driveRootRefused:
+      "A drive root cannot be a Project. Choose a folder inside the drive instead.",
     opened: "Project was opened.",
     openedWithHistory:
       "Project was opened with its existing conversation history.",
@@ -69,7 +73,16 @@ const englishCopy = {
       "The Workbench could not ask the provider CLI to log out. Nothing changed, and every Session stays exactly as resumable as it was.",
     logoutPartiallyCompleted:
       "The Workbench asked the provider CLI to log out but could not record the log out. Sessions started before this log out can no longer be resumed, even where the Workbench still offers to resume them.",
-    loginRequested: "The Workbench asked the provider CLI to log in.",
+    // The old sentence stopped at "asked", which is the one thing the reader
+    // could already see. It named nothing about where the sign-in actually
+    // happens, and a control labelled Login that leads nowhere visible is this
+    // product's headline defect wearing a different hat. Every clause below is
+    // read off the launch itself: the child is spawned with `windowsHide: true`
+    // and `stdio: "ignore"`, so nothing it prints or asks can reach this
+    // window; the service re-inspects the provider CLI when that child exits
+    // and publishes the result onto this card.
+    loginRequested:
+      "The Workbench asked the provider CLI to log in. The sign-in itself happens in the provider CLI, which runs here with no window and no console, so the Workbench cannot show anything it prints or asks. This card reports the sign-in state once that CLI exits. If you are still not signed in, run the provider CLI's own sign-in command in a terminal, then use Re-check sign-in.",
     loginNotRequested: "The Workbench could not ask the provider CLI to log in.",
     loginPartiallyCompleted:
       "The Workbench asked the provider CLI to log in but could not record the sign-in change. Sessions started before this login can no longer be resumed, even where the Workbench still offers to resume them.",
@@ -143,6 +156,7 @@ const simplifiedChineseCopy = {
     reloadSelection: "请重新加载项目列表并选择可用项目。",
     projectUnavailable: "此项目不可用。请选择其他项目，或恢复其目录。",
     switchUnavailable: "无法打开该项目。请保留当前项目并重试。",
+    driveRootRefused: "盘符根目录不能作为项目。请选择该盘符下的一个文件夹。",
     opened: "项目已打开。",
     openedWithHistory: "项目已打开，并已加载现有对话历史。",
     chooseHistory: "请选择此项目应显示的现有对话历史。尚未进行任何更改。",
@@ -185,7 +199,8 @@ const simplifiedChineseCopy = {
     logoutRequested: "Workbench 已要求提供方 CLI 退出登录。",
     logoutNotRequested: "Workbench 无法要求提供方 CLI 退出登录。未做任何更改，每个会话的可恢复性保持不变。",
     logoutPartiallyCompleted: "Workbench 已要求提供方 CLI 退出登录，但无法记录这次退出。在这次退出前启动的会话已无法恢复，即使 Workbench 仍显示恢复选项。",
-    loginRequested: "Workbench 已要求提供方 CLI 登录。",
+    loginRequested:
+      "Workbench 已要求提供方 CLI 登录。登录本身在提供方 CLI 中完成，而它在这里运行时没有窗口、也没有控制台，所以 Workbench 无法显示它打印或询问的任何内容。该 CLI 退出后，此卡片会报告登录状态。如果你仍未登录，请在终端里运行该提供方 CLI 自己的登录命令，然后使用“重新检查登录”。",
     loginNotRequested: "Workbench 无法要求提供方 CLI 登录。",
     loginPartiallyCompleted: "Workbench 已要求提供方 CLI 登录，但无法记录登录状态变化。在这次登录前启动的会话已无法恢复，即使 Workbench 仍显示恢复选项。",
     logoutBlocked: "退出登录已被阻止。",
