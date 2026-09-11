@@ -316,6 +316,62 @@ test("a codex-api adapter with a key serves the static catalog after seeding, sp
   assert.ok(configToml.includes('wire_api = "responses"'));
 });
 
+test("resolveBaseUrl is consulted live on each prepareEndpoint call, so a later change reseeds the config without recomposing the adapter", async (t) => {
+  const root = await createTestDirectory(t, join(tmpdir(), "codex-api-adapter-"));
+  const home = join(root, "codex-home");
+  let liveBaseUrl: string | undefined;
+  let resolveCalls = 0;
+  const adapter = new CodexAdapter(
+    () => {
+      throw new Error("transport must not be created");
+    },
+    undefined,
+    undefined,
+    Object.freeze({
+      ...createCodexApiEndpointContext({
+        codexHome: home,
+        sourceEnvironment: {
+          [CODEX_API_ENDPOINT_ENV_CONTRACT.apiKeySourceEnvVar]: FAKE_KEY,
+        },
+        resolveBaseUrl: () => {
+          resolveCalls += 1;
+          return liveBaseUrl;
+        },
+      }),
+      discoverExecutable: async () => locatedDiscovery(),
+    }),
+  );
+
+  // First inspect: no override saved yet -- the contract default seeds.
+  await adapter.inspect("C:\\synthetic-project");
+  assert.equal(resolveCalls, 1);
+  assert.ok(
+    readFileSync(join(home, CODEX_API_CONFIG_TOML_FILE_NAME), "utf8").includes(
+      'base_url = "https://api.openai.com/v1"',
+    ),
+  );
+
+  // A later save (no adapter recomposition) takes effect on the next call.
+  liveBaseUrl = "https://gateway.example.com/v1";
+  await adapter.inspect("C:\\synthetic-project");
+  assert.equal(resolveCalls, 2);
+  assert.ok(
+    readFileSync(join(home, CODEX_API_CONFIG_TOML_FILE_NAME), "utf8").includes(
+      'base_url = "https://gateway.example.com/v1"',
+    ),
+  );
+
+  // Clearing the override (empty string) falls back to the contract default.
+  liveBaseUrl = "";
+  await adapter.inspect("C:\\synthetic-project");
+  assert.equal(resolveCalls, 3);
+  assert.ok(
+    readFileSync(join(home, CODEX_API_CONFIG_TOML_FILE_NAME), "utf8").includes(
+      'base_url = "https://api.openai.com/v1"',
+    ),
+  );
+});
+
 test("a codex-api adapter whose codex executable is not locatable reports runtime-not-located after seeding", async (t) => {
   const root = await createTestDirectory(t, join(tmpdir(), "codex-api-adapter-"));
   const home = join(root, "codex-home");

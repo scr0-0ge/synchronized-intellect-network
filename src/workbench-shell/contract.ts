@@ -65,6 +65,10 @@ export const WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL =
   "workbench:load-runtime-executables";
 export const WORKBENCH_SAVE_RUNTIME_EXECUTABLE_CHANNEL =
   "workbench:save-runtime-executable";
+export const WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL =
+  "workbench:load-codex-api-base-url";
+export const WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL =
+  "workbench:save-codex-api-base-url";
 export const WORKBENCH_INSTALL_RUNTIME_EXECUTABLE_CHANNEL =
   "workbench:install-runtime-executable";
 export const WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL =
@@ -255,6 +259,57 @@ export type WorkbenchClaudePermissionHandlingSaveResult =
   | {
       readonly ok: false;
       readonly error: WorkbenchClaudePermissionHandlingFailure;
+    };
+
+/**
+ * The codex-api endpoint's provider base URL override (ticket 21 follow-up,
+ * w223): plain user-typed text, not a secret, so it lives in the appearance
+ * preference store rather than the safeStorage-encrypted endpoint secret
+ * envelope (same split the executable-path escape hatch uses). An empty
+ * string means "not set" -- the official OpenAI default applies -- matching
+ * the executable-path convention so the key set never varies.
+ */
+export const WORKBENCH_CODEX_API_BASE_URL_MAX_LENGTH = 2_048;
+
+export const defaultWorkbenchCodexApiBaseUrl = "";
+
+export type WorkbenchCodexApiBaseUrlRejection = "invalid-url";
+
+export interface WorkbenchCodexApiBaseUrlUnavailableFailure {
+  readonly category: "codex-api-base-url-unavailable";
+  readonly message: "The Codex · API base URL could not be loaded or saved. Keep the current value and try again.";
+}
+
+export interface WorkbenchCodexApiBaseUrlRejectedFailure {
+  readonly category: "codex-api-base-url-rejected";
+  readonly message: "That base URL cannot be used.";
+  readonly reason: WorkbenchCodexApiBaseUrlRejection;
+}
+
+export type WorkbenchCodexApiBaseUrlFailure =
+  | WorkbenchCodexApiBaseUrlUnavailableFailure
+  | WorkbenchCodexApiBaseUrlRejectedFailure;
+
+export type WorkbenchCodexApiBaseUrlLoadResult =
+  | {
+      readonly ok: true;
+      readonly status: "loaded";
+      readonly baseUrl: string;
+    }
+  | {
+      readonly ok: false;
+      readonly error: WorkbenchCodexApiBaseUrlUnavailableFailure;
+    };
+
+export type WorkbenchCodexApiBaseUrlSaveResult =
+  | {
+      readonly ok: true;
+      readonly status: "saved";
+      readonly baseUrl: string;
+    }
+  | {
+      readonly ok: false;
+      readonly error: WorkbenchCodexApiBaseUrlFailure;
     };
 
 /**
@@ -1813,6 +1868,10 @@ export interface WorkbenchRendererBridge
   saveClaudePermissionHandling(
     permissionHandling: WorkbenchClaudePermissionHandling,
   ): Promise<WorkbenchClaudePermissionHandlingSaveResult>;
+  loadCodexApiBaseUrl?(): Promise<WorkbenchCodexApiBaseUrlLoadResult>;
+  saveCodexApiBaseUrl?(
+    baseUrl: string,
+  ): Promise<WorkbenchCodexApiBaseUrlSaveResult>;
   loadEndpointPreferences?(): Promise<WorkbenchEndpointPreferenceLoadResult>;
   saveEndpointPreference?(
     preference: WorkbenchFamilyEndpointPreference,
@@ -1950,6 +2009,53 @@ export function publicClaudePermissionHandlingUnavailable(): Extract<
       category: "claude-permission-handling-unavailable",
       message:
         "Claude permission handling could not be loaded or saved. Keep the current choice and try again.",
+    }),
+  });
+}
+
+export function publicCodexApiBaseUrlLoaded(
+  baseUrl: string,
+): WorkbenchCodexApiBaseUrlLoadResult {
+  return Object.freeze({
+    ok: true,
+    status: "loaded",
+    baseUrl,
+  });
+}
+
+export function publicCodexApiBaseUrlSaved(
+  baseUrl: string,
+): WorkbenchCodexApiBaseUrlSaveResult {
+  return Object.freeze({
+    ok: true,
+    status: "saved",
+    baseUrl,
+  });
+}
+
+export function publicCodexApiBaseUrlRejected(
+  reason: WorkbenchCodexApiBaseUrlRejection,
+): Extract<WorkbenchCodexApiBaseUrlSaveResult, { readonly ok: false }> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "codex-api-base-url-rejected",
+      message: "That base URL cannot be used.",
+      reason,
+    }),
+  });
+}
+
+export function publicCodexApiBaseUrlUnavailable(): Extract<
+  WorkbenchCodexApiBaseUrlLoadResult,
+  { readonly ok: false }
+> {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "codex-api-base-url-unavailable",
+      message:
+        "The Codex · API base URL could not be loaded or saved. Keep the current value and try again.",
     }),
   });
 }

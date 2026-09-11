@@ -19,6 +19,8 @@ import {
   WORKBENCH_ENDPOINT_KEY_ENDPOINT_IDS,
   WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL,
   WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL,
+  WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL,
+  WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
   WORKBENCH_LOAD_ENDPOINT_PREFERENCES_CHANNEL,
   WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL,
   WORKBENCH_LOAD_RUNTIME_EXECUTABLES_CHANNEL,
@@ -46,6 +48,7 @@ import {
   publicInvalidProfileDefaultSelection,
   publicAppearancePreferenceUnavailable,
   publicClaudePermissionHandlingUnavailable,
+  publicCodexApiBaseUrlUnavailable,
   publicEndpointPreferenceUnavailable,
   publicEndpointKeyUnavailable,
   publicEndpointKeyInvalidValue,
@@ -71,6 +74,8 @@ import {
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
   type WorkbenchClaudePermissionHandlingLoadResult,
+  type WorkbenchCodexApiBaseUrlLoadResult,
+  type WorkbenchCodexApiBaseUrlSaveResult,
   type WorkbenchRuntimeExecutableSaveRequest,
   type WorkbenchRuntimeExecutableSaveResult,
   type WorkbenchRuntimeInstallRequest,
@@ -152,6 +157,9 @@ import {
   reconstructWorkbenchRuntimeInstallRequest,
   sanitizeWorkbenchRuntimeInstallResult,
   sanitizeWorkbenchClaudePermissionHandlingSaveResult,
+  reconstructWorkbenchCodexApiBaseUrl,
+  sanitizeWorkbenchCodexApiBaseUrlLoadResult,
+  sanitizeWorkbenchCodexApiBaseUrlSaveResult,
   sanitizeWorkbenchEndpointPreferenceLoadResult,
   sanitizeWorkbenchEndpointPreferenceSaveResult,
   sanitizeWorkbenchDirectSessionProfileResult,
@@ -255,6 +263,8 @@ export interface FixedProjectViewIpc {
       | typeof WORKBENCH_INSPECT_SUBSCRIPTION_AUTHENTICATION_CHANNEL
       | typeof WORKBENCH_LOAD_APPEARANCE_PREFERENCE_CHANNEL
       | typeof WORKBENCH_LOAD_CLAUDE_PERMISSION_HANDLING_CHANNEL
+      | typeof WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL
+      | typeof WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL
       | typeof WORKBENCH_LOAD_SUBSCRIPTION_USAGE_CHANNEL
       | typeof WORKBENCH_LOAD_ENDPOINT_PREFERENCES_CHANNEL
       | typeof WORKBENCH_LOAD_ENDPOINT_CATALOG_FRESHNESS_CHANNEL
@@ -708,6 +718,33 @@ export function createWorkbenchPreloadBridge(
         );
       } catch {
         return publicClaudePermissionHandlingUnavailable();
+      }
+    },
+    async loadCodexApiBaseUrl(): Promise<WorkbenchCodexApiBaseUrlLoadResult> {
+      try {
+        return sanitizeWorkbenchCodexApiBaseUrlLoadResult(
+          await ipc.invoke(WORKBENCH_LOAD_CODEX_API_BASE_URL_CHANNEL),
+        );
+      } catch {
+        return publicCodexApiBaseUrlUnavailable();
+      }
+    },
+    async saveCodexApiBaseUrl(
+      baseUrl: string,
+    ): Promise<WorkbenchCodexApiBaseUrlSaveResult> {
+      const reconstructed = reconstructWorkbenchCodexApiBaseUrl(baseUrl);
+      if (!reconstructed.ok) {
+        return publicCodexApiBaseUrlUnavailable();
+      }
+      try {
+        return sanitizeWorkbenchCodexApiBaseUrlSaveResult(
+          await ipc.invoke(
+            WORKBENCH_SAVE_CODEX_API_BASE_URL_CHANNEL,
+            reconstructed.baseUrl,
+          ),
+        );
+      } catch {
+        return publicCodexApiBaseUrlUnavailable();
       }
     },
     async loadEndpointPreferences(): Promise<WorkbenchEndpointPreferenceLoadResult> {

@@ -394,6 +394,8 @@ export function createProductionCodexApiRuntimeAdapter(options: {
   readonly codexHomeDirectory?: string;
   /** Live store-backed key resolver; `undefined` result falls back to env. */
   readonly resolveCodexApiKey?: () => string | undefined;
+  /** Live preference-backed base URL resolver (w223 Settings field). */
+  readonly resolveCodexApiBaseUrl?: () => string | undefined | Promise<string | undefined>;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   return new CodexAdapter(
@@ -406,6 +408,9 @@ export function createProductionCodexApiRuntimeAdapter(options: {
       ...(options.resolveCodexApiKey === undefined
         ? {}
         : { resolveApiKey: options.resolveCodexApiKey }),
+      ...(options.resolveCodexApiBaseUrl === undefined
+        ? {}
+        : { resolveBaseUrl: options.resolveCodexApiBaseUrl }),
     }),
   );
 }
@@ -507,6 +512,8 @@ export async function createProductionRuntimeEndpointAdapter(options: {
   readonly codexApiCodexHomeDirectory?: string;
   /** Live store-backed codex-api key resolver (ADR 0022); env stays the fallback. */
   readonly resolveCodexApiKey?: () => string | undefined;
+  /** Live preference-backed codex-api base URL resolver (w223 Settings field). */
+  readonly resolveCodexApiBaseUrl?: () => string | undefined | Promise<string | undefined>;
   /** Catalog freshness enrollment appended to the static catalogs (WO16 P3). */
   readonly catalogAugmentation?: (
     endpointId: WorkbenchRuntimeEndpointId,
@@ -599,6 +606,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.codexApiEnvironment,
       codexHomeDirectory: options.codexApiCodexHomeDirectory,
       resolveCodexApiKey: options.resolveCodexApiKey,
+      resolveCodexApiBaseUrl: options.resolveCodexApiBaseUrl,
     });
   const activeCompositions = new Map<
     string,
@@ -865,6 +873,8 @@ export async function discoverRuntimeEndpointComposition(options: {
   readonly codexApiCodexHomeDirectory?: string;
   /** Live store-backed codex-api key resolver (ADR 0022); env stays the fallback. */
   readonly resolveCodexApiKey?: () => string | undefined;
+  /** Live preference-backed codex-api base URL resolver (w223 Settings field). */
+  readonly resolveCodexApiBaseUrl?: () => string | undefined | Promise<string | undefined>;
   /**
    * Catalog freshness (WO16 Part 3): per-endpoint conservatively enrolled
    * models appended to the static catalog before composition. Applies to the
@@ -1074,6 +1084,7 @@ export async function discoverRuntimeEndpointComposition(options: {
           environment: options.codexApiEnvironment,
           codexHomeDirectory: options.codexApiCodexHomeDirectory,
           resolveCodexApiKey: options.resolveCodexApiKey,
+          resolveCodexApiBaseUrl: options.resolveCodexApiBaseUrl,
         }),
       directStart: "supported" as const,
       // Remote-backed: the real OpenAI API through the local codex CLI in
