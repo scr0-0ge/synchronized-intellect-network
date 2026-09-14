@@ -261,8 +261,6 @@ ol, ul { padding: 0; list-style: none; }
   border-radius: var(--r-sm);
   background: linear-gradient(150deg, var(--rt-1), var(--rt-2));
   color: #0a0a0b;
-  font-size: 11px;
-  font-weight: 800;
 }
 
 /* Project breadcrumb: returns to the Project surface. Basename only — there is

@@ -180,6 +180,50 @@ test("the endpoint context pins api-key-static with the api_key healthy auth sha
   assert.deepEqual(hermetic.sourceEnvironment, {});
 });
 
+// w245: the Claude · API Settings "Base URL (optional)" field, same shape as
+// GLM's resolveBaseUrl (claude-glm-catalog.test.ts) minus the env-var arm --
+// claude-api has no GLM-style ambient contract variable to fall back to.
+test("a live resolveBaseUrl override reaches the spawned environment as ANTHROPIC_BASE_URL", () => {
+  const sourceEnvironment = Object.freeze({ CLAUDE_API_KEY: FAKE_KEY });
+  const source = createClaudeApiEndpointEnvironmentSource({
+    resolveApiKey: () => FAKE_KEY,
+    resolveBaseUrl: () => "http://127.0.0.1:4180",
+  });
+  const environment = createEndpointProcessEnvironment(
+    sourceEnvironment,
+    source({}),
+  );
+  assert.equal(environment.ANTHROPIC_API_KEY, FAKE_KEY);
+  assert.equal(environment.ANTHROPIC_BASE_URL, "http://127.0.0.1:4180");
+});
+
+test("resolveBaseUrl returning undefined falls through to the explicit baseUrl fallback", () => {
+  const source = createClaudeApiEndpointEnvironmentSource({
+    baseUrl: "https://fallback.example.com",
+    resolveBaseUrl: () => undefined,
+  });
+  assert.deepEqual(source(Object.freeze({})), {
+    mode: "api-key",
+    apiKeyEnvVar: "CLAUDE_API_KEY",
+    baseUrl: "https://fallback.example.com",
+  });
+});
+
+test("no override at all leaves ANTHROPIC_BASE_URL unset -- the spawned CLI keeps its own real Anthropic default", () => {
+  const source = createClaudeApiEndpointEnvironmentSource({
+    resolveApiKey: () => FAKE_KEY,
+  });
+  const environment = createEndpointProcessEnvironment(
+    Object.freeze({}),
+    source({}),
+  );
+  assert.equal(environment.ANTHROPIC_API_KEY, FAKE_KEY);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(environment, "ANTHROPIC_BASE_URL"),
+    false,
+  );
+});
+
 test("the api_key auth-status shape is bound for the claude-api endpoint and stays unknown for the bearer endpoints", () => {
   const apiKeyShape = parseClaudeAuthenticationStatus(
     '{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}',

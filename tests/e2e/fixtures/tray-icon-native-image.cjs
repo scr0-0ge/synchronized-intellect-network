@@ -4,13 +4,13 @@ const { app, nativeImage, Tray } = require("electron");
 
 const resultMarker = "TRAY_ICON_NATIVE_RESULT ";
 
-function readTrayIconDataUrl() {
-  const prefix = "--tray-icon-data-url=";
+function readTrayIconPath() {
+  const prefix = "--tray-icon-path=";
   const values = process.argv
     .filter((argument) => argument.startsWith(prefix))
     .map((argument) => argument.slice(prefix.length));
   if (values.length !== 1 || values[0].length === 0) {
-    throw new Error("tray-icon-native-data-url-invalid");
+    throw new Error("tray-icon-native-path-invalid");
   }
   return values[0];
 }
@@ -21,8 +21,8 @@ function emitResult(result) {
 
 async function run() {
   await app.whenReady();
-  const dataUrl = readTrayIconDataUrl();
-  const image = nativeImage.createFromDataURL(dataUrl);
+  const iconPath = readTrayIconPath();
+  const image = nativeImage.createFromPath(iconPath);
   const nativeImageEmpty = image.isEmpty();
   const nativeImageSize = image.getSize();
   const pngBytes = image.toPNG().byteLength;

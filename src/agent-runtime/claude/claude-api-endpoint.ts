@@ -69,6 +69,16 @@ export interface ClaudeApiEndpointConfiguration {
    * loudly.
    */
   readonly resolveApiKey?: () => string | undefined;
+  /**
+   * Live base-URL resolver backed by the Settings "Base URL (optional)"
+   * field (w245, same shape as GLM's `resolveBaseUrl`): invoked once per
+   * environment resolution, taking precedence over `baseUrl` when it
+   * returns a non-empty string. Empty/absent means "no override" -- the
+   * spawned CLI keeps using its own real Anthropic default.
+   */
+  readonly resolveBaseUrl?: () => string | undefined;
+  /** Explicit base URL fallback when `resolveBaseUrl` is absent or empty. */
+  readonly baseUrl?: string;
   /** Source environment the key is read from (tests inject fakes). */
   readonly sourceEnvironment?: NodeJS.ProcessEnv;
 }
@@ -85,12 +95,21 @@ export function createClaudeApiEndpointEnvironmentSource(
 ): ClaudeEndpointEnvironmentResolver {
   return () => {
     const resolvedApiKey = configuration.resolveApiKey?.();
+    const resolvedBaseUrl = configuration.resolveBaseUrl?.();
+    const effectiveBaseUrl = isNonEmpty(resolvedBaseUrl)
+      ? resolvedBaseUrl
+      : configuration.baseUrl;
     return Object.freeze({
       mode: "api-key" as const,
       apiKeyEnvVar: CLAUDE_API_ENDPOINT_ENV_CONTRACT.apiKeySourceEnvVar,
       ...(resolvedApiKey === undefined ? {} : { apiKey: resolvedApiKey }),
+      ...(isNonEmpty(effectiveBaseUrl) ? { baseUrl: effectiveBaseUrl } : {}),
     });
   };
+}
+
+function isNonEmpty(value: string | undefined): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 /** The full claude-adapter endpoint context for the claude-api endpoint. */

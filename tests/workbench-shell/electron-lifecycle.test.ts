@@ -952,7 +952,10 @@ test("production owns one tray-backed instance and exposes no close or Quit conf
     source,
     /createdWindow\.on\("query-session-end", lifecycle\.handleQuerySessionEnd\);\s+createdWindow\.on\("session-end", lifecycle\.handleSessionEnd\);/u,
   );
-  assert.match(source, /tray = new Tray\(createWorkbenchTrayIcon\(nativeImage\)\);/u);
+  assert.match(
+    source,
+    /tray = new Tray\(createWorkbenchTrayIcon\(nativeImage, trayIconPath\)\);/u,
+  );
   assert.match(source, /tray\.on\("click", openWorkbench\);/u);
   assert.match(
     source,

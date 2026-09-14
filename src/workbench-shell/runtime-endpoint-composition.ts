@@ -391,6 +391,8 @@ export function createProductionClaudeApiRuntimeAdapter(options: {
   readonly environment?: NodeJS.ProcessEnv;
   /** Live store-backed key resolver; `undefined` result falls back to env. */
   readonly resolveClaudeApiKey?: () => string | undefined;
+  /** Live preference-backed base URL resolver (w245 Settings field). */
+  readonly resolveClaudeApiBaseUrl?: () => string | undefined;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   return new ClaudeAdapter(
@@ -405,6 +407,9 @@ export function createProductionClaudeApiRuntimeAdapter(options: {
       ...(options.resolveClaudeApiKey === undefined
         ? {}
         : { resolveApiKey: options.resolveClaudeApiKey }),
+      ...(options.resolveClaudeApiBaseUrl === undefined
+        ? {}
+        : { resolveBaseUrl: options.resolveClaudeApiBaseUrl }),
     }),
   );
 }
@@ -545,6 +550,8 @@ export async function createProductionRuntimeEndpointAdapter(options: {
   readonly claudeApiEnvironment?: NodeJS.ProcessEnv;
   /** Live store-backed claude-api key resolver (ADR 0022); env stays the fallback. */
   readonly resolveClaudeApiKey?: () => string | undefined;
+  /** Live preference-backed claude-api base URL resolver (w245 Settings field). */
+  readonly resolveClaudeApiBaseUrl?: () => string | undefined;
   /** Environment the default codex-api adapter reads its key from. */
   readonly codexApiEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CODEX_HOME for the default codex-api adapter. */
@@ -643,6 +650,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       claudeSessionCapabilityStore: options.claudeSessionCapabilityStore,
       environment: options.claudeApiEnvironment,
       resolveClaudeApiKey: options.resolveClaudeApiKey,
+      resolveClaudeApiBaseUrl: options.resolveClaudeApiBaseUrl,
     });
   const codexApiAdapter =
     options.codexApiAdapter ??
@@ -918,6 +926,8 @@ export async function discoverRuntimeEndpointComposition(options: {
   readonly claudeApiEnvironment?: NodeJS.ProcessEnv;
   /** Live store-backed claude-api key resolver (ADR 0022); env stays the fallback. */
   readonly resolveClaudeApiKey?: () => string | undefined;
+  /** Live preference-backed claude-api base URL resolver (w245 Settings field). */
+  readonly resolveClaudeApiBaseUrl?: () => string | undefined;
   /** Environment the default codex-api adapter reads its key from. */
   readonly codexApiEnvironment?: NodeJS.ProcessEnv;
   /** Isolated CODEX_HOME for the default codex-api adapter. */
@@ -1116,6 +1126,7 @@ export async function discoverRuntimeEndpointComposition(options: {
           providerRequestBudget: options.providerRequestBudget,
           environment: options.claudeApiEnvironment,
           resolveClaudeApiKey: options.resolveClaudeApiKey,
+          resolveClaudeApiBaseUrl: options.resolveClaudeApiBaseUrl,
         }),
       directStart: "supported" as const,
       // Remote-backed: the real Anthropic API reached with an injected

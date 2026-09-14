@@ -85,8 +85,10 @@ const englishCopy = {
   /**
    * One "Base URL (optional)" block per base-URL endpoint (ticket 21/w223
    * shipped Codex · API alone; w232 generalizes across GLM, DeepSeek, Kimi
-   * Code and Codex · API instead of copying the copy four times): shared
-   * generic sentences plus each provider's own placeholder and hint.
+   * Code and Codex · API instead of copying the copy four times; w245 adds
+   * Claude · API): shared generic sentences plus each provider's own
+   * placeholder and hint, rendered as the one-line note directly under the
+   * input.
    */
   baseUrlCopy: {
     shared: {
@@ -114,6 +116,10 @@ const englishCopy = {
       "codex-api": {
         placeholder: "https://your-openai-compatible-gateway/v1",
         hint: "For an OpenAI-compatible gateway. Leave blank to use the official default.",
+      },
+      "claude-api": {
+        placeholder: "https://your-anthropic-compatible-gateway",
+        hint: "For an Anthropic-compatible gateway. Leave blank to use the official default.",
       },
     },
   },
@@ -479,6 +485,10 @@ const simplifiedChineseCopy = {
         placeholder: "https://你的-openai-兼容网关/v1",
         hint: "用于接入 OpenAI 兼容网关。留空则使用官方默认地址。",
       },
+      "claude-api": {
+        placeholder: "https://你的-anthropic-兼容网关",
+        hint: "用于接入 Anthropic 兼容网关。留空则使用官方默认地址。",
+      },
     },
   },
   endpointKeyCopy: {
@@ -789,8 +799,9 @@ export type WorkbenchBaseUrlCopyEndpointId = keyof typeof baseUrlProviderCopy;
 
 /**
  * The composed per-endpoint copy dictionary for one provider's base-URL
- * block (ticket 21/w223 shipped Codex · API alone; w232 generalizes it):
- * shared generic sentences plus the provider's own placeholder and hint.
+ * block (ticket 21/w223 shipped Codex · API alone; w232 generalizes it;
+ * w245 adds Claude · API): shared generic sentences plus the provider's own
+ * placeholder and hint.
  */
 export function workbenchBaseUrlCopy(endpointId: WorkbenchBaseUrlCopyEndpointId) {
   const provider = baseUrlProviderCopy[endpointId];

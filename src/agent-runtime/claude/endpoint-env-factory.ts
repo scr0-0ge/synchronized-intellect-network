@@ -7,7 +7,9 @@
  *   pre-endpoint behaviour (`createClaudeProcessEnvironment(source,
  *   "subscription")` is the regression anchor).
  * - `api-key`: cleanse, then inject `ANTHROPIC_API_KEY` from the endpoint's
- *   own source variable (claude-api endpoint, P3 instance).
+ *   own source variable (claude-api endpoint, P3 instance), and optionally
+ *   `ANTHROPIC_BASE_URL` when the caller supplies an override (w245 Settings
+ *   field) -- absent means no override, the CLI's own default applies.
  * - `glm`: cleanse, then inject `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`
  *   and the model-identity truth keys (`ANTHROPIC_DEFAULT_OPUS/SONNET/HAIKU_
  *   MODEL`), so the wire carries the GLM model name, never a claude alias.
@@ -104,7 +106,13 @@ export interface ClaudeEndpointEnvironment {
    * variable (same discipline as glm-mode `authToken`).
    */
   readonly apiKey?: string;
-  /** glm mode: explicit base URL (env override / contract default otherwise). */
+  /**
+   * glm mode: explicit base URL (env override / contract default otherwise,
+   * always injected). api-key mode (w245): explicit base URL override for
+   * the claude-api endpoint; injected as ANTHROPIC_BASE_URL only when
+   * present -- absent means no override, so the spawned CLI keeps using its
+   * own real Anthropic default.
+   */
   readonly baseUrl?: string;
   /** glm mode: source variable holding the token (contract default otherwise). */
   readonly authTokenEnvVar?: string;
@@ -267,6 +275,18 @@ export function createEndpointProcessEnvironment(
       // CLI sees carries exactly one key, under the one name it reads.
       delete environment[name];
       environment.ANTHROPIC_API_KEY = apiKey;
+      // Base URL override (w245): only when the caller supplies one -- an
+      // absent value leaves ANTHROPIC_BASE_URL unset (already cleansed
+      // above), so the CLI's own real Anthropic default applies.
+      if (isNonEmptyString(endpoint.baseUrl)) {
+        if (!isValidEndpointBaseUrl(endpoint.baseUrl)) {
+          throw new ClaudeEndpointEnvironmentError(
+            "base-url-invalid",
+            "api-key endpoint: base URL must be https (http allowed only for localhost).",
+          );
+        }
+        environment.ANTHROPIC_BASE_URL = endpoint.baseUrl;
+      }
       break;
     }
     case "glm": {
