@@ -78,6 +78,11 @@ import {
   SESSION_CONTINUATION_MAX_STEPS,
   type SessionContinuationStop,
 } from "./session-continuation-plan.ts";
+import {
+  createAutoIterationCoordinator,
+  type AutoIterationProjectAuthority,
+} from "./auto-iteration/coordinator.ts";
+import { AutoIterationProjectStore } from "./auto-iteration/project-store.ts";
 
 /**
  * Endpoint roster the channel admits when no explicit roster is injected.
@@ -163,9 +168,9 @@ type SessionRow = {
 
 type UpdateRow = {
   cursor: number;
-  command_id: string;
-  kind: DurableProjectUpdate["kind"];
-  status: ProjectCommandStatus;
+  command_id: string | null;
+  kind: string;
+  status: string;
   session_id: string | null;
   data_json: string | null;
 };
@@ -318,6 +323,7 @@ export class SqliteWorkbenchCoordinator implements WorkbenchCoordinator {
 }
 
 class SqliteProjectChannel implements ProjectChannel {
+  readonly autoIteration: AutoIterationProjectAuthority;
   private readonly database: DatabaseSync;
   private readonly projectId: string;
   private readonly projectDirectory: string;
@@ -365,6 +371,14 @@ class SqliteProjectChannel implements ProjectChannel {
     this.sessionMetadata = sessionMetadata;
     this.authGeneration = authGeneration;
     this.endpointIds = validateRuntimeContextEndpointIds(endpointIds);
+    this.autoIteration = createAutoIterationCoordinator(
+      new AutoIterationProjectStore({
+        database,
+        projectId,
+        transact: (action) => transaction(database, action),
+        notifyCommitted: () => this.notifyCommittedUpdate(),
+      }),
+    );
   }
 
   startRecoveredExecutions(): void {
@@ -3002,7 +3016,7 @@ function createPromiseController<T>(): PromiseController<T> {
   };
 }
 
-const currentSchemaVersion = 6;
+const currentSchemaVersion = 7;
 const quotaPauseMaximumMs = 24 * 60 * 60 * 1000;
 const maximumQuotaResetsAtMs = 8_640_000_000_000;
 
@@ -3035,7 +3049,23 @@ function readQuotaDeadline(dataJson: string): number {
 function readQuotaResetsAt(dataJson: string): number | undefined {
   return readQuotaPauseData(dataJson).resetsAt;
 }
-const conceptualTables = ["commands", "projects", "sessions", "updates"] as const;
+const legacyConceptualTables = ["commands", "projects", "sessions", "updates"] as const;
+const autoIterationTables = [
+  "auto_iteration_artifacts",
+  "auto_iteration_attempts",
+  "auto_iteration_context_observations",
+  "auto_iteration_handoffs",
+  "auto_iteration_inbox",
+  "auto_iteration_outbox",
+  "auto_iteration_quota_observations",
+  "auto_iteration_receipts",
+  "auto_iteration_requests",
+  "auto_iteration_review_decisions",
+  "auto_iteration_role_slots",
+  "auto_iteration_tenures",
+  "auto_iteration_work_orders",
+] as const;
+const conceptualTables = [...autoIterationTables, ...legacyConceptualTables].sort();
 const versionOneColumns = Object.freeze({
   projects: ["project_id", "directory_digest"],
   commands: [
@@ -3109,13 +3139,64 @@ const versionSixColumns = Object.freeze({
   ...versionFiveColumns,
   sessions: [...versionFiveColumns.sessions, "display_ordinal"],
 });
+const versionSevenColumns = Object.freeze({
+  ...versionSixColumns,
+  auto_iteration_artifacts: ["artifact_id", "project_id", "reference_json"],
+  auto_iteration_attempts: [
+    "attempt_id", "work_order_id", "attempt_number", "session_id",
+    "session_configuration_json", "runtime_lifecycle", "slot_state",
+    "workspace_id", "version",
+  ],
+  auto_iteration_context_observations: [
+    "session_id", "observed_at", "model", "quality", "total_tokens", "max_tokens",
+  ],
+  auto_iteration_handoffs: [
+    "work_order_id", "attempt_id", "handoff_id", "body",
+    "artifact_ids_json", "artifacts_json", "submitted_by_session_id",
+    "is_current_attempt", "version",
+  ],
+  auto_iteration_inbox: [
+    "inbox_entry_id", "role_slot_id", "state", "kind", "payload_json", "version",
+  ],
+  auto_iteration_outbox: [
+    "outbox_entry_id", "project_id", "kind", "dedupe_key", "payload_json", "state", "version",
+  ],
+  auto_iteration_quota_observations: [
+    "quota_pool_id", "source", "observed_at", "status", "windows_json",
+  ],
+  auto_iteration_receipts: [
+    "work_order_id", "attempt_id", "handoff_id", "level", "detail_id", "handoff_version",
+  ],
+  auto_iteration_requests: [
+    "project_id", "request_idempotency_key", "operation", "actor_json",
+    "request_json", "response_json",
+  ],
+  auto_iteration_review_decisions: [
+    "review_decision_id", "work_order_id", "attempt_id", "handoff_id",
+    "handoff_version", "decided_by_role_slot_id", "decided_by_generation",
+    "decision", "reason", "target_role_slot_id", "version",
+  ],
+  auto_iteration_role_slots: [
+    "role_slot_id", "project_id", "responsibility", "current_tenure_id", "version",
+  ],
+  auto_iteration_tenures: [
+    "tenure_id", "role_slot_id", "generation", "session_id", "status",
+    "session_configuration_json", "version",
+  ],
+  auto_iteration_work_orders: [
+    "work_order_id", "project_id", "objective", "acceptance_criteria_json",
+    "baseline_commit_sha", "territory_json", "responsible_role_slot_id",
+    "issued_by_role_slot_id", "issued_by_generation", "completion_condition_json",
+    "status", "current_attempt_id", "version",
+  ],
+});
 
 function initializeSchema(database: DatabaseSync): void {
   database.exec("PRAGMA foreign_keys = ON");
   const version = readSchemaVersion(database);
   const tables = readConceptualTables(database);
   if (version === currentSchemaVersion) {
-    assertSchema(database, versionSixColumns);
+    assertSchema(database, versionSevenColumns);
     assertVersionTwoRows(database);
     assertVersionFiveRows(database);
     assertVersionSixRows(database);
@@ -3123,14 +3204,14 @@ function initializeSchema(database: DatabaseSync): void {
   }
   if (version === 0 && tables.length === 0) {
     transaction(database, () => {
-      createVersionSixTables(database);
+      createVersionSevenTables(database);
       database.exec(`PRAGMA user_version = ${currentSchemaVersion}`);
     });
-    assertSchema(database, versionSixColumns);
+    assertSchema(database, versionSevenColumns);
     assertVersionSixRows(database);
     return;
   }
-  if ((version === 0 || version === 1) && sameStrings(tables, conceptualTables)) {
+  if ((version === 0 || version === 1) && sameStrings(tables, legacyConceptualTables)) {
     assertSchema(database, versionOneColumns);
     migrateVersionOne(database);
     assertSchema(database, versionTwoColumns);
@@ -3145,7 +3226,7 @@ function initializeSchema(database: DatabaseSync): void {
     migrateVersionFiveAndAssert(database);
     return;
   }
-  if (version === 2 && sameStrings(tables, conceptualTables)) {
+  if (version === 2 && sameStrings(tables, legacyConceptualTables)) {
     assertSchema(database, versionTwoColumns);
     assertVersionTwoRows(database);
     migrateVersionTwo(database);
@@ -3158,7 +3239,7 @@ function initializeSchema(database: DatabaseSync): void {
     migrateVersionFiveAndAssert(database);
     return;
   }
-  if (version === 3 && sameStrings(tables, conceptualTables)) {
+  if (version === 3 && sameStrings(tables, legacyConceptualTables)) {
     assertSchema(database, versionThreeColumns);
     assertVersionTwoRows(database);
     migrateVersionThree(database);
@@ -3168,15 +3249,23 @@ function initializeSchema(database: DatabaseSync): void {
     migrateVersionFiveAndAssert(database);
     return;
   }
-  if (version === 4 && sameStrings(tables, conceptualTables)) {
+  if (version === 4 && sameStrings(tables, legacyConceptualTables)) {
     assertSchema(database, versionFourColumns);
     assertVersionTwoRows(database);
     migrateVersionFour(database);
     migrateVersionFiveAndAssert(database);
     return;
   }
-  if (version === 5 && sameStrings(tables, conceptualTables)) {
+  if (version === 5 && sameStrings(tables, legacyConceptualTables)) {
     migrateVersionFiveAndAssert(database);
+    return;
+  }
+  if (version === 6 && sameStrings(tables, legacyConceptualTables)) {
+    assertSchema(database, versionSixColumns);
+    assertVersionTwoRows(database);
+    assertVersionFiveRows(database);
+    assertVersionSixRows(database);
+    migrateVersionSixAndAssert(database);
     return;
   }
   throw new CoordinatorError("storage-failed");
@@ -3188,6 +3277,15 @@ function migrateVersionFiveAndAssert(database: DatabaseSync): void {
   assertVersionFiveRows(database);
   migrateVersionFive(database);
   assertSchema(database, versionSixColumns);
+  assertVersionTwoRows(database);
+  assertVersionFiveRows(database);
+  assertVersionSixRows(database);
+  migrateVersionSixAndAssert(database);
+}
+
+function migrateVersionSixAndAssert(database: DatabaseSync): void {
+  migrateVersionSix(database);
+  assertSchema(database, versionSevenColumns);
   assertVersionTwoRows(database);
   assertVersionFiveRows(database);
   assertVersionSixRows(database);
@@ -3215,13 +3313,14 @@ function readConceptualTables(database: DatabaseSync): string[] {
 
 function assertSchema(
   database: DatabaseSync,
-  expected: Readonly<Record<(typeof conceptualTables)[number], readonly string[]>>,
+  expected: Readonly<Record<string, readonly string[]>>,
 ): void {
   const tables = readConceptualTables(database);
-  if (!sameStrings(tables, conceptualTables)) {
+  const expectedTables = Object.keys(expected).sort();
+  if (!sameStrings(tables, expectedTables)) {
     throw new CoordinatorError("storage-failed");
   }
-  for (const table of conceptualTables) {
+  for (const table of expectedTables) {
     const tableRecord = database
       .prepare(
         "SELECT ncol, strict FROM pragma_table_list WHERE schema = 'main' AND name = ?",
@@ -3230,7 +3329,7 @@ function assertSchema(
     if (
       tableRecord === undefined ||
       Number(tableRecord.strict) !== 1 ||
-      Number(tableRecord.ncol) !== expected[table].length
+      Number(tableRecord.ncol) !== expected[table]!.length
     ) {
       throw new CoordinatorError("storage-failed");
     }
@@ -3239,7 +3338,7 @@ function assertSchema(
         name: string;
       }>
     ).map((row) => row.name);
-    if (!sameStrings(columns, expected[table])) {
+    if (!sameStrings(columns, expected[table]!)) {
       throw new CoordinatorError("storage-failed");
     }
   }
@@ -3254,16 +3353,19 @@ function assertSchema(
             ? 4
             : expected === versionFiveColumns
               ? 5
-              : 6;
-  assertForeignKeyShape(database, version);
-  assertUniqueShape(database, version);
+              : expected === versionSixColumns
+                ? 6
+                : 7;
+  assertForeignKeyShape(database, version, expectedTables);
+  assertUniqueShape(database, version, expectedTables);
   if (version !== 1) assertVersionTwoConstraints(database);
   if (version >= 4) assertVersionFourConstraints(database, version);
 }
 
 function assertForeignKeyShape(
   database: DatabaseSync,
-  version: 1 | 2 | 3 | 4 | 5 | 6,
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7,
+  tables: readonly string[],
 ): void {
   const expected = {
     projects: [],
@@ -3279,8 +3381,34 @@ function assertForeignKeyShape(
       "command_id->commands.command_id",
       "project_id->projects.project_id",
     ],
+    auto_iteration_artifacts: ["project_id->projects.project_id"],
+    auto_iteration_attempts: ["work_order_id->auto_iteration_work_orders.work_order_id"],
+    auto_iteration_handoffs: [
+      "attempt_id->auto_iteration_attempts.attempt_id",
+      "work_order_id->auto_iteration_work_orders.work_order_id",
+    ],
+    auto_iteration_inbox: ["role_slot_id->auto_iteration_role_slots.role_slot_id"],
+    auto_iteration_outbox: ["project_id->projects.project_id"],
+    auto_iteration_receipts: [
+      "work_order_id->auto_iteration_handoffs.work_order_id",
+      "attempt_id->auto_iteration_handoffs.attempt_id",
+      "handoff_id->auto_iteration_handoffs.handoff_id",
+    ],
+    auto_iteration_requests: ["project_id->projects.project_id"],
+    auto_iteration_review_decisions: [
+      "work_order_id->auto_iteration_handoffs.work_order_id",
+      "attempt_id->auto_iteration_handoffs.attempt_id",
+      "handoff_id->auto_iteration_handoffs.handoff_id",
+    ],
+    auto_iteration_role_slots: ["project_id->projects.project_id"],
+    auto_iteration_tenures: ["role_slot_id->auto_iteration_role_slots.role_slot_id"],
+    auto_iteration_work_orders: [
+      "issued_by_role_slot_id->auto_iteration_role_slots.role_slot_id",
+      "project_id->projects.project_id",
+      "responsible_role_slot_id->auto_iteration_role_slots.role_slot_id",
+    ],
   } as const;
-  for (const table of conceptualTables) {
+  for (const table of tables) {
     const actual = (
       database.prepare(`PRAGMA foreign_key_list(${table})`).all() as unknown as Array<{
         from: string;
@@ -3297,7 +3425,8 @@ function assertForeignKeyShape(
         return `${row.from}->${row.table}.${row.to}`;
       })
       .sort();
-    if (!sameStrings(actual, [...expected[table]].sort())) {
+    const expectedForeignKeys = expected[table as keyof typeof expected] ?? [];
+    if (!sameStrings(actual, [...expectedForeignKeys].sort())) {
       throw new CoordinatorError("storage-failed");
     }
   }
@@ -3305,7 +3434,8 @@ function assertForeignKeyShape(
 
 function assertUniqueShape(
   database: DatabaseSync,
-  version: 1 | 2 | 3 | 4 | 5 | 6,
+  version: 1 | 2 | 3 | 4 | 5 | 6 | 7,
+  tables: readonly string[],
 ): void {
   const expected = {
     projects: ["directory_digest", "project_id"],
@@ -3313,12 +3443,25 @@ function assertUniqueShape(
     sessions:
       version === 1
         ? ["command_id", "session_id"]
-        : version === 6
+        : version >= 6
           ? ["project_id,display_ordinal", "root_command_id", "session_id"]
           : ["root_command_id", "session_id"],
     updates: [],
+    auto_iteration_artifacts: ["artifact_id"],
+    auto_iteration_attempts: ["attempt_id", "work_order_id,attempt_number"],
+    auto_iteration_context_observations: ["session_id"],
+    auto_iteration_handoffs: ["work_order_id,attempt_id,handoff_id"],
+    auto_iteration_inbox: ["inbox_entry_id"],
+    auto_iteration_outbox: ["outbox_entry_id", "project_id,kind,dedupe_key"],
+    auto_iteration_quota_observations: ["quota_pool_id"],
+    auto_iteration_receipts: ["work_order_id,attempt_id,handoff_id,level"],
+    auto_iteration_requests: ["project_id,request_idempotency_key"],
+    auto_iteration_review_decisions: ["review_decision_id"],
+    auto_iteration_role_slots: ["role_slot_id"],
+    auto_iteration_tenures: ["role_slot_id,generation", "tenure_id"],
+    auto_iteration_work_orders: ["work_order_id"],
   } as const;
-  for (const table of conceptualTables) {
+  for (const table of tables) {
     const indexes = database
       .prepare(`PRAGMA index_list(${table})`)
       .all() as unknown as Array<{
@@ -3340,7 +3483,8 @@ function assertUniqueShape(
           .join(","),
       )
       .sort();
-    if (!sameStrings(actual, [...expected[table]].sort())) {
+    const expectedIndexes = expected[table as keyof typeof expected] ?? [];
+    if (!sameStrings(actual, [...expectedIndexes].sort())) {
       throw new CoordinatorError("storage-failed");
     }
   }
@@ -3391,7 +3535,7 @@ function assertVersionFourConstraints(
     !sessions.includes(displayNameSourceConstraint) ||
     !sessions.includes("check(archivedin(0,1))") ||
     !sessions.includes("archivedintegernotnulldefault0") ||
-    (version === 6 &&
+    (version >= 6 &&
       (!sessions.includes("display_ordinalintegernotnull") ||
         !sessions.includes("check(display_ordinal>0)")))
   ) {
@@ -3486,6 +3630,12 @@ function createVersionSixTables(database: DatabaseSync): void {
   replaceVersionFiveSessionsTable(database);
 }
 
+function createVersionSevenTables(database: DatabaseSync): void {
+  createVersionSixTables(database);
+  replaceVersionSixUpdatesTable(database);
+  createAutoIterationTables(database);
+}
+
 function migrateVersionTwo(database: DatabaseSync): void {
   transaction(database, () => {
     database.exec(`
@@ -3537,6 +3687,197 @@ function migrateVersionFive(database: DatabaseSync): void {
     replaceVersionFiveSessionsTable(database);
     database.exec("PRAGMA user_version = 6");
   });
+}
+
+function migrateVersionSix(database: DatabaseSync): void {
+  transaction(database, () => {
+    replaceVersionSixUpdatesTable(database);
+    createAutoIterationTables(database);
+    database.exec("PRAGMA user_version = 7");
+  });
+}
+
+function replaceVersionSixUpdatesTable(database: DatabaseSync): void {
+  database.exec(`
+    ALTER TABLE updates RENAME TO migration_updates_v7;
+    CREATE TABLE updates (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      command_id TEXT REFERENCES commands(command_id),
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      session_id TEXT,
+      data_json TEXT
+    ) STRICT;
+    INSERT INTO updates (
+      cursor, project_id, command_id, kind, status, session_id, data_json
+    )
+    SELECT cursor, project_id, command_id, kind, status, session_id, data_json
+      FROM migration_updates_v7 ORDER BY cursor;
+    DROP TABLE migration_updates_v7;
+  `);
+}
+
+function createAutoIterationTables(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE auto_iteration_role_slots (
+      role_slot_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      responsibility TEXT NOT NULL CHECK (
+        responsibility IN ('supervisor', 'reviewer', 'integrator')
+      ),
+      current_tenure_id TEXT,
+      version INTEGER NOT NULL CHECK (version > 0)
+    ) STRICT;
+    CREATE TABLE auto_iteration_tenures (
+      tenure_id TEXT PRIMARY KEY,
+      role_slot_id TEXT NOT NULL REFERENCES auto_iteration_role_slots(role_slot_id),
+      generation INTEGER NOT NULL CHECK (generation > 0),
+      session_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (
+        status IN ('active', 'draining', 'successor-preparing', 'cutover', 'retired')
+      ),
+      session_configuration_json TEXT,
+      version INTEGER NOT NULL CHECK (version > 0),
+      UNIQUE(role_slot_id, generation)
+    ) STRICT;
+    CREATE TABLE auto_iteration_work_orders (
+      work_order_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      objective TEXT NOT NULL,
+      acceptance_criteria_json TEXT NOT NULL,
+      baseline_commit_sha TEXT NOT NULL,
+      territory_json TEXT NOT NULL,
+      responsible_role_slot_id TEXT NOT NULL REFERENCES auto_iteration_role_slots(role_slot_id),
+      issued_by_role_slot_id TEXT NOT NULL REFERENCES auto_iteration_role_slots(role_slot_id),
+      issued_by_generation INTEGER NOT NULL CHECK (issued_by_generation > 0),
+      completion_condition_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (
+        status IN (
+          'executing', 'delivered', 'awaiting-review', 'review-approved',
+          'awaiting-integration', 'integrated', 'rework', 'blocked',
+          'waiting-for-quota'
+        )
+      ),
+      current_attempt_id TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK (version > 0)
+    ) STRICT;
+    CREATE TABLE auto_iteration_attempts (
+      attempt_id TEXT PRIMARY KEY,
+      work_order_id TEXT NOT NULL REFERENCES auto_iteration_work_orders(work_order_id),
+      attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+      session_id TEXT,
+      session_configuration_json TEXT NOT NULL,
+      runtime_lifecycle TEXT NOT NULL CHECK (
+        runtime_lifecycle IN (
+          'accepted', 'denied', 'authorized', 'start-claimed', 'running',
+          'control-claimed', 'completed', 'failed', 'cancelled', 'interrupted',
+          'recovery-required'
+        )
+      ),
+      slot_state TEXT NOT NULL CHECK (slot_state IN ('unreserved', 'owned', 'released')),
+      workspace_id TEXT,
+      version INTEGER NOT NULL CHECK (version > 0),
+      UNIQUE(work_order_id, attempt_number)
+    ) STRICT;
+    CREATE TABLE auto_iteration_artifacts (
+      artifact_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      reference_json TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE auto_iteration_handoffs (
+      work_order_id TEXT NOT NULL REFERENCES auto_iteration_work_orders(work_order_id),
+      attempt_id TEXT NOT NULL REFERENCES auto_iteration_attempts(attempt_id),
+      handoff_id TEXT NOT NULL,
+      body TEXT NOT NULL,
+      artifact_ids_json TEXT NOT NULL,
+      artifacts_json TEXT NOT NULL,
+      submitted_by_session_id TEXT NOT NULL,
+      is_current_attempt INTEGER NOT NULL CHECK (is_current_attempt IN (0, 1)),
+      version INTEGER NOT NULL CHECK (version > 0),
+      PRIMARY KEY(work_order_id, attempt_id, handoff_id)
+    ) STRICT;
+    CREATE TABLE auto_iteration_inbox (
+      inbox_entry_id TEXT PRIMARY KEY,
+      role_slot_id TEXT NOT NULL REFERENCES auto_iteration_role_slots(role_slot_id),
+      state TEXT NOT NULL CHECK (
+        state IN ('pending', 'included-in-parent-input', 'disposed')
+      ),
+      kind TEXT NOT NULL CHECK (
+        kind IN ('handoff', 'blocked', 'failure', 'mention', 'rotation')
+      ),
+      payload_json TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK (version > 0)
+    ) STRICT;
+    CREATE TABLE auto_iteration_receipts (
+      work_order_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      handoff_id TEXT NOT NULL,
+      level TEXT NOT NULL CHECK (
+        level IN ('persisted', 'included-in-parent-input', 'disposed')
+      ),
+      detail_id TEXT,
+      handoff_version INTEGER NOT NULL CHECK (handoff_version > 0),
+      PRIMARY KEY(work_order_id, attempt_id, handoff_id, level),
+      FOREIGN KEY(work_order_id, attempt_id, handoff_id)
+        REFERENCES auto_iteration_handoffs(work_order_id, attempt_id, handoff_id)
+    ) STRICT;
+    CREATE TABLE auto_iteration_review_decisions (
+      review_decision_id TEXT PRIMARY KEY,
+      work_order_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      handoff_id TEXT NOT NULL,
+      handoff_version INTEGER NOT NULL CHECK (handoff_version > 0),
+      decided_by_role_slot_id TEXT NOT NULL,
+      decided_by_generation INTEGER NOT NULL CHECK (decided_by_generation > 0),
+      decision TEXT NOT NULL CHECK (
+        decision IN ('approve', 'rework', 'blocked', 'transfer')
+      ),
+      reason TEXT NOT NULL,
+      target_role_slot_id TEXT,
+      version INTEGER NOT NULL CHECK (version > 0),
+      FOREIGN KEY(work_order_id, attempt_id, handoff_id)
+        REFERENCES auto_iteration_handoffs(work_order_id, attempt_id, handoff_id)
+    ) STRICT;
+    CREATE TABLE auto_iteration_outbox (
+      outbox_entry_id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      kind TEXT NOT NULL CHECK (
+        kind IN ('start-attempt', 'inbox-wakeup', 'review-disposed', 'rotation')
+      ),
+      dedupe_key TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+      version INTEGER NOT NULL CHECK (version > 0),
+      UNIQUE(project_id, kind, dedupe_key)
+    ) STRICT;
+    CREATE TABLE auto_iteration_requests (
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      request_idempotency_key TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      actor_json TEXT NOT NULL,
+      request_json TEXT NOT NULL,
+      response_json TEXT NOT NULL,
+      PRIMARY KEY(project_id, request_idempotency_key)
+    ) STRICT;
+    CREATE TABLE auto_iteration_quota_observations (
+      quota_pool_id TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+      status TEXT NOT NULL CHECK (status IN ('observed', 'unknown')),
+      windows_json TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE auto_iteration_context_observations (
+      session_id TEXT PRIMARY KEY,
+      observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+      model TEXT NOT NULL,
+      quality TEXT NOT NULL CHECK (
+        quality IN ('authoritative', 'estimated', 'unknown')
+      ),
+      total_tokens INTEGER,
+      max_tokens INTEGER
+    ) STRICT;
+  `);
 }
 
 function replaceVersionFiveSessionsTable(database: DatabaseSync): void {
@@ -5010,6 +5351,50 @@ function hasOwn(value: Record<string, unknown>, key: string): boolean {
 }
 
 function hydrateUpdate(row: UpdateRow): DurableProjectUpdate | undefined {
+  if (row.kind === "auto-iteration") {
+    const data = JSON.parse(row.data_json ?? "{}") as unknown;
+    const keys = isRecord(data) ? Object.keys(data).sort() : [];
+    if (
+      !Number.isSafeInteger(Number(row.cursor)) ||
+      Number(row.cursor) <= 0 ||
+      row.command_id !== null ||
+      row.status !== "auto-iteration" ||
+      !isRecord(data) ||
+      (keys.join(",") !== "entityId,eventKind" &&
+        keys.join(",") !== "data,entityId,eventKind") ||
+      typeof data.eventKind !== "string" ||
+      data.eventKind.length === 0 ||
+      typeof data.entityId !== "string" ||
+      data.entityId.length === 0
+    ) {
+      throw new Error("invalid-auto-iteration-update");
+    }
+    // The renderer projection is wired by the integration lane. This reader
+    // still validates and advances across the Project event now.
+    return undefined;
+  }
+  const knownKinds: readonly string[] = [
+    "accepted",
+    "in-flight",
+    "completed",
+    "quota-paused",
+    "recovery-required",
+    "continuation-stop",
+    "profile-resolved",
+    "runtime-event",
+    "interrupt-capability",
+    "failed",
+  ];
+  if (!knownKinds.includes(row.kind)) {
+    if (!Number.isSafeInteger(Number(row.cursor)) || Number(row.cursor) <= 0) {
+      throw new Error("invalid-update");
+    }
+    console.warn("[coordinator] Skipped unknown ledger update kind", {
+      kind: row.kind,
+      cursor: Number(row.cursor),
+    });
+    return undefined;
+  }
   if (
     !Number.isSafeInteger(Number(row.cursor)) ||
     Number(row.cursor) <= 0 ||
@@ -5024,7 +5409,7 @@ function hydrateUpdate(row: UpdateRow): DurableProjectUpdate | undefined {
   const base = {
     cursor: Number(row.cursor),
     commandId: row.command_id,
-    status: row.status,
+    status: row.status as ProjectCommandStatus,
   };
   switch (row.kind) {
     case "accepted":
@@ -5102,14 +5487,6 @@ function hydrateUpdate(row: UpdateRow): DurableProjectUpdate | undefined {
       };
     }
     default:
-      // A build from a newer version of this product can append a `kind` this
-      // build has never heard of. Skipping it (instead of throwing) keeps the
-      // rest of the ledger observable when an older build reopens a project a
-      // newer build has already written to.
-      console.warn("[coordinator] Skipped unknown ledger update kind", {
-        kind: row.kind,
-        cursor: base.cursor,
-      });
       return undefined;
   }
 }

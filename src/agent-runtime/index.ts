@@ -33,7 +33,7 @@ export interface RuntimeUsageObservation {
   readonly windows: readonly RuntimeUsageWindow[];
   /** Local receipt time, epoch milliseconds; never refreshed by reading storage. */
   readonly observedAt: number;
-  readonly source: "rate-limit-event" | "exhaustion-message";
+  readonly source: "rate-limit-event" | "exhaustion-message" | "zhipu-monitor";
 }
 
 export type RuntimeUsageObserver = (

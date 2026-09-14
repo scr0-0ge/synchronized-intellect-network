@@ -916,6 +916,7 @@ test("profile loading inspects once and exposes every safe model relation with t
   assert.equal(adapter.inspectCalls, 1);
   assert.equal(adapter.startCalls, 0);
   assert.deepEqual(Object.keys(backend).sort(), [
+    "autoIteration",
     "close",
     "interruptActiveTurn",
     "loadDirectSessionProfile",
@@ -1609,6 +1610,7 @@ test("one valid exact-snapshot default request performs one preference write and
     true,
   );
   assert.deepEqual(Object.keys(backend).sort(), [
+    "autoIteration",
     "close",
     "interruptActiveTurn",
     "loadDirectSessionProfile",
@@ -2364,6 +2366,7 @@ test("an exact loaded selection returns durable acceptance before the chosen Cod
   );
   assert.equal(Object.isFrozen(acceptance), true);
   assert.deepEqual(Object.keys(backend).sort(), [
+    "autoIteration",
     "close",
     "interruptActiveTurn",
     "loadDirectSessionProfile",
@@ -3332,11 +3335,22 @@ test("production backend observes the real ProjectChannel with zero act or runti
       observation: { cursor: 0, live: true },
       commands: [],
       initialSelectionKey: null,
+      // The production channel carries the auto-iteration authority; an empty
+      // ledger projects as an active loop with no supervisor and no orders.
+      autoIteration: {
+        status: "active",
+        supervisor: null,
+        workOrders: [],
+        pendingInboxEntries: 0,
+        quotaBlocked: false,
+        lastObservedAt: null,
+      },
     },
   });
   assert.equal(JSON.stringify(result).includes(projectDirectory), false);
   assert.equal(JSON.stringify(result).includes(databasePath), false);
   assert.deepEqual(Object.keys(backend).sort(), [
+    "autoIteration",
     "close",
     "interruptActiveTurn",
     "loadDirectSessionProfile",

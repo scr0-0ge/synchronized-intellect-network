@@ -279,6 +279,12 @@ async function captureRingAndPopover(
   assert.equal(await ring.getAttribute("aria-expanded"), "true");
   const popoverText = (await popover.innerText()).trim();
   await page.screenshot({ path: screenshotPath, fullPage: true });
+  // A click anywhere else is the other established popover dismissal path.
+  await page.mouse.click(0, 0);
+  await popover.waitFor({ state: "hidden", timeout: 5_000 });
+  assert.equal(await ring.getAttribute("aria-expanded"), "false");
+  await ring.click();
+  await popover.waitFor({ state: "visible", timeout: 5_000 });
   // Escape must close it (same lifecycle contract as the model/endpoint popovers).
   await page.keyboard.press("Escape");
   await popover.waitFor({ state: "hidden", timeout: 5_000 });
@@ -316,11 +322,20 @@ async function main(): Promise<void> {
     const seedStore = createWorkbenchAppearancePreferenceStore({ filePath: preferenceFilePath });
     const now = Date.now();
     await seedStore.saveClaudeSubscriptionUsage({
-      five_hour: { utilization: 0.23, resetsAt: Math.floor(now / 1000) + 3 * 60 * 60 },
-      seven_day: { utilization: 0.66, resetsAt: Math.floor(now / 1000) + 3 * 24 * 60 * 60 },
-      observedAt: now,
-    });
-    await seedStore.close();
+    five_hour: { utilization: 0.23, resetsAt: Math.floor(now / 1000) + 3 * 60 * 60 },
+    seven_day: { utilization: 0.66, resetsAt: Math.floor(now / 1000) + 3 * 24 * 60 * 60 },
+    observedAt: now,
+  });
+  await seedStore.saveUsageObservation({
+    endpointKey: "glm",
+    windows: [
+      { label: "five-hour", utilization: 0.5, resetsAt: now + 3 * 60 * 60 * 1000 },
+      { label: "seven-day", utilization: 0.36, resetsAt: now + 3 * 24 * 60 * 60 * 1000 },
+    ],
+    observedAt: now,
+    source: "zhipu-monitor",
+  });
+  await seedStore.close();
 
     step = "first-launch-dark";
     const first = await launchProductionElectron(productionElectron, {
@@ -348,6 +363,10 @@ async function main(): Promise<void> {
     );
     assert.match(glmDarkText, /620K \/ 1M/u);
     assert.match(glmDarkText, /62%/u);
+    assert.match(glmDarkText, /5-hour window/u);
+    assert.match(glmDarkText, /50%/u);
+    assert.match(glmDarkText, /7-day window/u);
+    assert.match(glmDarkText, /36%/u);
 
     step = "first-launch/claude-popover-dark";
     const claudeDarkText = await captureRingAndPopover(

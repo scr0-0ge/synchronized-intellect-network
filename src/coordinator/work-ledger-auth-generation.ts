@@ -1566,12 +1566,16 @@ function scanProjectLedger(
           ? versionFourColumns
           : version === 5
             ? versionFiveColumns
-            : version === 6
+            : version === 6 || version === 7
               ? versionSixColumns
             : undefined;
     if (
       currentColumns === undefined ||
-      !hasExactLedgerSchema(database, currentColumns) ||
+      !hasExactLedgerSchema(
+        database,
+        currentColumns,
+        version === 7 ? versionSevenAdditionalTables : [],
+      ) ||
       (version >= 4 && !hasExactSessionMetadataConstraints(database, version)) ||
       database.prepare("PRAGMA foreign_key_check").all().length !== 0 ||
       Number(
@@ -1589,7 +1593,7 @@ function scanProjectLedger(
     }
     const sessions = database
       .prepare(
-        version === 6
+        version >= 6
           ? `SELECT session_id, root_command_id, profile_json, lifecycle_status,
                     opaque_session_reference, auth_context_json, display_name,
                     display_name_source, archived, account_observation_json,
@@ -1752,7 +1756,7 @@ function scanProjectLedger(
           session.display_name_source === "default" &&
           session.display_name !==
             `Agent Session ${String(rootCommand.accepted_cursor).padStart(2, "0")}` &&
-          (version !== 6 ||
+          (version < 6 ||
             (session.display_name !==
               `Agent Session ${String(session.display_ordinal).padStart(2, "0")}` &&
               session.display_name !==
@@ -1982,7 +1986,10 @@ function isBoundedProfileValue(value: unknown): value is string {
 
 function ledgerFingerprint(database: DatabaseSync, contents: string): string {
   const cursor = database
-    .prepare("SELECT COALESCE(MAX(cursor), 0) AS cursor FROM updates")
+    .prepare(
+      `SELECT COALESCE(MAX(cursor), 0) AS cursor
+         FROM updates WHERE command_id IS NOT NULL`,
+    )
     .get() as { cursor: number };
   return createHash("sha256")
     .update(`${Number(cursor.cursor)}\0${contents}`, "utf8")
@@ -2073,11 +2080,28 @@ const versionSixColumns = Object.freeze({
   sessions: [...versionFiveColumns.sessions, "display_ordinal"],
 });
 
+const versionSevenAdditionalTables = Object.freeze([
+  "auto_iteration_artifacts",
+  "auto_iteration_attempts",
+  "auto_iteration_context_observations",
+  "auto_iteration_handoffs",
+  "auto_iteration_inbox",
+  "auto_iteration_outbox",
+  "auto_iteration_quota_observations",
+  "auto_iteration_receipts",
+  "auto_iteration_requests",
+  "auto_iteration_review_decisions",
+  "auto_iteration_role_slots",
+  "auto_iteration_tenures",
+  "auto_iteration_work_orders",
+]);
+
 function hasExactLedgerSchema(
   database: DatabaseSync,
   expected: Readonly<
     Record<"commands" | "projects" | "sessions" | "updates", readonly string[]>
   >,
+  additionalTables: readonly string[] = [],
 ): boolean {
   const tables = (
     database
@@ -2089,10 +2113,17 @@ function hasExactLedgerSchema(
       )
       .all() as unknown as Array<{ name: string }>
   ).map((row) => row.name);
-  if (!sameStrings(tables, ["commands", "projects", "sessions", "updates"])) {
+  const expectedTables = [
+    ...additionalTables,
+    "commands",
+    "projects",
+    "sessions",
+    "updates",
+  ].sort();
+  if (!sameStrings(tables, expectedTables)) {
     return false;
   }
-  for (const table of tables as Array<keyof typeof expected>) {
+  for (const table of ["commands", "projects", "sessions", "updates"] as const) {
     const tableRecord = database
       .prepare(
         "SELECT ncol, strict FROM pragma_table_list WHERE schema = 'main' AND name = ?",
@@ -2132,7 +2163,7 @@ function hasExactSessionMetadataConstraints(
   ) {
     return false;
   }
-  if (version !== 6) return true;
+  if (version < 6) return true;
   if (
     !sessions.includes("display_ordinalintegernotnull") ||
     !sessions.includes("check(display_ordinal>0)")
@@ -2169,10 +2200,10 @@ function isExactStoredSessionMetadata(value: {
 }, version: number): boolean {
   if (
     (value.archived !== 0 && value.archived !== 1) ||
-    (version === 6 &&
+    (version >= 6 &&
       (!Number.isSafeInteger(value.display_ordinal) ||
         Number(value.display_ordinal) <= 0)) ||
-    (version !== 6 && value.display_ordinal !== null) ||
+    (version < 6 && value.display_ordinal !== null) ||
     (value.archived === 1 &&
       value.lifecycle_status !== "completed" &&
       value.lifecycle_status !== "failed")

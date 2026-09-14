@@ -15,6 +15,7 @@ import type { SubscriptionAuthenticationEndpointId } from "../agent-runtime/subs
 import type { HistoryRecoveryRendererBridge } from "./history-recovery-contract.ts";
 import type { WorkbenchClipboardRendererBridge } from "./clipboard-bridge.ts";
 import type { WorkbenchNotificationRendererBridge } from "./notification-bridge.ts";
+import type { WorkbenchAutoIterationView } from "./auto-iteration-view-contract.ts";
 import { WORKBENCH_RUNTIME_ENDPOINT_IDS } from "./runtime-endpoint-identity.ts";
 
 /** Claude subscription account snapshot; null means never observed. */
@@ -812,6 +813,8 @@ export interface WorkbenchProjectView {
   };
   readonly commands: readonly WorkbenchCommandView[];
   readonly initialSelectionKey: string | null;
+  /** Read-only auto-iteration ledger projection; never a second authority. */
+  readonly autoIteration: WorkbenchAutoIterationView;
 }
 
 export interface WorkbenchProjectFailure {

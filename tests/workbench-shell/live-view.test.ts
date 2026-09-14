@@ -22,6 +22,7 @@ import {
   createWorkbenchLiveView,
   deriveProjectLabel,
 } from "../../src/workbench-shell/live-view.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 
 const profile = Object.freeze({
   model: "gpt-5.6-sol",
@@ -375,6 +376,7 @@ test("live view emits one current sanitized full Project view first", async (t) 
         },
       ],
       initialSelectionKey: "command-1",
+      autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   });
   assert.equal(Object.isFrozen(result), true);
@@ -2004,6 +2006,7 @@ test("live view ends malformed cursor observation with one fixed failure", async
         observation: { cursor: 1, live: true },
         commands: [],
         initialSelectionKey: null,
+        autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       },
     },
     {
@@ -2052,6 +2055,7 @@ test("unexpected channel completion revokes the live view with fixed failure", a
         observation: { cursor: 0, live: true },
         commands: [],
         initialSelectionKey: null,
+        autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       },
     },
     {

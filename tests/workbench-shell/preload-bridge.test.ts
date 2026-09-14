@@ -5,6 +5,7 @@ import {
   createWorkbenchProjectTransferEncoder,
   sanitizeWorkbenchHostedProjectResult,
 } from "../../src/workbench-shell/result-sanitizer.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 
 import {
   WORKBENCH_ADOPT_PROJECT_HISTORY_CHANNEL,
@@ -1499,6 +1500,7 @@ function validResult(): WorkbenchHostedProjectResult {
         },
       ],
       initialSelectionKey: "command-1",
+      autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {

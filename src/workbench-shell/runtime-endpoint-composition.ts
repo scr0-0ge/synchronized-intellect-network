@@ -29,6 +29,10 @@ import {
   glmIsolatedClaudeConfigDir,
 } from "../agent-runtime/claude/glm-catalog.ts";
 import {
+  createGlmUsageWindowsSource,
+  GlmRuntimeAdapterWithUsageWindows,
+} from "../agent-runtime/claude/glm-usage-windows.ts";
+import {
   KIMI_DEFAULT_MODEL_ID,
   createKimiEndpointContext,
   kimiIsolatedClaudeConfigDir,
@@ -197,6 +201,8 @@ export function createProductionGlmRuntimeAdapter(options: {
   readonly createSessionTransport?: ClaudeSessionTransportFactory;
   /** Provider-agnostic usage sink (w234); tagged with endpointKey "glm". */
   readonly observeUsage?: RuntimeUsageObserver;
+  /** Injectable fetch for the w292 Zhipu monitor GET; tests only, defaults to the global fetch. */
+  readonly usageWindowsFetch?: typeof fetch;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   const endpointContext = createGlmEndpointContext({
@@ -211,7 +217,7 @@ export function createProductionGlmRuntimeAdapter(options: {
       ? {}
       : { resolveBaseUrl: options.resolveGlmBaseUrl }),
   });
-  return new ClaudeAdapter(
+  const adapterConstructorArguments: ConstructorParameters<typeof ClaudeAdapter> = [
     undefined,
     options.createSessionTransport,
     options.providerRequestBudget,
@@ -228,6 +234,24 @@ export function createProductionGlmRuntimeAdapter(options: {
     undefined,
     options.observeUsage,
     "glm",
+  ];
+  // w292: the proactive 5-hour/7-day monitor read only makes sense when
+  // something will receive it -- with no sink this stays byte-identical to
+  // the pre-w292 adapter (still a plain ClaudeAdapter, so `instanceof`
+  // checks elsewhere are unaffected).
+  if (options.observeUsage === undefined) {
+    return new ClaudeAdapter(...adapterConstructorArguments);
+  }
+  return new GlmRuntimeAdapterWithUsageWindows(
+    createGlmUsageWindowsSource({
+      endpointKey: "glm",
+      observeUsage: options.observeUsage,
+      environment,
+      resolveAuthToken: options.resolveGlmAuthToken,
+      resolveBaseUrl: options.resolveGlmBaseUrl,
+      fetch: options.usageWindowsFetch,
+    }),
+    ...adapterConstructorArguments,
   );
 }
 

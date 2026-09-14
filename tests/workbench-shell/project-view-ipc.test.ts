@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createWorkbenchProjectTransferDecoder } from "../../src/workbench-shell/result-sanitizer.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 
 import { hostedProjectView } from "./w26-hosted-project-view.ts";
 
@@ -2511,6 +2512,7 @@ function validResult(cursor: number): WorkbenchHostedProjectResult {
       observation: { cursor, live: true },
       commands: [],
       initialSelectionKey: null,
+      autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {

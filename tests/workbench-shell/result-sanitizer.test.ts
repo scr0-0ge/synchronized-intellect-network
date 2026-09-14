@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { hostedProjectView } from "./w26-hosted-project-view.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 import { publicEmptyProjectRegistry } from "../../src/workbench-shell/contract.ts";
 
 import {
@@ -990,7 +991,7 @@ test("Project sanitization admits only exact interruption controls and stopped e
       project: { label: "Interrupt Project" },
       observation: { cursor: 13, live: true },
       commands: [command],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   });
   const running = {
@@ -2650,7 +2651,7 @@ test("hosted Project sanitization preserves duplicate labels only for exact publ
       project: { label: "Shared Name" },
       observation: { cursor: 3, live: true },
       commands: [],
-      initialSelectionKey: null,
+      initialSelectionKey: null, autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {
@@ -2757,7 +2758,7 @@ test("hosted Project sanitization uses the Host's 80-code-point label boundary",
       project: { label },
       observation: { cursor: 4, live: true },
       commands: [],
-      initialSelectionKey: null,
+      initialSelectionKey: null, autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {
@@ -2788,7 +2789,7 @@ test("hosted Project sanitization fails closed for ambiguous, path-bearing, and 
       project: { label: "Visible Project" },
       observation: { cursor: 0, live: true },
       commands: [],
-      initialSelectionKey: null,
+      initialSelectionKey: null, autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {
@@ -3032,7 +3033,7 @@ test("Project sanitization retains only an exact opaque Session removal capabili
           session,
         },
       ],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   });
   const session = {
@@ -3096,7 +3097,7 @@ test("Project profile projection sanitization accepts one exact display shape an
           },
         },
       ],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   };
   assert.deepEqual(sanitizeWorkbenchProjectResult(valid), valid, "valid projection");
@@ -3230,7 +3231,7 @@ test("Project turn attribution sanitization preserves exact aligned profiles and
           },
         },
       ],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   };
   const sanitized = sanitizeWorkbenchProjectResult(valid);
@@ -3348,7 +3349,7 @@ test("Project context sanitization carries one exact frozen pair and rejects eac
           },
         },
       ],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   };
   const sanitized = sanitizeWorkbenchProjectResult(valid);
@@ -3439,7 +3440,7 @@ test("Project prompt suggestions cross the renderer boundary exactly or reject t
           },
         },
       ],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   });
   const sanitized = sanitizeWorkbenchProjectResult(
@@ -3507,7 +3508,7 @@ test("Project user-message sanitization preserves one exact frozen event and fai
           },
         },
       ],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   });
   const sanitized = sanitizeWorkbenchProjectResult(
@@ -3814,7 +3815,7 @@ test("timeline sanitization keeps code comments readable while still redacting r
           },
         },
       ],
-      initialSelectionKey: "command-1",
+      initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   });
   assert.equal(result.ok, true, "the valid view must sanitize, not fail closed");

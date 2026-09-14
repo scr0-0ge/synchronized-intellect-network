@@ -13,6 +13,7 @@ import type {
   WorkbenchModelOption,
   WorkbenchRuntimeEndpointOption,
 } from "../../src/workbench-shell/contract.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 import { createViteSsrTestServer } from "../helpers/vite-server.ts";
 
 const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -100,6 +101,7 @@ const recordedView = Object.freeze({
   observation: Object.freeze({ cursor: 1, live: true as const }),
   commands: Object.freeze([recordedCommand]),
   initialSelectionKey: recordedCommand.key,
+  autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
   projectSelection: Object.freeze({ projects: Object.freeze([]) }),
 }) satisfies WorkbenchHostedProjectView;
 

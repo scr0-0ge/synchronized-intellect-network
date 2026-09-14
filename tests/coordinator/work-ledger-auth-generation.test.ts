@@ -405,6 +405,41 @@ function createVersionTwoEmptyLedger(databasePath: string): void {
   database.close();
 }
 
+function removeVersionSevenStorageForVersionTwoFixture(database: DatabaseSync): void {
+  database.exec(`
+    DROP TABLE auto_iteration_review_decisions;
+    DROP TABLE auto_iteration_receipts;
+    DROP TABLE auto_iteration_handoffs;
+    DROP TABLE auto_iteration_attempts;
+    DROP TABLE auto_iteration_work_orders;
+    DROP TABLE auto_iteration_inbox;
+    DROP TABLE auto_iteration_tenures;
+    DROP TABLE auto_iteration_role_slots;
+    DROP TABLE auto_iteration_artifacts;
+    DROP TABLE auto_iteration_outbox;
+    DROP TABLE auto_iteration_requests;
+    DROP TABLE auto_iteration_context_observations;
+    DROP TABLE auto_iteration_quota_observations;
+
+    ALTER TABLE updates RENAME TO version_seven_updates_fixture;
+    CREATE TABLE updates (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      command_id TEXT NOT NULL REFERENCES commands(command_id),
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      session_id TEXT,
+      data_json TEXT
+    ) STRICT;
+    INSERT INTO updates (
+      cursor, project_id, command_id, kind, status, session_id, data_json
+    )
+    SELECT cursor, project_id, command_id, kind, status, session_id, data_json
+      FROM version_seven_updates_fixture ORDER BY cursor;
+    DROP TABLE version_seven_updates_fixture;
+  `);
+}
+
 test("pristine legacy resume remains eligible until the first durable authentication mutation", async (t) => {
   const dataDirectory = await mkdtemp(join(tmpdir(), "workbench-auth-generation-"));
   t.after(() => rm(dataDirectory, { recursive: true, force: true }));
@@ -740,6 +775,84 @@ test("preparation scans every registered Project and blockers outrank terminal c
         }).kind
       : "wrong-preparation",
     "stale",
+  );
+});
+
+test("authentication scanning accepts schema v7 while ignoring auto-iteration tenure state", async (t) => {
+  const dataDirectory = await mkdtemp(join(tmpdir(), "workbench-auth-v7-"));
+  t.after(() => rm(dataDirectory, { recursive: true, force: true }));
+  const ledgerDirectory = join(dataDirectory, "project-ledgers");
+  const canonicalDirectory = join(dataDirectory, "project-v7");
+  await mkdir(ledgerDirectory, { recursive: true });
+  await mkdir(canonicalDirectory, { recursive: true });
+  const record = {
+    recordKey: "project-record-v1-00000000-0000-4000-8000-000000000007",
+    canonicalDirectory,
+    ledgerSlot: "project-ledger-v1-00000000-0000-4000-8000-000000000007",
+  } as const;
+  await writeFile(
+    join(dataDirectory, "project-registry-v1.json"),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      revision: 1,
+      nextProjectOrdinal: 2,
+      selectedRecordKey: record.recordKey,
+      records: [record],
+    })}\n`,
+    "utf8",
+  );
+  const auth = createWorkLedgerAuthGenerationModule({ dataDirectory });
+  const channel = await createWorkbenchCoordinator({
+    databasePath: join(ledgerDirectory, `${record.ledgerSlot}.sqlite`),
+    adapter: new CompletingCoordinatorAdapter(),
+    authGeneration: auth,
+  }).openProject(canonicalDirectory);
+  assert.ok(channel.autoIteration);
+  await channel.autoIteration.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: "supervisor-v7",
+    generation: 17,
+  });
+  const receipt = await channel.act(startCommand("v7-auth-scan"), {
+    endpointId: "codex-desktop",
+  });
+  await waitForTerminal(channel);
+  assert.ok(receipt.commandId.length > 0);
+  const preparation = auth.prepareAuthenticationMutation({
+    endpointId: "codex-desktop",
+    action: "logout",
+  });
+  assert.equal(preparation.kind, "confirmation-required");
+  assert.deepEqual(
+    preparation.kind === "confirmation-required" ? preparation.consequences : null,
+    { resumableSessionCount: 1, projectCount: 1 },
+    "auto-iteration tenure generation is not counted as provider authentication state",
+  );
+  const rotation = await channel.autoIteration.request(
+    {
+      kind: "supervisor",
+      sessionId: "supervisor-v7",
+      tenure: { roleSlotId: "project-supervisor", generation: 17 },
+    },
+    {
+      kind: "request-supervisor-rotation",
+      requestIdempotencyKey: "auth-scan-independent-rotation",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 17 },
+      roleSlotId: "project-supervisor",
+      successorSession: { endpointId: "codex-desktop", profile: coordinatorProfile },
+    },
+  );
+  assert.equal(rotation.kind, "supervisor-rotation-requested");
+  await channel.close();
+  assert.equal(
+    preparation.kind === "confirmation-required"
+      ? auth.beginAuthenticationMutation({
+          preparationKey: preparation.preparationKey,
+        }).kind
+      : "wrong-preparation",
+    "begun",
+    "a tenure-only generation change does not stale an authentication preparation",
   );
 });
 
@@ -1241,6 +1354,7 @@ test("a registered migrated Work Ledger survives two auth cycles per provider ac
   await original.close();
 
   const versionTwo = new DatabaseSync(databasePath);
+  removeVersionSevenStorageForVersionTwoFixture(versionTwo);
   versionTwo.exec(`
     DROP INDEX sessions_project_display_ordinal_unique;
     ALTER TABLE sessions DROP COLUMN display_ordinal;
@@ -1454,6 +1568,7 @@ test("a migrated missing generation keeps the complete legacy resume path only w
   await original.close();
 
   const versionTwo = new DatabaseSync(databasePath);
+  removeVersionSevenStorageForVersionTwoFixture(versionTwo);
   versionTwo.exec(`
     DROP INDEX sessions_project_display_ordinal_unique;
     ALTER TABLE sessions DROP COLUMN display_ordinal;
@@ -1548,7 +1663,7 @@ test("version-two Work Ledgers migrate exactly once and remain readable after re
       (migrated.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
     ),
-    6,
+    7,
   );
   assert.deepEqual(
     (

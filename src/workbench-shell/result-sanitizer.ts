@@ -180,6 +180,11 @@ import {
   type WorkbenchToolActivity,
   type WorkbenchWorkIntensityOption,
 } from "./contract.ts";
+import type {
+  WorkbenchAutoIterationView,
+  WorkbenchAutoIterationWorkOrderView,
+  WorkbenchAutoIterationSupervisorView,
+} from "./auto-iteration-view-contract.ts";
 import {
   isRegisteredRuntimeEndpointId,
   runtimeEndpointOrdinal,
@@ -2614,6 +2619,7 @@ export function createWorkbenchProjectTransferSanitizer() {
           "observation",
           "commands",
           "initialSelectionKey",
+          "autoIteration",
           "projectSelection",
         ]) ||
         !isDenseDataArray(value.view.commands)
@@ -2763,7 +2769,7 @@ export function createWorkbenchProjectTransferDecoder() {
       } else {
         if (!isStrictDataRecord(value, ["kind", "revision", "baseRevision", "view"]) || value.kind !== "delta" ||
             value.baseRevision !== revision || (value.revision as number) <= revision || !previous?.ok || !("view" in previous) ||
-            !isStrictDataRecord(value.view, ["project", "observation", "commands", "initialSelectionKey", "projectSelection"]) ||
+            !isStrictDataRecord(value.view, ["project", "observation", "commands", "initialSelectionKey", "autoIteration", "projectSelection"]) ||
             !Array.isArray(value.view.commands)) throw new Error("invalid-delta-base");
         const oldTurns = previous.view.commands.flatMap(command => command.session?.turns ?? []);
         const commands = value.view.commands.map((command: unknown) => {
@@ -3605,6 +3611,7 @@ function sanitizeView(
   hosted = false,
 ): WorkbenchProjectView {
   const expectedViewKeys = [
+    "autoIteration",
     "commands",
     "initialSelectionKey",
     "observation",
@@ -3655,7 +3662,193 @@ function sanitizeView(
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,
+    autoIteration: sanitizeAutoIterationView(value.autoIteration),
   });
+}
+
+const autoIterationStatuses: readonly WorkbenchAutoIterationWorkOrderView["status"][] = [
+  "executing",
+  "delivered",
+  "awaiting-review",
+  "review-approved",
+  "awaiting-integration",
+  "integrated",
+  "rework",
+  "blocked",
+  "waiting-for-quota",
+];
+
+const autoIterationRuntimeLifecycles: readonly WorkbenchAutoIterationWorkOrderView["workerRuntimeLifecycle"][] = [
+  "accepted",
+  "denied",
+  "authorized",
+  "start-claimed",
+  "running",
+  "control-claimed",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "recovery-required",
+];
+
+const autoIterationWaitingFor: readonly NonNullable<WorkbenchAutoIterationWorkOrderView["waitingFor"]>[] = [
+  "worker-start",
+  "worker-execution",
+  "supervisor-review",
+  "integration",
+  "quota",
+];
+
+const autoIterationTenureStatuses: readonly WorkbenchAutoIterationSupervisorView["tenureStatus"][] = [
+  "active",
+  "draining",
+  "successor-preparing",
+  "cutover",
+  "retired",
+];
+
+/** The projection carries ids and enum states only; no model-authored text. */
+function sanitizeAutoIterationView(
+  value: unknown,
+): WorkbenchAutoIterationView {
+  if (!isStrictDataRecord(value, [
+    "status",
+    "supervisor",
+    "workOrders",
+    "pendingInboxEntries",
+    "quotaBlocked",
+    "lastObservedAt",
+  ])) {
+    throw new Error("invalid-auto-iteration-view");
+  }
+  const status: unknown = value.status;
+  const workOrdersInput: unknown = value.workOrders;
+  const pendingInboxEntries: unknown = value.pendingInboxEntries;
+  const quotaBlocked: unknown = value.quotaBlocked;
+  const lastObservedAt: unknown = value.lastObservedAt;
+  if (
+    (status !== "active" && status !== "unavailable") ||
+    !Array.isArray(workOrdersInput) ||
+    typeof pendingInboxEntries !== "number" ||
+    !Number.isSafeInteger(pendingInboxEntries) ||
+    pendingInboxEntries < 0 ||
+    typeof quotaBlocked !== "boolean" ||
+    (lastObservedAt !== null &&
+      (typeof lastObservedAt !== "number" ||
+        !Number.isSafeInteger(lastObservedAt) ||
+        lastObservedAt < 0))
+  ) {
+    throw new Error("invalid-auto-iteration-view");
+  }
+  const workOrderIds = new Set<string>();
+  const workOrders = workOrdersInput.map((entryInput: unknown) => {
+    if (!isStrictDataRecord(entryInput, [
+      "workOrderId",
+      "status",
+      "attemptCount",
+      "workerSessionBound",
+      "workerRuntimeLifecycle",
+      "delivered",
+      "reviewDecided",
+      "integrated",
+      "waitingFor",
+    ])) {
+      throw new Error("invalid-auto-iteration-work-order");
+    }
+    const workOrderId: unknown = entryInput.workOrderId;
+    const orderStatus: unknown = entryInput.status;
+    const attemptCount: unknown = entryInput.attemptCount;
+    const workerSessionBound: unknown = entryInput.workerSessionBound;
+    const workerRuntimeLifecycle: unknown = entryInput.workerRuntimeLifecycle;
+    const delivered: unknown = entryInput.delivered;
+    const reviewDecided: unknown = entryInput.reviewDecided;
+    const integrated: unknown = entryInput.integrated;
+    const waitingFor: unknown = entryInput.waitingFor;
+    if (
+      !isSafeAutoIterationId(workOrderId) ||
+      !autoIterationStatuses.includes(
+        orderStatus as WorkbenchAutoIterationWorkOrderView["status"],
+      ) ||
+      typeof attemptCount !== "number" ||
+      !Number.isSafeInteger(attemptCount) ||
+      attemptCount < 0 ||
+      typeof workerSessionBound !== "boolean" ||
+      !autoIterationRuntimeLifecycles.includes(
+        workerRuntimeLifecycle as WorkbenchAutoIterationWorkOrderView["workerRuntimeLifecycle"],
+      ) ||
+      typeof delivered !== "boolean" ||
+      typeof reviewDecided !== "boolean" ||
+      typeof integrated !== "boolean" ||
+      (waitingFor !== null &&
+        !autoIterationWaitingFor.includes(
+          waitingFor as NonNullable<WorkbenchAutoIterationWorkOrderView["waitingFor"]>,
+        ))
+    ) {
+      throw new Error("invalid-auto-iteration-work-order");
+    }
+    if (workOrderIds.has(workOrderId)) {
+      throw new Error("duplicate-auto-iteration-work-order");
+    }
+    workOrderIds.add(workOrderId);
+    return Object.freeze({
+      workOrderId,
+      status: orderStatus as WorkbenchAutoIterationWorkOrderView["status"],
+      attemptCount,
+      workerSessionBound,
+      workerRuntimeLifecycle:
+        workerRuntimeLifecycle as WorkbenchAutoIterationWorkOrderView["workerRuntimeLifecycle"],
+      delivered,
+      reviewDecided,
+      integrated,
+      waitingFor:
+        waitingFor as WorkbenchAutoIterationWorkOrderView["waitingFor"],
+    }) satisfies WorkbenchAutoIterationWorkOrderView;
+  });
+  let supervisor: WorkbenchAutoIterationSupervisorView | null = null;
+  const supervisorInput: unknown = value.supervisor;
+  if (supervisorInput !== null) {
+    if (!isStrictDataRecord(supervisorInput, ["roleSlotId", "generation", "tenureStatus"])) {
+      throw new Error("invalid-auto-iteration-supervisor");
+    }
+    const roleSlotId: unknown = supervisorInput.roleSlotId;
+    const generation: unknown = supervisorInput.generation;
+    const tenureStatus: unknown = supervisorInput.tenureStatus;
+    if (
+      !isSafeAutoIterationId(roleSlotId) ||
+      typeof generation !== "number" ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      !autoIterationTenureStatuses.includes(
+        tenureStatus as WorkbenchAutoIterationSupervisorView["tenureStatus"],
+      )
+    ) {
+      throw new Error("invalid-auto-iteration-supervisor");
+    }
+    supervisor = Object.freeze({
+      roleSlotId,
+      generation,
+      tenureStatus:
+        tenureStatus as WorkbenchAutoIterationSupervisorView["tenureStatus"],
+    });
+  }
+  return deepFreeze({
+    status: status as WorkbenchAutoIterationView["status"],
+    supervisor,
+    workOrders: Object.freeze(workOrders),
+    pendingInboxEntries,
+    quotaBlocked,
+    lastObservedAt: lastObservedAt as number | null,
+  });
+}
+
+function isSafeAutoIterationId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 120 &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)
+  );
 }
 
 function sanitizeHostedView(value: unknown): WorkbenchHostedProjectView {
@@ -4712,7 +4905,8 @@ export function reconstructWorkbenchUsageObservation(value: unknown): WorkbenchU
   try {
     if (!isRecord(value) || !hasExactKeys(value, ["endpointKey", "observedAt", "source", "windows"]) ||
         typeof value.endpointKey !== "string" || value.endpointKey.length === 0 || value.endpointKey.length > 64 ||
-        (value.source !== "rate-limit-event" && value.source !== "exhaustion-message") ||
+        (value.source !== "rate-limit-event" && value.source !== "exhaustion-message" &&
+          value.source !== "zhipu-monitor") ||
         !Number.isSafeInteger(value.observedAt) || (value.observedAt as number) <= 0 ||
         (value.observedAt as number) > 8_640_000_000_000_000 || !Array.isArray(value.windows)) return undefined;
     const windows: WorkbenchUsageObservation["windows"][number][] = [];

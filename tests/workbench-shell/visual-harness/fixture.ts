@@ -3,6 +3,7 @@ import type {
   WorkbenchHostedProjectView,
 } from "../../../src/workbench-shell/contract.ts";
 import { publicRuntimeEndpointDiscovery } from "../../../src/workbench-shell/contract.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../../src/workbench-shell/auto-iteration-view-contract.ts";
 
 const profile = Object.freeze({
   requested: Object.freeze({
@@ -175,6 +176,7 @@ export const visualFixture: WorkbenchHostedProjectView = Object.freeze({
     }),
   ]),
   initialSelectionKey: "command-1",
+  autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
   projectSelection: firstSelectedProjects,
 });
 
@@ -307,6 +309,7 @@ export const emptyVisualFixture: WorkbenchHostedProjectView = Object.freeze({
   observation: Object.freeze({ cursor: 0, live: true }),
   commands: Object.freeze([]),
   initialSelectionKey: null,
+  autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
   projectSelection: firstSelectedProjects,
 });
 
@@ -316,6 +319,7 @@ export const unavailableVisualFixture: WorkbenchHostedProjectView =
     observation: Object.freeze({ cursor: 0, live: true }),
     commands: Object.freeze([]),
     initialSelectionKey: null,
+    autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     projectSelection: unavailableSelectedProjects,
   });
 
@@ -325,6 +329,7 @@ export const openedProjectVisualFixture: WorkbenchHostedProjectView =
     observation: Object.freeze({ cursor: 0, live: true }),
     commands: Object.freeze([]),
     initialSelectionKey: null,
+    autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     projectSelection: openedProjectSelection,
   });
 
@@ -400,6 +405,7 @@ export const secondSessionVisualFixture: WorkbenchHostedProjectView = Object.fre
     }),
   ]),
   initialSelectionKey: "command-2",
+  autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
   projectSelection: secondSelectedProjects,
 });
 

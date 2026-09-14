@@ -528,8 +528,21 @@ test("empty v1 state upgrades deterministically while malformed schema and rows 
   assert.deepEqual((await emptyChannel.snapshot()).commands, []);
   await emptyChannel.close();
   const emptyReader = new DatabaseSync(emptyDatabasePath, { readOnly: true });
-  assert.equal(schemaVersion(emptyReader), 6);
+  assert.equal(schemaVersion(emptyReader), 7);
   assert.deepEqual(conceptualTableNames(emptyReader), [
+    "auto_iteration_artifacts",
+    "auto_iteration_attempts",
+    "auto_iteration_context_observations",
+    "auto_iteration_handoffs",
+    "auto_iteration_inbox",
+    "auto_iteration_outbox",
+    "auto_iteration_quota_observations",
+    "auto_iteration_receipts",
+    "auto_iteration_requests",
+    "auto_iteration_review_decisions",
+    "auto_iteration_role_slots",
+    "auto_iteration_tenures",
+    "auto_iteration_work_orders",
     "commands",
     "projects",
     "sessions",
@@ -709,7 +722,7 @@ test("a populated v1 ledger upgrades once and keeps its legacy Agent Session vis
     try {
       assert.equal(
         Number((reader.prepare("PRAGMA user_version").get() as { user_version: number }).user_version),
-        6,
+        7,
       );
       const commandColumns = reader
         .prepare("PRAGMA table_info(commands)")
@@ -856,7 +869,7 @@ test("v1 migration preserves accepted, in-flight, and failed statuses with their
     await channel.close();
   }
   const reader = new DatabaseSync(databasePath, { readOnly: true });
-  assert.equal(schemaVersion(reader), 6);
+  assert.equal(schemaVersion(reader), 7);
   assert.deepEqual(
     reader
       .prepare("SELECT accepted_cursor FROM commands ORDER BY accepted_cursor")

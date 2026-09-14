@@ -16,6 +16,7 @@ import {
   createWorkbenchProjectTransferEncoder,
   sanitizeWorkbenchHostedProjectResult,
 } from "../../src/workbench-shell/result-sanitizer.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 
 class FakeTransferBridge
   implements Pick<WorkbenchRendererTransferBridge, "observeProject">
@@ -103,6 +104,7 @@ function result(
         },
       ],
       initialSelectionKey: "command-1",
+      autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {
