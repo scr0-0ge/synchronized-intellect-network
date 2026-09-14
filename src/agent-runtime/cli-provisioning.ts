@@ -48,6 +48,9 @@ import {
 } from "./configured-executable.ts";
 import {
   ensurePrivateNode,
+  NODE_MINIMUM_MAJOR,
+  NODE_MINIMUM_MINOR,
+  nodeVersionAtLeast,
   type PrivateNodeProvisionOutcome,
 } from "./node-provisioning.ts";
 import { RUNTIME_LOOKUP_SURFACES } from "./runtime-lookup-surface.ts";
@@ -162,11 +165,15 @@ export async function provisionRuntimeCli(
 
   const privateNodeDirectory =
     dependencies.privateNodeDirectory ?? defaultPrivateNodeDirectory(environment);
-  let node = await locateNode(privateNodeDirectory);
+  let scan = await locateNode(privateNodeDirectory, environment);
+  let node = scan.node;
   if (node === undefined) {
-    // No node anywhere: prepare the private Node runtime start.bat would have
-    // provided, in the cache both paths share, then locate it through the
-    // same admission gate as before. A failure carries its own reason.
+    // Nothing ADMITTED: either no candidate exists, or every one of them read
+    // back a version below the floor (recorded in `scan.stale`). Either way,
+    // prepare the private Node runtime start.bat would have provided, in the
+    // cache both paths share, then locate it through the same admission gate
+    // as before. A failure carries its own reason, prefixed with which PATH
+    // candidate was too old when that is why nothing was already usable.
     const provisionNode =
       dependencies.provisionNode ??
       ((nodeEnvironment: NodeJS.ProcessEnv) =>
@@ -179,9 +186,10 @@ export async function provisionRuntimeCli(
         }));
     const provisioned = await provisionNode(environment);
     if (provisioned.kind === "failed") {
-      return failed("node-not-located", provisioned.detail);
+      return failed("node-not-located", withStaleNodeContext(scan.stale, provisioned.detail));
     }
-    node = await locateNode(privateNodeDirectory);
+    scan = await locateNode(privateNodeDirectory, environment);
+    node = scan.node;
     if (node === undefined) {
       return failed(
         "node-not-located",
@@ -297,23 +305,93 @@ function localAppData(environment: NodeJS.ProcessEnv): string {
     : join(homedir(), "AppData", "Local");
 }
 
+interface StaleNodeCandidate {
+  readonly path: string;
+  readonly version: string;
+}
+
+interface NodeLookup {
+  readonly node: { readonly executable: string; readonly directory: string } | undefined;
+  /** Admitted candidates rejected for reading back a version below the floor. */
+  readonly stale: readonly StaleNodeCandidate[];
+}
+
+/**
+ * A structurally admitted candidate is not necessarily USABLE: `npm install`
+ * under a node older than {@link NODE_MINIMUM_MAJOR}.{@link NODE_MINIMUM_MINOR}
+ * fails downstream for reasons that name npm, not the node that ran it. So
+ * every candidate is read back the same way w282 reads back the private
+ * Node -- run it and parse `process.versions.node` -- and one below the floor
+ * is skipped exactly like one that could not be found at all.
+ */
 async function locateNode(
   privateNodeDirectory: string,
-): Promise<{ readonly executable: string; readonly directory: string } | undefined> {
+  environment: NodeJS.ProcessEnv,
+): Promise<NodeLookup> {
   const candidates = [
     join(privateNodeDirectory, "node.exe"),
     ...(await lookupOnPathBounded("node.exe").catch(() => [])),
   ];
+  const stale: StaleNodeCandidate[] = [];
   for (const candidate of candidates) {
     const admitted = await admitNativeExecutable(
       candidate,
       productionWindowsAdmissionDependencies,
     );
-    if (admitted.kind === "admitted") {
-      return { executable: admitted.path, directory: join(admitted.path, "..") };
+    if (admitted.kind !== "admitted") continue;
+    const version = await readCandidateNodeVersion(admitted.path, environment);
+    if (version === undefined || !nodeVersionAtLeast(version)) {
+      if (version !== undefined) stale.push({ path: admitted.path, version });
+      continue;
     }
+    return {
+      node: { executable: admitted.path, directory: join(admitted.path, "..") },
+      stale,
+    };
   }
-  return undefined;
+  return { node: undefined, stale };
+}
+
+const maximumVersionCharacters = 64;
+
+/** Runs the candidate and reads `process.versions.node` straight out of the pipe. */
+function readCandidateNodeVersion(
+  executable: string,
+  environment: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    // A file that passed structural admission is not necessarily a real PE:
+    // spawn() throws SYNCHRONOUSLY for that on Windows (`spawn UNKNOWN`),
+    // before any event can carry it (w282).
+    let child;
+    try {
+      child = spawn(executable, ["-p", "process.versions.node"], {
+        env: environment,
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+        shell: false,
+      });
+    } catch {
+      resolve(undefined);
+      return;
+    }
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout = (stdout + chunk.toString("utf8")).slice(0, maximumVersionCharacters);
+    });
+    child.once("error", () => resolve(undefined));
+    child.once("close", (code) => {
+      const version = stdout.split(/\r?\n/u)[0]?.trim() ?? "";
+      resolve(code === 0 && /^\d+\.\d+\.\d+/u.test(version) ? version : undefined);
+    });
+  });
+}
+
+/** "Node 18.0.0 on PATH is too old (needs 22.5 or newer). <the rest>" */
+function withStaleNodeContext(stale: readonly StaleNodeCandidate[], detail: string): string {
+  const first = stale[0];
+  if (first === undefined) return detail;
+  return `Node ${first.version} on PATH is too old (needs ${String(NODE_MINIMUM_MAJOR)}.${String(NODE_MINIMUM_MINOR)} or newer). ${detail}`;
 }
 
 function runNpmInstall(

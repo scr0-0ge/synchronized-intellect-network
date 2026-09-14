@@ -34,6 +34,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { captureProcessTree, waitForProcessTreeExit } from './process-tree.mjs';
+
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const launcherSource = path.join(repositoryRoot, 'start.bat');
 const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
@@ -53,7 +55,6 @@ const nodeArchiveBytes = new Map();
    the elapsed time, so the two can never be confused again. */
 const LAUNCHER_TIMEOUT_MS = 120_000;
 const PRODUCTION_START_TIMEOUT_MS = 90_000;
-const PROCESS_TREE_EXIT_TIMEOUT_MS = 15_000;
 
 function batch(...lines) {
   return [...lines, ''].join('\r\n');
@@ -353,60 +354,6 @@ function reportLauncherCost(t, result, label) {
 
 function readIfPresent(file) {
   return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
-}
-
-function captureProcessTree(rootPid, t) {
-  const captured = spawnSync(
-    powershell,
-    [
-      '-NoLogo',
-      '-NoProfile',
-      '-NonInteractive',
-      '-Command',
-      `$rootPid = ${String(rootPid)}; ` +
-        '$processes = @(Get-CimInstance Win32_Process -ErrorAction Stop); ' +
-        '$tree = [System.Collections.Generic.HashSet[int]]::new(); [void]$tree.Add($rootPid); ' +
-        'do { $count = $tree.Count; foreach ($process in $processes) { ' +
-        'if ($tree.Contains([int]$process.ParentProcessId)) { [void]$tree.Add([int]$process.ProcessId) } ' +
-        '} } while ($tree.Count -gt $count); ' +
-        '[Console]::Out.Write((@($tree | Sort-Object) -join ","))',
-    ],
-    { encoding: 'utf8', timeout: 30_000, windowsHide: true },
-  );
-  const pids = (captured.stdout ?? '')
-    .trim()
-    .split(',')
-    .map(Number)
-    .filter(Number.isSafeInteger);
-  if (captured.status === 0 && pids.length > 0) return pids;
-  t.diagnostic(
-    `launcher smoke process-tree capture failed; waiting for root pid ${String(rootPid)} only: ` +
-      `${captured.stderr?.trim() || captured.error?.message || `status=${String(captured.status)}`}`,
-  );
-  return [rootPid];
-}
-
-function processIsAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitForProcessTreeExit(t, pids) {
-  const started = performance.now();
-  let remaining = pids.filter(processIsAlive);
-  while (remaining.length > 0 && performance.now() - started < PROCESS_TREE_EXIT_TIMEOUT_MS) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    remaining = pids.filter(processIsAlive);
-  }
-  t.diagnostic(
-    `launcher smoke process-tree exit: elapsed=${String(Math.round(performance.now() - started))}ms ` +
-      `limit=${String(PROCESS_TREE_EXIT_TIMEOUT_MS)}ms captured=${String(pids.length)} ` +
-      `remaining=${remaining.length === 0 ? 'none' : remaining.join(',')}`,
-  );
 }
 
 async function observeProductionStart(t) {
