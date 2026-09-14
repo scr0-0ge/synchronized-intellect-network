@@ -202,6 +202,26 @@ export function preventFileDropNavigation(event: DragEvent): void {
   if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
 }
 
+/**
+ * True once a completed catalog load shows every known endpoint as
+ * `not-inspected` — a shape a real inspection attempt never produces
+ * (`discoverRuntimeEndpointComposition` always resolves each endpoint to
+ * `catalog-ready` or a specific failure category). Only the packaged
+ * bootstrap Home project's decorated adapter skips inspection outright and
+ * returns this uniform placeholder, so it identifies that Project without a
+ * new field on the wire.
+ */
+export function projectRunsNoAgentSessions(
+  profile: WorkbenchDirectProfileState,
+): boolean {
+  const statuses = profile.result?.endpointDiscovery.statuses;
+  return (
+    statuses !== undefined &&
+    statuses.length > 0 &&
+    statuses.every((status) => status.category === "not-inspected")
+  );
+}
+
 export const CommandWithoutSession: Component<{
   readonly command: WorkbenchCommandView;
 }> = (props) => {
@@ -877,14 +897,16 @@ export const DirectInputComposer: Component<{
           {activeTurn()
             ? `${steerTitle()} · ${interruptTitle()}`
             : presentationText(props.profile.defaultPreference.feedback) ??
-              presentationText(props.profile.feedback) ??
-              (props.profile.phase === "idle"
-              ? continuing()
-                ? composerFeedbackCopy.loadingContinuationCatalog
-                : composerFeedbackCopy.endpointsReadOnOpen
-              : continuing()
-                ? composerFeedbackCopy.nextTurnModesFixed
-                : composerFeedbackCopy.selectionsStayLocal)}
+              (projectRunsNoAgentSessions(props.profile)
+                ? composerFeedbackCopy.bootstrapProjectUnavailable
+                : presentationText(props.profile.feedback) ??
+                  (props.profile.phase === "idle"
+                  ? continuing()
+                    ? composerFeedbackCopy.loadingContinuationCatalog
+                    : composerFeedbackCopy.endpointsReadOnOpen
+                  : continuing()
+                    ? composerFeedbackCopy.nextTurnModesFixed
+                    : composerFeedbackCopy.selectionsStayLocal))}
         </p>
       </Show>
 
@@ -1665,7 +1687,9 @@ const ProfilePopover: Component<{
                     </For>
                   </div>
                   <p class="picker-note">
-                    {pickerCopy.selectableNote}
+                    {projectRunsNoAgentSessions(props.profile)
+                      ? pickerCopy.noSessionsHereNote
+                      : pickerCopy.selectableNote}
                   </p>
                 </div>
               </Show>

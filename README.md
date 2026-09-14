@@ -68,7 +68,14 @@ Run the failing test and fix whatever it reports.
 
 ## Run it
 
-Download this repository and double-click **`start.bat`**. That is the whole install.
+The quickest start: download the Windows zip from
+[Releases](https://github.com/scr0-0ge/synchronized-intellect-network/releases), extract it, and
+double-click **`Synchronized Intellect Network.exe`**. It is unsigned, so SmartScreen will ask on
+first run (**More info → Run anyway**). Agent Sessions run in a project you pick with
+**Create Project…**, and the Settings one-click CLI installs fetch a private Node runtime when none is on PATH.
+
+Or run it from source: download this repository and double-click **`start.bat`**. That is the
+whole install.
 
 Nothing has to be set up first — if Node is missing or too old, the launcher fetches its own copy
 into `%LOCALAPPDATA%`, installs from the lockfile, builds, and starts the app. Nothing lands
@@ -124,7 +131,8 @@ pointing that endpoint at a compatible gateway instead of its official API.
 
 Early, Windows-only, one person's project.
 
-- No signed release yet; `pnpm workbench:package:windows` builds an unsigned local one.
+- The Releases page has an unsigned Windows package; `pnpm workbench:package:windows` builds an
+  equivalent local one.
 - The first run needs the network — that is where Node and the dependencies come from.
 - A session pinned to a model the vendor has retired can't be continued. The app points you at a
   new one.

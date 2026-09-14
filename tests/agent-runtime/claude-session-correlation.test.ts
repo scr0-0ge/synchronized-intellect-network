@@ -145,6 +145,26 @@ for (const defect of ["missing-stop", "terminal-reason", "result-text"] as const
   });
 }
 
+test("a mid-turn upstream 401 classifies as authentication-required, not turn-failed", async () => {
+  // Result shape captured live 2026-09-14 (w280): real Claude CLI 2.1.270 driven
+  // through the production ClaudeAdapter/session-transport composition against a
+  // fake local HTTP server answering /v1/messages with 401. The CLI retries
+  // internally (system/api_retry, ~10 attempts) then settles on this exact
+  // terminal result frame -- is_error true, terminal_reason "api_error",
+  // api_error_status 401, result text "Not logged in · Please run /login".
+  const replay = await replayCapture({ edit: lines => lines.map(line => {
+    const frame = JSON.parse(line);
+    if (frame.type === "result") {
+      frame.is_error = true;
+      frame.terminal_reason = "api_error";
+      frame.api_error_status = 401;
+      frame.result = "Not logged in · Please run /login";
+    }
+    return JSON.stringify(frame);
+  }) });
+  assert.deepEqual(replay.events.at(-1), { kind: "failed", category: "authentication-required" });
+});
+
 for (const interrupt of ["missing-queue", "nonempty-queue", "error", "malformed-body"] as const) {
   test(`a matching interrupt id still rejects ${interrupt}`, async () => {
     const replay = await replayCapture({ interrupt });

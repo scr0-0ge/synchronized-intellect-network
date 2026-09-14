@@ -1,9 +1,11 @@
 // Installing a vendor CLI into the product's own private directory.
 //
-// A machine with nothing but Windows on it gets node from `start.bat`, which
-// downloads Node LTS into `%LOCALAPPDATA%\synchronized-intellect-network\runtime\node`
-// when PATH has none. So by the time the Workbench is running there is always
-// a node -- and beside it, npm. That is enough to install the two CLIs the same
+// A machine with nothing but Windows on it gets node from `start.bat` in a
+// source checkout, or -- packaged, where the zip carries no start.bat -- from
+// the product itself: `ensurePrivateNode` downloads the verified Node LTS zip
+// into `%LOCALAPPDATA%\synchronized-intellect-network\runtime\node`, the one
+// cache both paths share. So by the time an install runs there is always a
+// node -- and beside it, npm. That is enough to install the two CLIs the same
 // way each vendor's README documents (`npm install -g <package>`), except into
 // a directory the product owns:
 //
@@ -24,12 +26,15 @@
 // `integrity` the registry manifest declares; the product does not add a
 // second checksum on top of that. The registry is npm's default and follows
 // `NPM_CONFIG_REGISTRY` untouched, so a user behind a mirror sets one
-// variable and nothing here needs to know.
+// variable and nothing here needs to know. The Node zip underneath it all is
+// verified against nodejs.org's own SHASUMS256.txt before it is extracted --
+// that check lives in `node-provisioning.ts` and is shared with start.bat's
+// cache.
 
 import { spawn } from "node:child_process";
 import { copyFile, link, readFile, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { discoverClaudeLaunch } from "./claude/process-transport.ts";
 import {
@@ -41,6 +46,10 @@ import {
   setConfiguredRuntimeExecutable,
   type ConfigurableRuntime,
 } from "./configured-executable.ts";
+import {
+  ensurePrivateNode,
+  type PrivateNodeProvisionOutcome,
+} from "./node-provisioning.ts";
 import { RUNTIME_LOOKUP_SURFACES } from "./runtime-lookup-surface.ts";
 import {
   admitLaunchTarget,
@@ -96,6 +105,12 @@ export interface CliProvisioningDependencies {
   /** Where `start.bat` keeps its private node; `node.exe` on PATH is the fallback. */
   readonly privateNodeDirectory?: string;
   readonly environment?: NodeJS.ProcessEnv;
+  /** Download root for the private Node provisioning; production is nodejs.org. */
+  readonly nodeDownloadRoot?: string;
+  /** Prepares the private Node when none is located; production downloads the verified LTS. */
+  readonly provisionNode?: (
+    environment: NodeJS.ProcessEnv,
+  ) => Promise<PrivateNodeProvisionOutcome>;
   /** Runs `node npm-cli.js install ...`; the production one spawns it. */
   readonly runInstall?: (
     node: string,
@@ -145,11 +160,34 @@ export async function provisionRuntimeCli(
   ): CliProvisioningOutcome =>
     Object.freeze({ kind: "failed", runtime, step, detail, directory, registry });
 
-  const node = await locateNode(
-    dependencies.privateNodeDirectory ?? defaultPrivateNodeDirectory(environment),
-  );
+  const privateNodeDirectory =
+    dependencies.privateNodeDirectory ?? defaultPrivateNodeDirectory(environment);
+  let node = await locateNode(privateNodeDirectory);
   if (node === undefined) {
-    return failed("node-not-located", "No node.exe beside the product's private runtime or on PATH.");
+    // No node anywhere: prepare the private Node runtime start.bat would have
+    // provided, in the cache both paths share, then locate it through the
+    // same admission gate as before. A failure carries its own reason.
+    const provisionNode =
+      dependencies.provisionNode ??
+      ((nodeEnvironment: NodeJS.ProcessEnv) =>
+        ensurePrivateNode({
+          environment: nodeEnvironment,
+          cacheRoot: dirname(privateNodeDirectory),
+          ...(dependencies.nodeDownloadRoot === undefined
+            ? {}
+            : { downloadRoot: dependencies.nodeDownloadRoot }),
+        }));
+    const provisioned = await provisionNode(environment);
+    if (provisioned.kind === "failed") {
+      return failed("node-not-located", provisioned.detail);
+    }
+    node = await locateNode(privateNodeDirectory);
+    if (node === undefined) {
+      return failed(
+        "node-not-located",
+        "A private Node was prepared but could not be admitted afterwards.",
+      );
+    }
   }
   const npmCli = join(node.directory, "node_modules", "npm", "bin", "npm-cli.js");
   if ((await readTextFile(npmCli)) === undefined) {

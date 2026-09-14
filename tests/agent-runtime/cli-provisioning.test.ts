@@ -17,6 +17,10 @@ import {
   type ConfigurableRuntime,
 } from "../../src/agent-runtime/configured-executable.ts";
 import type { WindowsRuntimeLaunch } from "../../src/agent-runtime/windows-executable-admission.ts";
+import {
+  createPrivateNodeDownloadFixture,
+  unreachableDownloadRoot,
+} from "./private-node-download-fixture.ts";
 
 // The installer runs the real npm on a user's machine; here npm is replaced by
 // a function that lays down the bytes `npm install -g --prefix <dir>` really
@@ -267,10 +271,15 @@ test("without a node the installer stops at the first step and says so", async (
   const f = await fixture((teardown) => t.after(teardown));
   let npmRan = false;
 
+  // The download root points at a closed port: since the installer now tries
+  // to provision its own Node when none is located, an open default would
+  // reach nodejs.org from inside the suite. Refused here, the failure is
+  // immediate and the step is the one this test has always pinned.
   const outcome = await provisionRuntimeCli("claude", {
     installRoot: f.installRoot,
     privateNodeDirectory: join(f.root, "no-node-here"),
     environment: { PATH: process.env.PATH },
+    nodeDownloadRoot: unreachableDownloadRoot,
     runInstall: async () => {
       npmRan = true;
       return { exitCode: 0, outputTail: "" };
@@ -281,6 +290,63 @@ test("without a node the installer stops at the first step and says so", async (
   assert.ok(outcome.kind === "failed");
   assert.equal(outcome.step, "node-not-located");
   assert.equal(npmRan, false);
+});
+
+test("with no node anywhere the installer provisions the private Node itself, then installs through it", async (t) => {
+  if (process.platform !== "win32") return;
+  pinEnvironment((teardown) => t.after(teardown));
+  const f = await fixture((teardown) => t.after(teardown));
+  const source = await createPrivateNodeDownloadFixture((teardown) => t.after(teardown));
+  const installs: RecordedInstall[] = [];
+  // Deliberately NOT f.nodeDirectory, which the fixture has already filled:
+  // provisioning must be the thing that puts a node here.
+  const privateNodeDirectory = join(f.root, "fresh-node", "bin");
+
+  const outcome = await provisionRuntimeCli("claude", {
+    installRoot: f.installRoot,
+    privateNodeDirectory,
+    environment: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot },
+    nodeDownloadRoot: source.downloadRoot,
+    runInstall: fakeNpm(async (prefix) => {
+      await layDownNpmGlobal(prefix, "claude", "2.1.268");
+      return { exitCode: 0, outputTail: "added 2 packages" };
+    }, installs),
+  });
+
+  assert.equal(outcome.kind, "installed");
+  // The dist source was actually used -- the node was provisioned, not found.
+  assert.equal(source.requests(), 2);
+  // npm ran under the Node the installer just provisioned into the shared
+  // private cache -- the same directory start.bat uses.
+  assert.equal(installs.length, 1);
+  assert.equal(installs[0]!.node, join(privateNodeDirectory, "node.exe"));
+  assert.ok(installs[0]!.env.PATH!.startsWith(`${privateNodeDirectory};`));
+});
+
+test("a Node download that cannot be reached stops before npm and carries the reason", async (t) => {
+  if (process.platform !== "win32") return;
+  pinEnvironment((teardown) => t.after(teardown));
+  const f = await fixture((teardown) => t.after(teardown));
+  let npmRan = false;
+
+  const outcome = await provisionRuntimeCli("claude", {
+    installRoot: f.installRoot,
+    privateNodeDirectory: join(f.root, "fresh-node", "bin"),
+    environment: { PATH: process.env.PATH },
+    nodeDownloadRoot: unreachableDownloadRoot,
+    runInstall: async () => {
+      npmRan = true;
+      return { exitCode: 0, outputTail: "" };
+    },
+  });
+
+  assert.equal(outcome.kind, "failed");
+  assert.ok(outcome.kind === "failed");
+  assert.equal(outcome.step, "node-not-located");
+  assert.match(outcome.detail, /could not be downloaded/u);
+  assert.match(outcome.detail, /https:\/\/nodejs\.org\/dist\/v24\.20\.0\/node-v24\.20\.0-win-x64\.zip/u);
+  assert.equal(npmRan, false);
+  assert.equal(configuredRuntimeExecutable("claude"), undefined);
 });
 
 test("the registry is npm's default unless NPM_CONFIG_REGISTRY says otherwise", () => {

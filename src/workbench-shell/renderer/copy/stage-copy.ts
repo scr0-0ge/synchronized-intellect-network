@@ -21,6 +21,15 @@ const englishCopy = {
     emptyProjectTitle: "Start the first Agent Session",
     emptyProjectBody:
       "This Project is registered and empty. Whatever you send first starts a new Agent Session on the endpoint you pick below.",
+    /* w283: the packaged bootstrap Home project registers itself the same
+       way an ordinary empty Project does, but its runtime adapter refuses
+       every inspect/start/resume by design (`bootstrap-runtime-adapter.ts`).
+       `projectRunsNoAgentSessions` in `composer.tsx` detects that from the
+       uniform not-inspected catalog shape once a load completes, and
+       `stage.tsx` swaps this pair in for the two above. */
+    bootstrapProjectTitle: "This Project doesn't run Agent Sessions",
+    bootstrapProjectBody:
+      "This is the Workbench's own starting Project, not a place to run work. Choose Create Project… above, then pick a directory to start an Agent Session.",
     waysToStart: "Ways to start",
     suggestedFollowUps: "Suggested follow-ups",
     suggestions: [
@@ -53,6 +62,9 @@ const simplifiedChineseCopy = {
     emptyProjectTitle: "启动第一个智能体会话",
     emptyProjectBody:
       "此项目已注册且为空。你发送的第一条内容会在下方所选端点上启动新的智能体会话。",
+    bootstrapProjectTitle: "此项目不运行智能体会话",
+    bootstrapProjectBody:
+      "这是 Workbench 自身的起始项目，不用于运行工作。请点击上方“创建项目…”，选择一个目录来开始智能体会话。",
     waysToStart: "可以这样开始",
     suggestedFollowUps: "建议的追问",
     suggestions: [
