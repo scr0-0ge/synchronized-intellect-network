@@ -650,10 +650,9 @@ function startPrimaryWorkbench(): void {
   );
   const rendererPath = join(distributionDirectory, "renderer", "index.html");
   const preloadPath = join(distributionDirectory, "preload", "preload.cjs");
-  // Sibling of dist/, i.e. the repository root in a dev launch. Not part of
-  // the Windows packaging staging list yet, so a packaged build resolves
-  // this to a path that does not exist and falls back to no tray icon.
-  const brandAssetsDirectory = join(distributionDirectory, "..", "assets", "brand");
+  // The application root is the repository for `electron .` and app.asar for
+  // the packaged executable; both contain the staged brand assets.
+  const brandAssetsDirectory = join(app.getAppPath(), "assets", "brand");
   const windowIconPath = join(brandAssetsDirectory, "sin.ico");
   const startupProjectDirectory = readSwitch("project-directory");
   const providerRequestBudget = loadProviderRequestBudgetForElectronMain({

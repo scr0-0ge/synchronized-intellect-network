@@ -34,7 +34,7 @@ interface ExcludedSuite {
 const CORPUS_READING_SUITES: readonly ExcludedSuite[] = Object.freeze([
   {
     path: "tests/harness/settings-appearance-persistence-driver.test.ts",
-    reason: "reads 06-provider-settings.html and owner-decisions.md",
+    reason: "reads owner-decisions.md",
   },
   {
     path: "tests/workbench-shell/appearance-fidelity.test.ts",
