@@ -524,6 +524,19 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
             if (droppableSystemSubtypes.has(message.subtype) || message.session_id !== undefined) {
               assertSession(message, sessionIdentity);
             }
+            // A 401/403 on the wire cannot self-heal by retrying -- the key
+            // is wrong or absent, not transiently rate-limited. The CLI does
+            // not know this and retries internally anyway (w280 evidence:
+            // ~174s / 10 attempts for a real 401). Cut the wait to a single
+            // request instead of waiting out the CLI's own retry budget.
+            // 429/5xx keep the existing behavior: they can self-heal, so the
+            // CLI's retry is left to run its course.
+            if (
+              message.subtype === "api_retry" &&
+              (message.error_status === 401 || message.error_status === 403)
+            ) {
+              throw new RuntimeAdapterError("authentication-required");
+            }
             if (
               message.subtype === "status" &&
               message.permissionMode !== undefined &&

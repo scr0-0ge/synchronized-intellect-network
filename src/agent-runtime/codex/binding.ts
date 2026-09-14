@@ -287,8 +287,15 @@ export class CodexRuntimeBinding implements ResumableRuntimeBinding {
       }
       return finalMessage;
     };
+    // Streamed public summaries per item, by summary index. Raw reasoning
+    // (`item/reasoning/textDelta`, `content[]` on the completed item) is
+    // private by design and never surfaces; only summaries are the visible
+    // thinking chain.
     const reasoningItems = new Map<string, Map<number, string>>();
     const completedReasoningItems = new Set<string>();
+    // Every item this turn announced with item/started, whatever its type.
+    const startedItems = new Set<string>();
+    let reasoningOnForeignItemReported = false;
     let reasoningEmitted = false;
     let reasoningUnavailable = false;
     const omitReasoning = (): void => {
@@ -402,9 +409,25 @@ export class CodexRuntimeBinding implements ResumableRuntimeBinding {
           if (!eventThreadId) throw new RuntimeAdapterError("correlation-invalid");
           if (eventThreadId !== this.threadId) continue;
           if (params.turnId !== this.turnId || turnStartedSequence === undefined ||
-              typeof params.itemId !== "string" || !reasoningItems.has(params.itemId) ||
-              completedReasoningItems.has(params.itemId)) {
+              typeof params.itemId !== "string" || completedReasoningItems.has(params.itemId)) {
             throw new RuntimeAdapterError("correlation-invalid");
+          }
+          let summaries = reasoningItems.get(params.itemId);
+          if (summaries === undefined) {
+            // Measured on codex 0.153.4 and 0.154.0 alike (w288): a Responses
+            // provider that keys its reasoning summary to the message item is
+            // forwarded verbatim -- summary deltas whose itemId names this
+            // turn's agentMessage item, then the answer, then a completed
+            // turn. The text is the model's public summary for this turn, so
+            // it is shown and the drift is named once. An item this turn
+            // never announced still fails closed.
+            if (!startedItems.has(params.itemId)) throw new RuntimeAdapterError("correlation-invalid");
+            if (!reasoningOnForeignItemReported) {
+              reasoningOnForeignItemReported = true;
+              reportCodexDiagnostic("Codex CLI attached reasoning to an item it did not announce as reasoning; the reasoning is shown and the turn continues.");
+            }
+            summaries = new Map();
+            reasoningItems.set(params.itemId, summaries);
           }
           if (reasoningUnavailable) continue;
           if (typeof params.delta !== "string" || !Number.isSafeInteger(params.summaryIndex) ||
@@ -412,7 +435,6 @@ export class CodexRuntimeBinding implements ResumableRuntimeBinding {
             omitReasoning();
             continue;
           }
-          const summaries = reasoningItems.get(params.itemId)!;
           const index = params.summaryIndex as number;
           if (params.delta.length > 0) {
             const progress = yieldableProgress("thinking");
@@ -428,6 +450,7 @@ export class CodexRuntimeBinding implements ResumableRuntimeBinding {
           const correlation = this.readItemCorrelation(params);
           if (correlation === "unrelated") continue;
           const item = correlation;
+          if (method === "item/started") startedItems.add(item.id);
           if (item.type !== "agentMessage") {
             // Codex acknowledges steering before it finishes the old model
             // response. Only the matching consumed user input starts the new

@@ -165,6 +165,50 @@ test("a mid-turn upstream 401 classifies as authentication-required, not turn-fa
   assert.deepEqual(replay.events.at(-1), { kind: "failed", category: "authentication-required" });
 });
 
+// w287: a real Claude CLI 2.1.270 against a fake HTTP 401 retries internally
+// (system/api_retry, ~10 attempts, ~174s wire time) before ever reaching a
+// terminal result -- the key is wrong, so nothing about waiting can help.
+// Shape below is the literal captured frame (probe-auth-failure-401.ts,
+// evidence ao-0914-w287-auth-fail-fast.md): error_status is a top-level
+// number on the api_retry frame itself, not on the eventual result.
+function apiRetryFrame(sessionId: string, errorStatus: number) {
+  return JSON.stringify({
+    type: "system", subtype: "api_retry", attempt: 1, max_retries: 10,
+    retry_delay_ms: 577, error_status: errorStatus, error: "authentication_failed",
+    session_id: sessionId, uuid: "w287-api-retry-uuid",
+  });
+}
+function insertAfterStatusFrame(lines: string[], frame: string): string[] {
+  const statusIndex = lines.findIndex(line => {
+    const parsed = JSON.parse(line);
+    return parsed.type === "system" && parsed.subtype === "status";
+  });
+  return [...lines.slice(0, statusIndex + 1), frame, ...lines.slice(statusIndex + 1)];
+}
+
+for (const errorStatus of [401, 403] as const) {
+  test(`api_retry carrying a ${errorStatus} classifies as authentication-required without waiting out the CLI's retries`, async () => {
+    const replay = await replayCapture({ edit: lines => {
+      const sessionId = JSON.parse(lines[2]!).session_id as string;
+      return insertAfterStatusFrame(lines, apiRetryFrame(sessionId, errorStatus));
+    } });
+    assert.deepEqual(replay.events.at(-1), { kind: "failed", category: "authentication-required" });
+    // The fixture has ~15 lines total; stopping at the first api_retry frame
+    // (instead of reading through to the captured result) is the fail-fast
+    // behavior itself, not just its outcome.
+    assert.ok(replay.lastLine < 10, `expected an early stop, read up to line ${replay.lastLine}`);
+  });
+}
+
+test("api_retry carrying a 429 keeps the existing behavior: the CLI's own retry is left to run, turn still completes", async () => {
+  const replay = await replayCapture({ edit: lines => {
+    const sessionId = JSON.parse(lines[2]!).session_id as string;
+    return insertAfterStatusFrame(lines, apiRetryFrame(sessionId, 429));
+  } });
+  assert.equal(replay.events.at(-1)?.kind, "turn-completed");
+  assert.equal(replay.events.some(event => event.kind === "progress" && event.activity === "retrying"), true);
+});
+
 for (const interrupt of ["missing-queue", "nonempty-queue", "error", "malformed-body"] as const) {
   test(`a matching interrupt id still rejects ${interrupt}`, async () => {
     const replay = await replayCapture({ interrupt });

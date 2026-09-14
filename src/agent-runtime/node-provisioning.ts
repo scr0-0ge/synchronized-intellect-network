@@ -34,9 +34,13 @@ import { isAbsolute, join } from "node:path";
 
 /** Must stay equal to start.bat's NODE_LTS_VERSION; a test pins the pair. */
 export const NODE_LTS_VERSION = "24.20.0";
-/** node:sqlite first shipped in 22.5; start.bat pins the same floor. */
-const NODE_MINIMUM_MAJOR = 22;
-const NODE_MINIMUM_MINOR = 5;
+/**
+ * node:sqlite first shipped in 22.5; start.bat pins the same floor. Exported
+ * so `cli-provisioning.ts` judges a node found on PATH by the identical rule
+ * instead of carrying a second copy of it.
+ */
+export const NODE_MINIMUM_MAJOR = 22;
+export const NODE_MINIMUM_MINOR = 5;
 
 const nodePackageName = `node-v${NODE_LTS_VERSION}-win-x64`;
 export const NODE_ARCHIVE_NAME = `${nodePackageName}.zip`;
@@ -337,7 +341,7 @@ async function sha256OfFile(path: string): Promise<string> {
   });
 }
 
-function nodeVersionAtLeast(version: string): boolean {
+export function nodeVersionAtLeast(version: string): boolean {
   const match = /^(\d+)\.(\d+)\./u.exec(version.trim());
   if (match === null) return false;
   const major = Number(match[1]);

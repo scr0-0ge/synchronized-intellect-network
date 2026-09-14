@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -40,15 +40,21 @@ interface Fixture {
 
 async function fixture(register: (teardown: () => void) => void): Promise<Fixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "uaw-cli-provision-")));
-  register(() => {
-    void rm(root, { recursive: true, force: true });
+  register(async () => {
+    // A node.exe just spawned for a version read-back can stay briefly
+    // locked on Windows after the child exits; retry rather than race it.
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   // start.bat's private node: node.exe with npm beside it, exactly as the
-  // official zip lays it out.
+  // official zip lays it out. A real copy of the running interpreter, not a
+  // text stub: `locateNode` now spawns every candidate to read its version
+  // back (w291), and Windows throws synchronously on spawn() for a file that
+  // is not a real PE (w282's lesson) -- a text stub would make every test
+  // here exercise that rejection path instead of the one it means to test.
   const nodeDirectory = join(root, "node", "bin");
   await mkdir(join(nodeDirectory, "node_modules", "npm", "bin"), { recursive: true });
   const nodeExecutable = join(nodeDirectory, "node.exe");
-  await writeFile(nodeExecutable, "MZ node fixture\n");
+  await copyFile(process.execPath, nodeExecutable);
   await writeFile(join(nodeDirectory, "node_modules", "npm", "bin", "npm-cli.js"), "// npm\n");
   return {
     root,
@@ -88,7 +94,7 @@ interface RecordedInstall {
 }
 
 function fakeNpm(
-  behaviour: (prefix: string) => Promise<CliInstallRun>,
+  behaviour: (prefix: string, node: string) => Promise<CliInstallRun>,
   record: RecordedInstall[],
 ) {
   return async (
@@ -98,23 +104,66 @@ function fakeNpm(
   ): Promise<CliInstallRun> => {
     record.push({ node, arguments: arguments_, env: options.env });
     const prefix = arguments_[arguments_.indexOf("--prefix") + 1]!;
-    return behaviour(prefix);
+    return behaviour(prefix, node);
   };
 }
 
 /**
  * PATH is pinned so `node.exe` cannot be found on whatever the running
  * machine has, and the configured registry is cleared afterwards: the
- * installer publishes into process-wide state.
+ * installer publishes into process-wide state. `extraDirectories` are
+ * prepended so a test can place exactly one controlled `node.exe` where
+ * `where.exe` will find it, without a real one also being visible.
  */
-function pinEnvironment(register: (teardown: () => void) => void): void {
+function pinEnvironment(
+  register: (teardown: () => void) => void,
+  extraDirectories: readonly string[] = [],
+): void {
   const previousPath = process.env.PATH;
   register(() => {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
     clearConfiguredRuntimeExecutables();
   });
-  process.env.PATH = join(process.env.SystemRoot ?? String.raw`C:\Windows`, "System32");
+  process.env.PATH = [
+    ...extraDirectories,
+    join(process.env.SystemRoot ?? String.raw`C:\Windows`, "System32"),
+  ].join(";");
+}
+
+/**
+ * A real, spawnable node.exe (a copy of the running interpreter, so it is a
+ * genuine PE) that reports `version` instead of its own -- through a
+ * `NODE_OPTIONS` preload scoped to copies living under this directory, so the
+ * same environment can carry a second, real node elsewhere in the same test
+ * without it being affected. Mirrors `tests/launcher/start.test.mjs`'s
+ * `pretendNodeVersion`, which proved the technique against start.bat.
+ */
+async function createPretendVersionNode(
+  root: string,
+  directoryName: string,
+  version: string,
+  register: (teardown: () => void) => void,
+): Promise<{ readonly directory: string; readonly nodeOptions: string }> {
+  const directory = join(root, directoryName);
+  await mkdir(directory, { recursive: true });
+  await copyFile(process.execPath, join(directory, "node.exe"));
+  const marker = `/${directoryName.toLowerCase()}/`;
+  const preload = join(root, `${directoryName}-pretend.cjs`);
+  await writeFile(
+    preload,
+    `if (process.execPath.replaceAll('\\\\', '/').toLowerCase().includes(${JSON.stringify(marker)})) {\n` +
+      "  Object.defineProperty(process, \"versions\", {\n" +
+      `    value: Object.freeze({ ...process.versions, node: ${JSON.stringify(version)} }),\n` +
+      "    configurable: true,\n" +
+      "  });\n" +
+      "}\n",
+  );
+  register(async () => {
+    // Same lingering-lock race as the fixture's own node.exe copy.
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  return { directory, nodeOptions: `--require "${preload.replaceAll("\\", "/")}"` };
 }
 
 test("a Claude install is published to the escape hatch and confirmed by the product's own discovery", async (t) => {
@@ -345,6 +394,115 @@ test("a Node download that cannot be reached stops before npm and carries the re
   assert.equal(outcome.step, "node-not-located");
   assert.match(outcome.detail, /could not be downloaded/u);
   assert.match(outcome.detail, /https:\/\/nodejs\.org\/dist\/v24\.20\.0\/node-v24\.20\.0-win-x64\.zip/u);
+  assert.equal(npmRan, false);
+  assert.equal(configuredRuntimeExecutable("claude"), undefined);
+});
+
+test("a node on PATH older than the floor is skipped for a freshly provisioned private Node, not handed to npm", async (t) => {
+  if (process.platform !== "win32") return;
+  const f = await fixture((teardown) => t.after(teardown));
+  const stub = await createPretendVersionNode(f.root, "too-old-node", "18.0.0", (teardown) =>
+    t.after(teardown),
+  );
+  // A real system Node install carries npm beside it, so the pre-fix run
+  // reaches npm -- not an earlier, differently confusing "no npm" failure.
+  await mkdir(join(stub.directory, "node_modules", "npm", "bin"), { recursive: true });
+  await writeFile(join(stub.directory, "node_modules", "npm", "bin", "npm-cli.js"), "// npm\n");
+  const stubNodeExecutable = join(stub.directory, "node.exe");
+  pinEnvironment((teardown) => t.after(teardown), [stub.directory]);
+  const source = await createPrivateNodeDownloadFixture((teardown) => t.after(teardown));
+  const installs: RecordedInstall[] = [];
+  // Deliberately absent: provisioning must be the thing that puts a node here.
+  const privateNodeDirectory = join(f.root, "fresh-node", "bin");
+
+  const outcome = await provisionRuntimeCli("claude", {
+    installRoot: f.installRoot,
+    privateNodeDirectory,
+    environment: {
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      NODE_OPTIONS: stub.nodeOptions,
+    },
+    nodeDownloadRoot: source.downloadRoot,
+    runInstall: fakeNpm(async (prefix, node) => {
+      // What using the too-old node for real would do: npm reaches the
+      // package but fails for a reason that never mentions node's version --
+      // this is the "different way" install-failed the work order names.
+      if (node === stubNodeExecutable) {
+        return {
+          exitCode: 1,
+          outputTail: "npm error code EJSONPARSE\nnpm error Unexpected end of JSON input",
+        };
+      }
+      await layDownNpmGlobal(prefix, "claude", "2.1.268");
+      return { exitCode: 0, outputTail: "added 2 packages" };
+    }, installs),
+  });
+
+  assert.equal(outcome.kind, "installed");
+  // The too-old PATH node was never chosen for npm to run under -- the dist
+  // source was used to provision a fresh private Node instead.
+  assert.equal(source.requests(), 2);
+  assert.equal(installs.length, 1);
+  assert.equal(installs[0]!.node, join(privateNodeDirectory, "node.exe"));
+  assert.notEqual(installs[0]!.node, stubNodeExecutable);
+});
+
+test("a node on PATH at or above the floor is used directly; no private Node is provisioned", async (t) => {
+  if (process.platform !== "win32") return;
+  const f = await fixture((teardown) => t.after(teardown));
+  const goodDirectory = join(f.root, "good-node");
+  await mkdir(join(goodDirectory, "node_modules", "npm", "bin"), { recursive: true });
+  await copyFile(process.execPath, join(goodDirectory, "node.exe"));
+  await writeFile(join(goodDirectory, "node_modules", "npm", "bin", "npm-cli.js"), "// npm\n");
+  pinEnvironment((teardown) => t.after(teardown), [goodDirectory]);
+  const installs: RecordedInstall[] = [];
+
+  const outcome = await provisionRuntimeCli("claude", {
+    installRoot: f.installRoot,
+    // Deliberately absent: only the PATH candidate should ever be considered.
+    privateNodeDirectory: join(f.root, "no-private-node-here"),
+    environment: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot },
+    runInstall: fakeNpm(async (prefix) => {
+      await layDownNpmGlobal(prefix, "claude", "2.1.268");
+      return { exitCode: 0, outputTail: "added 2 packages" };
+    }, installs),
+  });
+
+  assert.equal(outcome.kind, "installed");
+  assert.equal(installs.length, 1);
+  assert.equal(installs[0]!.node, join(goodDirectory, "node.exe"));
+});
+
+test("when the only PATH node is too old and the private Node fallback also fails, the failure names the stale version", async (t) => {
+  if (process.platform !== "win32") return;
+  const f = await fixture((teardown) => t.after(teardown));
+  const stub = await createPretendVersionNode(f.root, "ancient-node", "18.0.0", (teardown) =>
+    t.after(teardown),
+  );
+  pinEnvironment((teardown) => t.after(teardown), [stub.directory]);
+  let npmRan = false;
+
+  const outcome = await provisionRuntimeCli("claude", {
+    installRoot: f.installRoot,
+    privateNodeDirectory: join(f.root, "fresh-node", "bin"),
+    environment: {
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot,
+      NODE_OPTIONS: stub.nodeOptions,
+    },
+    nodeDownloadRoot: unreachableDownloadRoot,
+    runInstall: async () => {
+      npmRan = true;
+      return { exitCode: 0, outputTail: "" };
+    },
+  });
+
+  assert.equal(outcome.kind, "failed");
+  assert.ok(outcome.kind === "failed");
+  assert.equal(outcome.step, "node-not-located");
+  assert.match(outcome.detail, /Node 18\.0\.0 on PATH is too old \(needs 22\.5 or newer\)/u);
+  assert.match(outcome.detail, /could not be downloaded/u);
   assert.equal(npmRan, false);
   assert.equal(configuredRuntimeExecutable("claude"), undefined);
 });

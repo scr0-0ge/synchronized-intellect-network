@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { CodexAdapter, catalogModelExtraKeys } from "../../src/agent-runtime/codex-adapter.ts";
+import { CODEX_API_STATIC_CATALOG } from "../../src/agent-runtime/codex/codex-api-models.ts";
 import { ClaudeAdapter } from "../../src/agent-runtime/claude/adapter.ts";
 import { readClaudeAppliedSettings } from "../../src/agent-runtime/claude/settings.ts";
 import { RuntimeAdapterError } from "../../src/agent-runtime/index.ts";
@@ -367,3 +368,142 @@ test("vendor helper: every own descriptor and forbidden key stays checked withou
   assert.equal(catalogModelExtraKeys({ future_vendor_field: privateExtra }, ["required"]), undefined);
   assert.deepEqual(catalogModelExtraKeys({ required: "valid", future_vendor_field: privateExtra }, ["required"]), ["future_vendor_field"]);
 });
+
+// w288: the real app-server wire of codex-cli 0.153.4 (the machine's global
+// install) and 0.154.0 (the Settings-installed private copy), captured on the
+// product transport against a loopback Responses provider, zero inference
+// (evidence/ao-0914-w288-codex-0154-wire). Frame sequences are identical
+// across the two versions in every scenario; 0.154.0 only adds
+// thread.environments / thread.originator / thread.daybreakEnabled and
+// rateLimits.normalModelSlug, all of which must be dropped, never fatal.
+const codexVersions = ["0.153.4", "0.154.0"] as const;
+const codexApiProfile = { model: "gpt-5.6-sol", effortLevel: "high", executionMode: "single-agent", accessMode: "full-access" };
+const codexApiVendorKeys = ["normalModelSlug", "daybreakEnabled", "environments", "originator", "SANITIZED-HOST"];
+
+async function codexCapture(version: (typeof codexVersions)[number], scenario: string) {
+  const lines = (await readFile(new URL(`./fixtures/codex-${version}-${scenario}.jsonl`, import.meta.url), "utf8")).split(/\r?\n/u).filter(Boolean);
+  const transport = new ScriptedTransport(lines);
+  const usage: unknown[] = [];
+  // The codex-api endpoint shape the capture used: static catalog (no
+  // account/model probing) and a usage sink, so ids 1-4 are initialize,
+  // account/rateLimits/read, thread/start|resume, turn/start.
+  const adapter = new CodexAdapter(async () => transport, undefined, undefined,
+    { environmentSource: () => ({ mode: "codex-api", apiKey: "synthetic", codexHome: "C:\\synthetic-home" }), staticCatalog: CODEX_API_STATIC_CATALOG },
+    (observation) => { usage.push(observation); }, "codex-api");
+  return { lines, transport, usage, adapter };
+}
+
+async function codexCapturedTurn(version: (typeof codexVersions)[number], scenario: string, onEvent?: (event: Wire, binding: Wire) => void) {
+  const capture = await codexCapture(version, scenario);
+  const binding = await capture.adapter.start({ projectDirectory: "C:\\synthetic-project", profile: codexApiProfile });
+  await binding.send({ text: "captured input" });
+  const events: Wire[] = [];
+  for await (const event of binding.events()) { events.push(event); onEvent?.(event, binding); }
+  return { ...capture, binding, events };
+}
+
+function codexVendorKeysAbsent(value: unknown): void {
+  const text = JSON.stringify(value);
+  for (const key of codexApiVendorKeys) assert.equal(text.includes(key), false, `${key} must not reach downstream`);
+}
+
+for (const version of codexVersions) {
+  test(`codex ${version} capture: a reasoning + tool + answer turn completes with both thinking fragments and the tool visible`, async () => {
+    const { events, transport, usage } = await codexCapturedTurn(version, "start-turn");
+    assert.deepEqual(events.map(event => event.kind), [
+      "session-started", "turn-started", "progress", "reasoning", "progress", "progress", "reasoning",
+      "item-started", "item-completed", "agent-message", "turn-completed",
+    ]);
+    assert.deepEqual(events.filter(event => event.kind === "reasoning").map(event => event.text), [
+      "W288_THINKING_BEFORE_TOOL loopback stub reasoning.", "\n\nW288_THINKING_BEFORE_ANSWER loopback stub reasoning 2.",
+    ]);
+    const tool = events.find(event => event.kind === "progress" && event.activity === "tool");
+    assert.equal(tool?.tool?.type, "commandExecution");
+    assert.match(tool?.tool?.parameter?.value ?? "", /echo W288_TOOL_OK/u);
+    assert.deepEqual(events.at(-2), { kind: "agent-message", text: "W288_FINAL_OK" });
+    assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed", context: { basis: "active-context", usedTokens: 110, windowTokens: 258400 } });
+    // The unauthenticated rate-limit read is answered with an error and stays optional telemetry.
+    assert.deepEqual(usage, []);
+    assert.equal(transport.recordedStopCalls(), 1);
+    codexVendorKeysAbsent(events);
+  });
+
+  test(`codex ${version} capture: turn/interrupt during streamed reasoning ends the turn as interrupted`, async () => {
+    let receipt: Promise<string> | undefined;
+    let fragments = 0;
+    const { events } = await codexCapturedTurn(version, "interrupt", (event, binding) => {
+      if (event.kind === "reasoning") fragments += 1;
+      if (fragments === 2 && receipt === undefined) {
+        assert.equal(binding.interruptAvailability(), "available");
+        receipt = binding.interrupt().then(() => "acknowledged", (error: unknown) => `rejected:${(error as RuntimeAdapterError).category}`);
+      }
+    });
+    assert.equal(await receipt, "acknowledged");
+    assert.deepEqual(events.map(event => event.kind), ["session-started", "turn-started", "progress", "reasoning", "reasoning", "turn-interrupted"]);
+    assert.deepEqual(events.at(-1), { kind: "turn-interrupted", status: "interrupted" });
+    codexVendorKeysAbsent(events);
+  });
+
+  test(`codex ${version} capture: thread/resume with the historical usage snapshot completes a second turn`, async () => {
+    const capture = await codexCapture(version, "resume");
+    const resumeReply = capture.lines.map(line => JSON.parse(line)).find(frame => frame.id === 3 && frame.result?.thread);
+    const threadId: string = resumeReply.result.thread.id;
+    const binding = await capture.adapter.resume({ projectDirectory: "C:\\synthetic-project", profile: codexApiProfile, opaqueSessionReference: threadId });
+    assert.equal(binding.opaqueSessionReference, threadId);
+    await binding.send({ text: "captured second input" });
+    const events: Wire[] = [];
+    for await (const event of binding.events()) events.push(event);
+    assert.deepEqual(events.map(event => event.kind), [
+      "session-started", "turn-started", "progress", "reasoning", "item-started", "item-completed", "agent-message", "turn-completed",
+    ]);
+    assert.deepEqual(events.at(-2), { kind: "agent-message", text: "W288_SECOND_OK" });
+    assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed", context: { basis: "active-context", usedTokens: 110, windowTokens: 258400 } });
+    codexVendorKeysAbsent(events);
+  });
+
+  test(`codex ${version} capture: inspect without a signed-in account reports authentication-required and never probes the catalog`, async () => {
+    const lines = (await readFile(new URL(`./fixtures/codex-${version}-inspect.jsonl`, import.meta.url), "utf8")).split(/\r?\n/u).filter(Boolean);
+    const transport = new ScriptedTransport(lines);
+    await assert.rejects(new CodexAdapter(async () => transport).inspect("C:\\synthetic-project"),
+      (error: unknown) => error instanceof RuntimeAdapterError && error.category === "authentication-required");
+    assert.equal(transport.recordedOutboundJsonl().some(line => JSON.parse(line).method === "model/list"), false);
+    assert.equal(transport.recordedStopCalls(), 1);
+  });
+
+  // Both CLI versions forward a provider's reasoning summary that is keyed to
+  // the message item as `item/reasoning/*` deltas whose itemId names the
+  // agentMessage item, then deliver the answer and complete the turn. The
+  // binding used to kill the turn on that itemId (correlation-invalid) while
+  // the CLI itself succeeded -- the w266 "no reasoning shown" symptom is, on
+  // the product, a lost answer.
+  test(`codex ${version} capture: reasoning keyed to the message item is shown and the answer survives`, async (t) => {
+    const diagnostics: string[] = [];
+    t.mock.method(process.stderr, "write", (chunk: string) => { diagnostics.push(String(chunk)); return true; });
+    const { events } = await codexCapturedTurn(version, "reasoning-on-message");
+    assert.deepEqual(events.filter(event => event.kind === "reasoning").map(event => event.text), ["W288_THINKING_ON_MESSAGE loopback stub reasoning."]);
+    assert.deepEqual(events.filter(event => event.kind === "agent-message"), [{ kind: "agent-message", text: "W288_RSN_ON_MSG_OK" }]);
+    assert.equal(events.at(-1)?.kind, "turn-completed");
+    assert.equal(diagnostics.filter(line => /Codex CLI.*reasoning.*item/iu.test(line)).length, 1, "the drift is named exactly once");
+  });
+
+  // Raw reasoning content (`item/reasoning/textDelta` + `content[]` on the
+  // completed item) is forwarded identically by both CLI versions. It is
+  // private by design (reasoning-pipeline.test.ts: raw reasoning must never
+  // reach rendered output), so the visible thinking chain stays empty while
+  // the answer and the turn are untouched.
+  test(`codex ${version} capture: raw reasoning content stays private and never breaks the turn`, async () => {
+    const { events } = await codexCapturedTurn(version, "reasoning-content");
+    assert.equal(JSON.stringify(events).includes("W288_THINKING_RAW_CONTENT"), false, "raw reasoning must not surface");
+    assert.deepEqual(events.filter(event => event.kind === "agent-message"), [{ kind: "agent-message", text: "W288_RSN_CONTENT_OK" }]);
+    assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed", context: { basis: "active-context", usedTokens: 110, windowTokens: 258400 } });
+  });
+
+  test(`codex ${version} capture: two summary parts arrive as two separated fragments`, async () => {
+    const { events } = await codexCapturedTurn(version, "reasoning-multipart");
+    assert.deepEqual(events.filter(event => event.kind === "reasoning").map(event => event.text), [
+      "W288_THINKING_PART_ONE loopback stub.", "\n\nW288_THINKING_PART_TWO loopback stub.",
+    ]);
+    assert.deepEqual(events.filter(event => event.kind === "agent-message"), [{ kind: "agent-message", text: "W288_RSN_MULTI_OK" }]);
+    assert.equal(events.at(-1)?.kind, "turn-completed");
+  });
+}
