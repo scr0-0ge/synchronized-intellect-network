@@ -434,26 +434,30 @@ const FROZEN_BREADTH_INVENTORY: Readonly<Record<string, BreadthInventorySeal>> =
        values with "Pending observation" on the active-turn surfaces and "Not
        observed" on the interrupted-turn surfaces, changing those four hashes
        without changing their counts. */
-    "f123-empty-project-dark": { count: 70, sha256: "7e7988fa27f40a4978625192e5be88849d7d07cd0fc2481b93231a63373bb1da" },
-    "f123-empty-project-light": { count: 74, sha256: "4c4451784413c7db1c1dc5648276a02be01e3e767399d4daa83a9fca14bcd19a" },
-    "f123-code-copy-idle-dark": { count: 112, sha256: "b0645766f8518ec108f62ef2bb54a28d6fa0b7a2c0aa5a275eebf75e568fdc86" },
-    "f123-code-copy-idle-light": { count: 112, sha256: "985dc5e5f67167bc97e0c61f516077076b680058b9ba2476d11dcc03b2e49e14" },
-    "f123-code-copy-copied-dark": { count: 112, sha256: "f8d474caba8b0c6edbe4ddcee0d6b0c742147f098e1c30bf51fc2a23eed82cba" },
-    "f123-code-copy-copied-light": { count: 112, sha256: "bed668c55e8b1d6dbd04ae29b18bedd77426ffeded73887d49cfc4ef4129732a" },
-    "f123-expanded-event-log-dark": { count: 125, sha256: "146b551957e610adfd9ec4c4a823755cb050326000957f6f3b5ee0ebc35f8bb7" },
-    "f123-expanded-event-log-light": { count: 125, sha256: "abed095014aeeffcca4877c2300f7c44af9cba5e5591fff31bcef50c3282604c" },
+    /* 2026-09-11 causal re-seal: w246 replaced the titlebar's text "U"
+       mark with the owner's non-text SVG SIN mark. Every covered surface
+       therefore loses exactly one rendered text site; the measured
+       shortfall inventory remains empty. */
+    "f123-empty-project-dark": { count: 69, sha256: "40f676a71e71f56338c986b5104c295ab0835952892dcff0b1dfbaa260f90b3b" },
+    "f123-empty-project-light": { count: 73, sha256: "01564ec3a7908ecce842d3209c96fd9bc871e0d764026e196017ee097ae61c33" },
+    "f123-code-copy-idle-dark": { count: 111, sha256: "2127aa9745f031d41c188d4f4890a24a41ffcd7d53cd1a6071e2f1a22c8fe3e0" },
+    "f123-code-copy-idle-light": { count: 111, sha256: "54650f5c4ad629fa43d5f3225c22718494bc635cf27a40adf46f0945e6b86b7a" },
+    "f123-code-copy-copied-dark": { count: 111, sha256: "1383d58b722232114c69eba114f0b9528f9f0d5d6ee47df253bb1d48e51f8b5b" },
+    "f123-code-copy-copied-light": { count: 111, sha256: "6024e5b8835419ef2097aabba699cb58e9bae9b8dcff066c8502d7454e9d0dba" },
+    "f123-expanded-event-log-dark": { count: 124, sha256: "31e4ab1d75a5fff849e84ff5176841ae1d6f915ba0bc0c3823ecd63b934de628" },
+    "f123-expanded-event-log-light": { count: 124, sha256: "5b8a36e3b38b2cc0fd4d4f3468574c131423140f088969bd3042529810348897" },
     /* A selected blocked Session names its fresh-profile exit instead of falsely
        claiming the current selection is missing; measured site counts stay fixed. */
-    "f123-failed-command-blocked-dark": { count: 80, sha256: "2b544c2a46bccdf87c0d578a7a8bc49f05b6f2b2774c88a96e44c5ccb1794e57" },
-    "f123-failed-command-blocked-light": { count: 83, sha256: "945e424778ba16e38b4effda84acd458e9342ab2762240b809431107a248ee9c" },
-    "f123-recovery-required-blocked-dark": { count: 90, sha256: "57bb9f8167d944de939369009725a904c1a44573a911d2fd5ae5100d12c21be3" },
-    "f123-recovery-required-blocked-light": { count: 90, sha256: "83093a2eb037e543c530acb72214c14cfbe966f573a6707942739a49501c4af1" },
-    "f123-active-turn-interrupt-dark": { count: 118, sha256: "6be82827f2068252591a2a005d612c13f182516223923b1b6dc58275d0c08d77" },
-    "f123-active-turn-interrupt-light": { count: 118, sha256: "db4fa1a4e8a271ff68e098b320ad24f9d01c65eefd8bfedf3e5608d12e1c2a2d" },
-    "f123-interrupted-turn-dark": { count: 111, sha256: "b29c8a1406f7e90e204273e9af0f05f2bc82ec7dd1d84d4b92d694358c80c8cf" },
-    "f123-interrupted-turn-light": { count: 111, sha256: "13a090f20065e6c95b47ce9ca86a048ff614193cf023dfcbb2af3f31384a446e" },
-    "f123-new-session-mode-dark": { count: 61, sha256: "510d3d662a777b1a6cdacba34daa2e90aac947b62186b9d63c9c094d164d3b35" },
-    "f123-new-session-mode-light": { count: 61, sha256: "720b8ec5d1b894a09276c69c6083df4f59bdda3855658e64805efd3e10c34d6f" },
+    "f123-failed-command-blocked-dark": { count: 79, sha256: "ae3dc2a59012b1e200c2fe5cc8ab197419345334f692c7fc090732f80272fe8a" },
+    "f123-failed-command-blocked-light": { count: 82, sha256: "7ea4999d842bf1b326cea56583c213771b698059e03afeef8a9a3bf224218915" },
+    "f123-recovery-required-blocked-dark": { count: 89, sha256: "574b9dc981612d6f8d7d2b1516448c556692722a8009d6e4832ccd8707c8583e" },
+    "f123-recovery-required-blocked-light": { count: 89, sha256: "c5112633e75cd4d102f36f61916bd23a9fb4138e1136833a066abdd590ce2ee2" },
+    "f123-active-turn-interrupt-dark": { count: 117, sha256: "5261d1302b2a0035fc7cd0ac865705526ec58b2801c6963954778fbae27a1483" },
+    "f123-active-turn-interrupt-light": { count: 117, sha256: "08cf126dfdd52d1b2f941e754d38a84c84b04b38965bb19b17ac993366ef32da" },
+    "f123-interrupted-turn-dark": { count: 110, sha256: "88c7712be55732dfe2a01db8e5d98d26ee1394263233264cbd775bc0e8229f03" },
+    "f123-interrupted-turn-light": { count: 110, sha256: "777667f1b4852e47d5c8c3a619ddc06685cb6a1df31683231d8933894c9c28c4" },
+    "f123-new-session-mode-dark": { count: 60, sha256: "c04697a0b0ccc724764ec917f30dc6ee019c669af5acf4a5a5d8a0cfc8769cc4" },
+    "f123-new-session-mode-light": { count: 60, sha256: "43ad9ce183d75d968ddff3ca1ec6966a7725a29ada6b19cf93f84f3b9a5f161f" },
     /* Ticket 25 census re-seal (worker 20): the family facades renamed the
        desktop segment labels ("Codex desktop"/"Claude Code desktop" became
        "Subscription") and the hidden family backends left the picker,
@@ -461,18 +465,18 @@ const FROZEN_BREADTH_INVENTORY: Readonly<Record<string, BreadthInventorySeal>> =
        endpoint secondary text re-seals from the post-facade measurement.
        Counts are unchanged everywhere: no text site left the census, the
        substitutions are the renamed segment labels and the merged rows. */
-    "f123-endpoint-picker-dark": { count: 77, sha256: "55f5b557812673d0e3f339482ae65b83fecaf3f4a7d3a570626a95a0e17fbef6" },
-    "f123-endpoint-picker-light": { count: 77, sha256: "72b4daacec49b3b9ff02d2399aa9b630f2b9da0187c505c3c459a46ab276c3c0" },
-    "f123-model-picker-dark": { count: 77, sha256: "194758df010d0fe2befc9f019f5f84d2f3d48c50927bce516fb49fa376bdb4e8" },
-    "f123-model-picker-light": { count: 77, sha256: "760159ace33a4069383d50a6d6fb793db6c9354e1cb8d4705a4b32138f6f19d2" },
-    "f123-work-intensity-picker-dark": { count: 84, sha256: "11da8753af4f2e973112af8398e341009b1ffc4f135689a92eeec70161b37d76" },
-    "f123-work-intensity-picker-light": { count: 84, sha256: "39eb55f67fa85254228c9a3d89c68670b0d0e0865e82cd4be500bce70b84dc18" },
-    "f123-profile-loading-dark": { count: 73, sha256: "323238766cab0522a895546b4731850e20d1a3f56750d4ddfc64bd73e69bcec8" },
-    "f123-profile-loading-light": { count: 73, sha256: "54e2fa3cb5ec053955565931e0fbaf1659dea850fcd41c165044a1a91d5321d4" },
-    "f123-profile-unavailable-dark": { count: 74, sha256: "0eaa53cca57fbddc50f36d981214462912a00ac1df3e2819c93ec48cab408b85" },
-    "f123-profile-unavailable-light": { count: 74, sha256: "0ab91c875d7a4864458db263ab500cbb8f641129a1da25910190b50ea351c170" },
-    "f123-profile-without-default-dark": { count: 75, sha256: "ac8a081509771342f291b912a2f81f44a0a5d4ff9feac5b75d3b2a2b6e497719" },
-    "f123-profile-without-default-light": { count: 75, sha256: "bea31d228f45512a98edad827358fefae6c1fdf5ae37916f92e4788ede0b68af" },
+    "f123-endpoint-picker-dark": { count: 76, sha256: "ce0ea6537c1a38650b341bf57eb90dec385de39c88937573dfe0541a571b314f" },
+    "f123-endpoint-picker-light": { count: 76, sha256: "02eec1aa787c39b323650d7d713083b382b094d18d55adcccd0eb5263c4e5ac8" },
+    "f123-model-picker-dark": { count: 76, sha256: "3e5a686475a675ec96d2235fcee9133a9f2f6a2c27d58933b0aab9c270ee6baa" },
+    "f123-model-picker-light": { count: 76, sha256: "8cbc106bc330dd4bdebe55d1eec4971493e341446df7d7cf57a599cc932721e8" },
+    "f123-work-intensity-picker-dark": { count: 83, sha256: "95f625f8781b5cd16588b984a6d459519d62bd2f58db9c09695d6de62fd22c76" },
+    "f123-work-intensity-picker-light": { count: 83, sha256: "c69e27e70520734a7f425e18857ceec8fbba094ae8252b97dfa9c031248003f4" },
+    "f123-profile-loading-dark": { count: 72, sha256: "a6627c09ba26d76eb933a6a552c82b84cd89ee1af380fe437495dd7d7aea4415" },
+    "f123-profile-loading-light": { count: 72, sha256: "b478bc341cbb956470c2cd240e51cb53fbf6757d9b704bc81b2547b1a7a633f3" },
+    "f123-profile-unavailable-dark": { count: 73, sha256: "e1d22d2cd6b09a0967762c88cbe4db51d7749f078fcb3e70f4729a89deb1e6cc" },
+    "f123-profile-unavailable-light": { count: 73, sha256: "3db290c44e50f04748f9ec176cb1a61fc02ac28fa46e97101c1dff4a9468fda0" },
+    "f123-profile-without-default-dark": { count: 74, sha256: "f732ce43a3624582e91513ccdd7da73f3a1729fa8ae4ac73de8ec4ab87d29d73" },
+    "f123-profile-without-default-light": { count: 74, sha256: "46ae5be52508a4b435e102e7009f0dad7105a7de88d3dc6419e96e57173a76ef" },
     /* main-resync census re-seal (worker 19): both lines of descent edited the
        runtime-not-located surface independently -- the lane's WO23 reworded the
        runtimeBoundary sentence ("never asks for a password, API key, or token"
@@ -482,19 +486,19 @@ const FROZEN_BREADTH_INVENTORY: Readonly<Record<string, BreadthInventorySeal>> =
        found under any name that was checked." (issue #2). The merged tree
        carries BOTH sentences, so neither sealed hash was valid any more;
        re-sealed from the post-merge rendered-surface measurement. */
-    "f123-runtime-not-located-dark": { count: 53, sha256: "5b39a05bdc7fae09f6d813872800c5271115a833804ca62c2e711e66a801d615" },
-    "f123-runtime-not-located-light": { count: 53, sha256: "2f400d6ff3b0c991279f261da35ac8451d959690c0f95a763c75a9fe42416d5c" },
-    "f123-archived-session-list-dark": { count: 112, sha256: "dd143599f232b9163cc810b4c9f593f8952a49544250f62627661f31ac1451fd" },
-    "f123-archived-session-list-light": { count: 112, sha256: "eb21d602e3895187ba6dc7dff1f3b1db49aeb9aacc438058594361bdc2018b9d" },
+    "f123-runtime-not-located-dark": { count: 52, sha256: "f936854dfca1873c38d1688c2d2975ebbd1181b6de0d460662c0eb45e3e9b20c" },
+    "f123-runtime-not-located-light": { count: 52, sha256: "a77bb4c834798ae7951db5c4277c04a111e8749ad4e4b118096e3347519b01ca" },
+    "f123-archived-session-list-dark": { count: 111, sha256: "835a54b62b0d150fed7481eb09a306b232a136fafb60a9914e98eff9d4936e3f" },
+    "f123-archived-session-list-light": { count: 111, sha256: "0bcdcb91fc91f3b17c2e94d046138304612fbfab1b1f3e964e096a2d4dc00b73" },
     /* The archived blocked surface carries the same selected-Session footer. */
-    "f123-archived-session-blocked-dark": { count: 97, sha256: "e961effb95d5942af252fd5ad8c982c18a050c51ba7cca77047e59b0232be062" },
-    "f123-archived-session-blocked-light": { count: 97, sha256: "bd7be25b75d3b00fcd1f93ae6feebcdf74a08c464149f15218bf8ff05be7a862" },
-    "f123-submission-pending-dark": { count: 113, sha256: "857d7cf2c885bbc39c384e6b5d6e2f0f31e75b58860ed890eacb0ef278dcbb90" },
-    "f123-submission-pending-light": { count: 113, sha256: "af998d01191535efe4ed378abe76b1722551f2128106d9e2bf22304c60676028" },
-    "f123-submission-error-dark": { count: 113, sha256: "546f190318093b83b27a496a56c81bc56d40efafdb867ea691fac8ee995be8b8" },
-    "f123-submission-error-light": { count: 113, sha256: "9b68eb5047e5b15ac1b5290190dcf47f0a989bd1ec028fb26c7490c90732ba2a" },
-    "f123-unavailable-registered-project-dark": { count: 58, sha256: "900c36a254a71df7a0fc431795151da39958e8a59a84c17ad60da86c5deef4b4" },
-    "f123-unavailable-registered-project-light": { count: 58, sha256: "5c2b83116d462bf453cec7ba542838376b5f1c84ec906677a6ded283e51e46ef" },
+    "f123-archived-session-blocked-dark": { count: 96, sha256: "10c62a0f26d8b9bdb535da9a0cc980393972db27968844bd6c2bc3d47939cbd1" },
+    "f123-archived-session-blocked-light": { count: 96, sha256: "9f0026181b874d123685fcd0ff1e431666694954f9eff086c4e4439218a800fb" },
+    "f123-submission-pending-dark": { count: 112, sha256: "4c0889562e4c6e282c233feb95905f73f05af86b694b8dafad7dc120d219a430" },
+    "f123-submission-pending-light": { count: 112, sha256: "f383850e6722b57c9f7087dec85984709c9d134e83034d975dd50a0d545a0a80" },
+    "f123-submission-error-dark": { count: 112, sha256: "2ad10ff5784fbabffba2dd669826aae33fdcd96689514d0a6807f314e169fc6b" },
+    "f123-submission-error-light": { count: 112, sha256: "70a16cfc86988a84c60a72e649f641a2e16303721421be6b539905363838c6b7" },
+    "f123-unavailable-registered-project-dark": { count: 57, sha256: "de14d35bca220c7acbc7e26dc7f04e7b8c523bf6f5ab3ef3c5921d37fa4b78a4" },
+    "f123-unavailable-registered-project-light": { count: 57, sha256: "0d968a76a7b9250fb982c0a09c4f77a5b1589316e0e1b27476cb0274fa2485da" },
   });
 
 /*

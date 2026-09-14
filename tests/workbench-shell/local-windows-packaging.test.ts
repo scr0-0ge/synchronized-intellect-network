@@ -32,6 +32,8 @@ test("Windows packaging stages only the minimal production manifest and accepted
   });
 
   assert.deepEqual(staged.files, [
+    "assets/brand/sin.ico",
+    "assets/brand/tray/sin-tray-dark-16.png",
     "main/main.js",
     "package.json",
     "preload/preload.cjs",
@@ -40,6 +42,17 @@ test("Windows packaging stages only the minimal production manifest and accepted
     "renderer/index.html",
   ]);
   assert.deepEqual(await listFiles(stagingDirectory), staged.files);
+  assert.equal(
+    await readFile(join(stagingDirectory, "assets", "brand", "sin.ico"), "utf8"),
+    "ico",
+  );
+  assert.equal(
+    await readFile(
+      join(stagingDirectory, "assets", "brand", "tray", "sin-tray-dark-16.png"),
+      "utf8",
+    ),
+    "tray-png",
+  );
   assert.deepEqual(
     JSON.parse(await readFile(join(stagingDirectory, "package.json"), "utf8")),
     {
@@ -59,10 +72,12 @@ test("Windows packaging uses one ASAR-backed unpacked Windows x64 application an
   await writeAcceptedBuild(root);
   const calls: WorkbenchPackagerOptions[] = [];
 
+  const iconPath = join(root, "assets", "brand", "sin.ico");
   const result = await packageWorkbenchWindowsApplication({
     workspaceDirectory: root,
     outputDirectory: join(root, "local-package"),
     temporaryDirectory: root,
+    iconPath,
     packageApplication: async (options) => {
       calls.push(options);
       return [join(root, "local-package", "Synchronized Intellect Network-win32-x64")];
@@ -79,6 +94,7 @@ test("Windows packaging uses one ASAR-backed unpacked Windows x64 application an
     name: "Synchronized Intellect Network",
     executableName: "Synchronized Intellect Network",
     electronVersion: "37.2.6",
+    icon: iconPath,
     overwrite: true,
     prune: true,
     quiet: true,
@@ -93,6 +109,8 @@ test("Windows packaging uses one ASAR-backed unpacked Windows x64 application an
       "Synchronized Intellect Network-win32-x64",
     ),
     stagedFiles: [
+      "assets/brand/sin.ico",
+      "assets/brand/tray/sin-tray-dark-16.png",
       "main/main.js",
       "package.json",
       "preload/preload.cjs",
@@ -114,6 +132,7 @@ test("Windows packaging removes staging and names the step, path and reason when
       workspaceDirectory: root,
       outputDirectory: join(root, "local-package"),
       temporaryDirectory: root,
+      iconPath: join(root, "assets", "brand", "sin.ico"),
       packageApplication: async ({ dir }) => {
         stagingDirectory = dir as string;
         throw new Error("the packager could not write the ASAR archive");
@@ -154,6 +173,7 @@ test("Windows packaging names the missing build directory rather than reporting 
       workspaceDirectory: root,
       outputDirectory: join(root, "local-package"),
       temporaryDirectory: root,
+      iconPath: join(root, "assets", "brand", "sin.ico"),
       packageApplication: async () => {
         throw new Error("the packager must not be reached");
       },
@@ -205,7 +225,15 @@ async function writeAcceptedBuild(workspaceDirectory: string): Promise<void> {
   await mkdir(join(workspaceDirectory, "dist", "renderer", "assets"), {
     recursive: true,
   });
+  await mkdir(join(workspaceDirectory, "assets", "brand", "tray"), {
+    recursive: true,
+  });
   await Promise.all([
+    writeFile(join(workspaceDirectory, "assets", "brand", "sin.ico"), "ico"),
+    writeFile(
+      join(workspaceDirectory, "assets", "brand", "tray", "sin-tray-dark-16.png"),
+      "tray-png",
+    ),
     writeFile(join(workspaceDirectory, "dist", "main", "main.js"), "main"),
     writeFile(
       join(workspaceDirectory, "dist", "preload", "preload.cjs"),

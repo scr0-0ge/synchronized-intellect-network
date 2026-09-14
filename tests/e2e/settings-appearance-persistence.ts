@@ -74,7 +74,7 @@ const routineRootPrefix = "workbench-settings-appearance-";
 const appearanceFileName = "workbench-appearance-preferences-v1.json";
 const directPreferenceFileName = "direct-session-profile-preferences.json";
 const exactAppearanceBytes =
-  '{"schemaVersion":10,"appearance":{"tone":"light","crt":"full","phosphor":"amber","phosphorTier":"c","language":"en"},"claudePermissionHandling":"without-asking","endpointPreference":{"claude":"claude-code-desktop","codex":"codex-desktop","kimi":"kimi-code"},"runtimeExecutables":{"codex":"","claude":""},"endpointBaseUrls":{"glm-coding-plan":"","deepseek-api":"","kimi-code":"","codex-api":""}}\n';
+  '{"schemaVersion":11,"appearance":{"tone":"light","crt":"full","phosphor":"amber","phosphorTier":"c","language":"en"},"claudePermissionHandling":"without-asking","endpointPreference":{"claude":"claude-code-desktop","codex":"codex-desktop","kimi":"kimi-code"},"runtimeExecutables":{"codex":"","claude":""},"endpointBaseUrls":{"glm-coding-plan":"","deepseek-api":"","kimi-code":"","codex-api":"","claude-api":""}}\n';
 const savedScope = "Saved · This user on this device";
 const appearanceTones = Object.freeze(["Dark", "Light"] as const);
 const appearanceCrts = Object.freeze(["Off", "Blocks", "Screen", "Full"] as const);
@@ -936,7 +936,7 @@ async function exactAppearanceFact(
     "runtimeExecutables",
     "schemaVersion",
   ]));
-  assert.equal(parsed.schemaVersion, 10);
+  assert.equal(parsed.schemaVersion, 11);
   activeStep = `${observationPrefix}/appearance-schema`;
   assert.ok(
     isExactRecord(parsed.appearance, [

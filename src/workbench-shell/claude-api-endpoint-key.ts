@@ -12,6 +12,7 @@ import {
 } from "./endpoint-key-source.ts";
 
 export {
+  CLAUDE_API_ENDPOINT_ENV_CONTRACT,
   CLAUDE_API_ENDPOINT_KEY_NAME,
   CLAUDE_API_ENDPOINT_KEY_SUBJECT,
 } from "../agent-runtime/claude/claude-api-endpoint.ts";

@@ -172,13 +172,15 @@ export const WORKBENCH_ENDPOINT_KEY_CHANNELS: Readonly<
  * optional Settings override (w223 shipped this for `codex-api`; w232
  * generalizes it, adding an endpoint dimension to the same IPC/state shape
  * instead of copying it three times, and covers `glm-coding-plan`,
- * `deepseek-api` and `kimi-code`).
+ * `deepseek-api` and `kimi-code`; w245 adds `claude-api` -- same shape, the
+ * real Anthropic backend reached through an optional gateway/relay).
  */
 export const WORKBENCH_BASE_URL_ENDPOINT_IDS = Object.freeze([
   "glm-coding-plan",
   "deepseek-api",
   "kimi-code",
   "codex-api",
+  "claude-api",
 ] as const);
 
 export type WorkbenchBaseUrlEndpointId =
@@ -211,6 +213,10 @@ export const WORKBENCH_BASE_URL_CHANNELS: Readonly<
   "codex-api": Object.freeze({
     load: "workbench:base-url/codex-api/load",
     save: "workbench:base-url/codex-api/save",
+  }),
+  "claude-api": Object.freeze({
+    load: "workbench:base-url/claude-api/load",
+    save: "workbench:base-url/claude-api/save",
   }),
 });
 
@@ -320,7 +326,8 @@ export type WorkbenchClaudePermissionHandlingSaveResult =
  * convention so the key set never varies.
  *
  * Shipped for `codex-api` alone in ticket 21 (w223); w232 generalizes the
- * same shape across all four base-URL endpoints instead of duplicating it.
+ * same shape across GLM/DeepSeek/Kimi Code/Codex · API instead of
+ * duplicating it, and w245 extends it to `claude-api`.
  */
 export const WORKBENCH_BASE_URL_MAX_LENGTH = 2_048;
 

@@ -11,6 +11,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   Notification,
   safeStorage,
   screen,
@@ -51,6 +52,7 @@ import {
 } from "../kimi-platform-key.ts";
 import {
   createWorkbenchClaudeApiEndpointKeySource,
+  CLAUDE_API_ENDPOINT_ENV_CONTRACT,
   CLAUDE_API_ENDPOINT_KEY_SUBJECT,
 } from "../claude-api-endpoint-key.ts";
 import {
@@ -182,7 +184,12 @@ import {
 } from "./native-window-material.ts";
 import { initializeWorkbenchProjectHost } from "./startup.ts";
 import { startProjectHostAfterRecoveryPreparation } from "./startup.ts";
-import { createWorkbenchTrayIcon } from "./tray-icon.ts";
+import {
+  createWorkbenchTrayIcon,
+  workbenchTrayIconPath,
+  workbenchTrayIconSizeForScaleFactor,
+  workbenchTrayIconVariantForSystemTheme,
+} from "./tray-icon.ts";
 import {
   formatWindowPlacementDiagnostic,
   offscreenWindowOptions,
@@ -276,12 +283,13 @@ let kimiPlatformEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let claudeApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 let codexApiEndpointKeySource: WorkbenchEndpointKeySource | null = null;
 // In-memory mirror of the preference store's per-endpoint base URL overrides
-// (w223 shipped codex-api alone; w232 generalizes to all four base-URL
-// endpoints), kept current by hydration at startup and every successful
-// save. Sync reads let the codex-api key source's "Test connection" probe
-// (and each endpoint's session-start environment resolver) use the saved
-// override without a disk read on every call -- the store itself stays the
-// single source of truth; this is a read cache.
+// (w223 shipped codex-api alone; w232 generalized it to GLM/DeepSeek/Kimi
+// Code; w245 adds claude-api), kept current by hydration at startup and
+// every successful save. Sync reads let the codex-api/claude-api key
+// sources' "Test connection" probe (and each endpoint's session-start
+// environment resolver) use the saved override without a disk read on every
+// call -- the store itself stays the single source of truth; this is a read
+// cache.
 const baseUrlOverrides: Record<WorkbenchBaseUrlEndpointId, string> =
   Object.fromEntries(
     WORKBENCH_BASE_URL_ENDPOINT_IDS.map((endpointId) => [endpointId, ""]),
@@ -642,6 +650,11 @@ function startPrimaryWorkbench(): void {
   );
   const rendererPath = join(distributionDirectory, "renderer", "index.html");
   const preloadPath = join(distributionDirectory, "preload", "preload.cjs");
+  // Sibling of dist/, i.e. the repository root in a dev launch. Not part of
+  // the Windows packaging staging list yet, so a packaged build resolves
+  // this to a path that does not exist and falls back to no tray icon.
+  const brandAssetsDirectory = join(distributionDirectory, "..", "assets", "brand");
+  const windowIconPath = join(brandAssetsDirectory, "sin.ico");
   const startupProjectDirectory = readSwitch("project-directory");
   const providerRequestBudget = loadProviderRequestBudgetForElectronMain({
     locator: readOptionalAttemptSwitch(PROVIDER_ATTEMPT_LOCATOR_SWITCH),
@@ -719,6 +732,7 @@ function startPrimaryWorkbench(): void {
     // covers for the isolated agent and test launches that asked for one.
     ...windowPlacementOptions(),
     title: "Synchronized Intellect Network",
+    icon: windowIconPath,
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -923,6 +937,14 @@ function startPrimaryWorkbench(): void {
         claudeApiEndpointKeySource = createWorkbenchClaudeApiEndpointKeySource({
           store: claudeApiEndpointSecretEnvelopeStore,
           environment: process.env,
+          // "Test connection" honors the saved override (w245) over the
+          // env-var / contract default, same precedence the codex-api probe
+          // and prepareEndpoint use.
+          probeBaseUrl: (environment) =>
+            baseUrlOverrides["claude-api"].trim().length > 0
+              ? baseUrlOverrides["claude-api"]
+              : (environment[CLAUDE_API_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar]
+                  ?.trim() || CLAUDE_API_ENDPOINT_ENV_CONTRACT.defaultBaseUrl),
         });
         codexApiEndpointKeySource = createWorkbenchCodexApiEndpointKeySource({
           store: codexApiEndpointSecretEnvelopeStore,
@@ -1014,6 +1036,7 @@ function startPrimaryWorkbench(): void {
                 resolveKimiPlatformApiKey: () =>
                   kimiPlatformEndpointKeySource?.resolve(),
                 resolveClaudeApiKey: () => claudeApiEndpointKeySource?.resolve(),
+                resolveClaudeApiBaseUrl: () => baseUrlOverrides["claude-api"],
                 resolveCodexApiKey: () => codexApiEndpointKeySource?.resolve(),
                 resolveCodexApiBaseUrl: () => baseUrlOverrides["codex-api"],
                 catalogAugmentation: (endpointId) =>
@@ -1322,7 +1345,18 @@ function startPrimaryWorkbench(): void {
 
     const openWorkbench = (): void => windowRestorer.requestRestore();
     try {
-      tray = new Tray(createWorkbenchTrayIcon(nativeImage));
+      const trayIconVariant = workbenchTrayIconVariantForSystemTheme(
+        nativeTheme.shouldUseDarkColors,
+      );
+      const trayIconSize = workbenchTrayIconSizeForScaleFactor(
+        screen.getPrimaryDisplay().scaleFactor,
+      );
+      const trayIconPath = workbenchTrayIconPath(
+        join(brandAssetsDirectory, "tray"),
+        trayIconVariant,
+        trayIconSize,
+      );
+      tray = new Tray(createWorkbenchTrayIcon(nativeImage, trayIconPath));
       tray.setToolTip("Synchronized Intellect Network");
       tray.on("click", openWorkbench);
       tray.setContextMenu(

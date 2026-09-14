@@ -12,12 +12,13 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createWorkbenchTrayIcon } from "../../src/workbench-shell/electron/tray-icon.ts";
+import { workbenchTrayIconPath } from "../../src/workbench-shell/electron/tray-icon.ts";
 
 const resultMarker = "TRAY_ICON_NATIVE_RESULT ";
 const probeMarker = "TRAY_ICON_NATIVE_PROBE ";
 const temporaryRootPattern = /^workbench-tray-icon-native-[A-Za-z0-9_-]+$/u;
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const trayAssetsDirectory = join(repositoryRoot, "assets", "brand", "tray");
 const fixturePath = fileURLToPath(
   new URL("./fixtures/tray-icon-native-image.cjs", import.meta.url),
 );
@@ -41,18 +42,6 @@ interface FixtureResult {
 interface ChildExit {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
-}
-
-function productionTrayIconDataUrl(): string {
-  let dataUrl = "";
-  createWorkbenchTrayIcon({
-    createFromDataURL(candidate) {
-      dataUrl = candidate;
-      return { isEmpty: () => false };
-    },
-  });
-  assert.notEqual(dataUrl, "", "production tray factory did not emit a data URL");
-  return dataUrl;
 }
 
 function isolatedElectronEnvironment(paths: Readonly<{
@@ -167,13 +156,13 @@ async function run(): Promise<void> {
     ),
   );
 
-  const dataUrl = productionTrayIconDataUrl();
+  const trayIconPath = workbenchTrayIconPath(trayAssetsDirectory, "dark", 16);
   const child = spawn(
     electronExecutable,
     [
       fixturePath,
       `--user-data-dir=${userData}`,
-      `--tray-icon-data-url=${dataUrl}`,
+      `--tray-icon-path=${trayIconPath}`,
     ],
     {
       cwd: repositoryRoot,

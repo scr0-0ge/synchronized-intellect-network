@@ -1189,9 +1189,10 @@ const ProviderCard: Component<{
     const panel = panels[endpointId];
     return panel === undefined ? undefined : { endpointId, panel };
   };
-  // The base-URL field (w232) is keyed by the endpoint on screen: GLM,
-  // DeepSeek, Kimi Code and Codex · API carry one; the subscription sides,
-  // Claude · API and Kimi Platform have no entry and so render nothing.
+  // The base-URL field (w232, w245 adds Claude · API) is keyed by the
+  // endpoint on screen: GLM, DeepSeek, Kimi Code, Codex · API and
+  // Claude · API carry one; the subscription sides and Kimi Platform have
+  // no entry and so render nothing.
   const endpointBaseUrlPanel = (): WorkbenchEndpointBaseUrlPanel | undefined =>
     props.endpointBaseUrlPanels?.[activeEndpointId() as WorkbenchBaseUrlEndpointId];
   // Catalog freshness is enrolled only for GLM and DeepSeek; Kimi Code has no
@@ -2245,12 +2246,13 @@ const EndpointKeyControls: Component<{
 /**
  * A base-URL endpoint card's "Base URL (optional)" field (ticket 21/w223
  * shipped Codex · API alone; w232 generalizes the same control across GLM,
- * DeepSeek, Kimi Code and Codex · API instead of copying it four times):
- * plain text, not a secret, so it renders below the API key row, behind its
- * own Details disclosure, instead of competing with Save key. Empty means
- * that endpoint's own official default applies; a non-blank draft is
- * validated for http(s):// shape only, at save time, main-process side -- no
- * connectivity probe here (out of scope for this field).
+ * DeepSeek, Kimi Code and Codex · API instead of copying it four times;
+ * w245 adds Claude · API): plain text, not a secret, so it renders below the
+ * API key row, behind its own Details disclosure, instead of competing with
+ * Save key. The one-line hint sits directly under the input, not above it.
+ * Empty means that endpoint's own official default applies; a non-blank
+ * draft is validated for http(s):// shape only, at save time, main-process
+ * side -- no connectivity probe here (out of scope for this field).
  */
 const EndpointBaseUrlControls: Component<{
   readonly endpointId: WorkbenchBaseUrlEndpointId;
@@ -2280,7 +2282,6 @@ const EndpointBaseUrlControls: Component<{
           <span>{copy().savedLabel}</span>
           <strong>{statusLabel()}</strong>
         </span>
-        <p>{copy().hint}</p>
         <div class="endpoint-key-entry endpoint-base-url-entry">
           <label for={inputId()}>{copy().label}</label>
           <input
@@ -2294,6 +2295,7 @@ const EndpointBaseUrlControls: Component<{
             onInput={(event) => props.panel.onDraft(event.currentTarget.value)}
           />
         </div>
+        <p>{copy().hint}</p>
         <div class="provider-binding-actions endpoint-base-url-actions">
           <button
             type="button"

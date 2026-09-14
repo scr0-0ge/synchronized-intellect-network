@@ -37,6 +37,7 @@ export interface WorkbenchPackagerOptions {
   name: "Synchronized Intellect Network";
   executableName: "Synchronized Intellect Network";
   electronVersion: "37.2.6";
+  icon: string;
   overwrite: true;
   prune: true;
   quiet: true;
@@ -46,6 +47,7 @@ export interface PackageWorkbenchWindowsApplicationOptions {
   workspaceDirectory: string;
   outputDirectory: string;
   temporaryDirectory: string;
+  iconPath: string;
   packageApplication: (
     options: WorkbenchPackagerOptions,
   ) => Promise<string[]>;
@@ -134,6 +136,7 @@ export async function packageWorkbenchWindowsApplication(
         name: "Synchronized Intellect Network",
         executableName: "Synchronized Intellect Network",
         electronVersion: "37.2.6",
+        icon: options.iconPath,
         overwrite: true,
         prune: true,
         quiet: true,
@@ -223,17 +226,39 @@ export async function stageWorkbenchWindowsApplication(
     "renderer/index.html",
   ].sort();
 
+  // Not a Vite output -- checked into the repo, sourced from workspaceDirectory
+  // rather than buildDirectory -- but the packaged tray and window icon
+  // resolve it at the same relative position (dist/main/../../assets/brand)
+  // that this staging root mirrors, so it has to ship alongside the build.
+  let brandAssetFiles: string[];
+  const brandAssetsDirectory = join(workspaceDirectory, "assets", "brand");
+  try {
+    brandAssetFiles = (
+      await listFilesRecursively(workspaceDirectory, "assets/brand")
+    ).sort();
+  } catch (error) {
+    throw new WorkbenchPackageError(
+      "stage-build-output",
+      brandAssetsDirectory,
+      error,
+    );
+  }
+
+  const stagedSourceFiles = [...buildFiles, ...brandAssetFiles].sort();
   await mkdir(stagingDirectory, { recursive: true });
   await Promise.all(
-    buildFiles.map(async (file) => {
-      const source = containedPath(buildDirectory, file);
+    stagedSourceFiles.map(async (file) => {
+      const sourceRoot = file.startsWith("assets/")
+        ? workspaceDirectory
+        : buildDirectory;
+      const source = containedPath(sourceRoot, file);
       const destination = containedPath(stagingDirectory, file);
       try {
         await mkdir(dirname(destination), { recursive: true });
         await copyFile(source, destination);
       } catch (error) {
-        // One of these four is missing far more often than all of them are, so
-        // the failing file is the fact worth carrying out.
+        // One of these is missing far more often than all of them are, so the
+        // failing file is the fact worth carrying out.
         throw new WorkbenchPackageError("stage-build-output", source, error);
       }
     }),
@@ -249,7 +274,27 @@ export async function stageWorkbenchWindowsApplication(
     throw new WorkbenchPackageError("stage-build-output", manifestPath, error);
   }
 
-  return { files: [...buildFiles, "package.json"].sort() };
+  return { files: [...stagedSourceFiles, "package.json"].sort() };
+}
+
+/** Every file under `root/relativeDirectory`, as paths relative to `root`. */
+async function listFilesRecursively(
+  root: string,
+  relativeDirectory: string,
+): Promise<string[]> {
+  const entries = await readdir(join(root, relativeDirectory), {
+    withFileTypes: true,
+  });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const relativePath = `${relativeDirectory}/${entry.name}`;
+    if (entry.isDirectory()) {
+      files.push(...(await listFilesRecursively(root, relativePath)));
+    } else {
+      files.push(relativePath);
+    }
+  }
+  return files;
 }
 
 /**
@@ -291,6 +336,7 @@ async function runLocalWindowsPackageCommand(): Promise<void> {
     workspaceDirectory,
     outputDirectory: join(workspaceDirectory, "dist", "local-windows-package"),
     temporaryDirectory: tmpdir(),
+    iconPath: join(workspaceDirectory, "assets", "brand", "sin.ico"),
     packageApplication: packagerModule.packager,
   });
   process.stdout.write(

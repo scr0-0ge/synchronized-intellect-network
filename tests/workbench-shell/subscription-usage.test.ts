@@ -48,7 +48,7 @@ test("real wire persists globally across Projects/reopen and other settings writ
   registerTestClosable(t, reopened);
   assert.deepEqual(await reopened.readClaudeSubscriptionUsage(), second);
   const document = JSON.parse(await readFile(filePath, "utf8"));
-  assert.equal(document.schemaVersion, 10);
+  assert.equal(document.schemaVersion, 11);
   assert.deepEqual(document.claudeSubscriptionUsage, second);
   assert.equal(document.endpointPreference.claude, "claude-api");
 });
@@ -74,7 +74,7 @@ test("the GLM/Kimi/DeepSeek usage slot is keyed by endpointKey, survives restart
   registerTestClosable(t, reopened);
   assert.deepEqual(await reopened.readUsageObservations(), { glm: glmUsageObservation, kimi: kimiObservation });
   const document = JSON.parse(await readFile(filePath, "utf8"));
-  assert.equal(document.schemaVersion, 10);
+  assert.equal(document.schemaVersion, 11);
   assert.deepEqual(document.usageObservations, { glm: glmUsageObservation, kimi: kimiObservation });
 });
 

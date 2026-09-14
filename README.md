@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/brand/sin-mark.svg" alt="Synchronized Intellect Network" width="120"></p>
+
 <h1 align="center">Synchronized Intellect Network</h1>
 
 <p align="center">
@@ -81,7 +83,7 @@ your own API key.
 Arguments go straight through to Electron, so a throwaway profile is one flag away:
 
 ```
-.\start.bat --user-data-dir=C:\sin-throwaway
+.\start.bat --user-data-dir=C:\throwaway
 ```
 
 ## What it does

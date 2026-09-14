@@ -117,7 +117,11 @@ interface WorkbenchPreferenceDocument {
 
 const defaultWorkbenchUsageObservations: Readonly<Record<string, WorkbenchUsageObservation>> = Object.freeze({});
 
-/** v10's base key set; claudeSubscriptionUsage/usageObservations are each independently optional. */
+/**
+ * The top-level key set shared by v10 and v11 (only `endpointBaseUrls`'s
+ * inner key set differs -- four endpoints in v10, five since w245's v11);
+ * claudeSubscriptionUsage/usageObservations are each independently optional.
+ */
 const v10BaseKeys = [
   "appearance", "claudePermissionHandling", "endpointBaseUrls", "endpointPreference", "runtimeExecutables", "schemaVersion",
 ] as const;
@@ -575,7 +579,7 @@ async function readPreferenceDocument(
         captureFamilyEndpointPreferencesRecord(document.endpointPreference),
         captureRuntimeExecutables(document.runtimeExecutables),
         document.claudeSubscriptionUsage === undefined ? null : captureSubscriptionUsage(document.claudeSubscriptionUsage),
-        captureEndpointBaseUrls(document.endpointBaseUrls),
+        captureLegacyFourEndpointBaseUrls(document.endpointBaseUrls),
       );
     }
     // w234 follow-up migration: usageObservations (GLM/Kimi/DeepSeek, keyed by
@@ -586,6 +590,26 @@ async function readPreferenceDocument(
         isExactDataRecord(document, [...v10BaseKeys, "usageObservations"]) ||
         isExactDataRecord(document, [...v10BaseKeys, "claudeSubscriptionUsage", "usageObservations"])) &&
       document.schemaVersion === 10
+    ) {
+      return capturePreferenceDocument(
+        captureAppearance(document.appearance),
+        captureClaudePermissionHandling(document.claudePermissionHandling),
+        captureFamilyEndpointPreferencesRecord(document.endpointPreference),
+        captureRuntimeExecutables(document.runtimeExecutables),
+        document.claudeSubscriptionUsage === undefined ? null : captureSubscriptionUsage(document.claudeSubscriptionUsage),
+        captureLegacyFourEndpointBaseUrls(document.endpointBaseUrls),
+        document.usageObservations === undefined ? defaultWorkbenchUsageObservations : captureUsageObservations(document.usageObservations),
+      );
+    }
+    // w245 migration: endpointBaseUrls grows a fifth key, `claude-api`, once
+    // the Claude · API card gets its own Base URL (optional) field. Shape is
+    // otherwise byte-identical to v10, so the same base-key checks apply.
+    if (
+      (isExactDataRecord(document, v10BaseKeys) ||
+        isExactDataRecord(document, [...v10BaseKeys, "claudeSubscriptionUsage"]) ||
+        isExactDataRecord(document, [...v10BaseKeys, "usageObservations"]) ||
+        isExactDataRecord(document, [...v10BaseKeys, "claudeSubscriptionUsage", "usageObservations"])) &&
+      document.schemaVersion === 11
     ) {
       return capturePreferenceDocument(
         captureAppearance(document.appearance),
@@ -621,7 +645,7 @@ async function writePreference(
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     const contents = `${JSON.stringify({
-      schemaVersion: 10,
+      schemaVersion: 11,
       ...(preference.claudeSubscriptionUsage === null ? {} : { claudeSubscriptionUsage: preference.claudeSubscriptionUsage }),
       ...(Object.keys(preference.usageObservations).length === 0 ? {} : { usageObservations: preference.usageObservations }),
       appearance: preference.appearance,
@@ -717,6 +741,36 @@ function captureEndpointBaseUrls(value: unknown): WorkbenchEndpointBaseUrls {
   return Object.freeze(
     Object.fromEntries(entries) as Record<WorkbenchBaseUrlEndpointId, string>,
   );
+}
+
+/**
+ * The pre-w245 endpointBaseUrls key set: four endpoints, no `claude-api`.
+ * v9 and v10 documents were written before w245 added the fifth endpoint, so
+ * they carry exactly these four keys forever -- the exact-key-set check in
+ * `captureEndpointBaseUrls` above would reject them now that
+ * `WORKBENCH_BASE_URL_ENDPOINT_IDS` has five. `claude-api` defaults to unset,
+ * exactly what a first launch on w245 would leave it.
+ */
+const LEGACY_FOUR_BASE_URL_ENDPOINT_IDS = [
+  "glm-coding-plan",
+  "deepseek-api",
+  "kimi-code",
+  "codex-api",
+] as const;
+
+function captureLegacyFourEndpointBaseUrls(
+  value: unknown,
+): WorkbenchEndpointBaseUrls {
+  if (!isExactDataRecord(value, LEGACY_FOUR_BASE_URL_ENDPOINT_IDS)) {
+    throw new Error("invalid-appearance-preferences");
+  }
+  const entries = LEGACY_FOUR_BASE_URL_ENDPOINT_IDS.map(
+    (endpointId) => [endpointId, captureBaseUrl(value[endpointId])] as const,
+  );
+  return Object.freeze({
+    ...defaultWorkbenchEndpointBaseUrls,
+    ...(Object.fromEntries(entries) as Record<WorkbenchBaseUrlEndpointId, string>),
+  });
 }
 
 function captureClaudePermissionHandling(

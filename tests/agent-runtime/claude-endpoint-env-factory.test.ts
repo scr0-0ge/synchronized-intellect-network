@@ -244,6 +244,39 @@ test("api-key mode injects ANTHROPIC_API_KEY from its own source variable", () =
   );
 });
 
+// w245: the claude-api endpoint's Settings "Base URL (optional)" override.
+// Unlike glm mode (which always injects, since the backend is never
+// Anthropic), api-key mode only injects when the caller supplies one --
+// absent means the spawned CLI keeps using its own real Anthropic default.
+test("api-key mode injects ANTHROPIC_BASE_URL only when supplied, and validates it the same way glm does", () => {
+  assert.equal(
+    createEndpointProcessEnvironment(
+      { ANTHROPIC_API_KEY: "k-1234" },
+      { mode: "api-key" },
+    ).ANTHROPIC_BASE_URL,
+    undefined,
+  );
+  assert.equal(
+    createEndpointProcessEnvironment(
+      { ANTHROPIC_API_KEY: "k-1234" },
+      { mode: "api-key", baseUrl: "http://127.0.0.1:9999" },
+    ).ANTHROPIC_BASE_URL,
+    "http://127.0.0.1:9999",
+  );
+  for (const baseUrl of ["not-a-url", "ftp://x.example", "http://evil.example"]) {
+    assert.throws(
+      () =>
+        createEndpointProcessEnvironment(
+          { ANTHROPIC_API_KEY: "k-1234" },
+          { mode: "api-key", baseUrl },
+        ),
+      (error: unknown) =>
+        error instanceof ClaudeEndpointEnvironmentError &&
+        error.reason === "base-url-invalid",
+    );
+  }
+});
+
 test("configDir injection overrides any ambient CLAUDE_CONFIG_DIR", () => {
   const environment = createEndpointProcessEnvironment(
     { CLAUDE_CONFIG_DIR: "C:\\Users\\test-user\\.claude", GLM_ANTHROPIC_AUTH_TOKEN: "FAKE" },
