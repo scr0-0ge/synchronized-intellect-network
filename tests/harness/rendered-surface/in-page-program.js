@@ -91,6 +91,7 @@ globalThis.__uawMeasure = {
         beforeContent: getComputedStyle(document.body, "::before").content,
         beforeBackgroundImage: getComputedStyle(document.body, "::before").backgroundImage,
       },
+      popover: describePopover(),
       grids,
       texts,
       grounds: describeGrounds(),
@@ -303,6 +304,20 @@ function describeGrounds() {
     });
   }
   return grounds;
+}
+
+function describePopover() {
+  const element = [...document.querySelectorAll(".popover")].find((candidate) => {
+    const style = getComputedStyle(candidate);
+    const rect = candidate.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width >= 16 && rect.height >= 16;
+  });
+  if (element === undefined) return null;
+  const style = getComputedStyle(element);
+  return {
+    declaredBackgroundColor: style.backgroundColor,
+    rect: boxOf(element.getBoundingClientRect()),
+  };
 }
 
 /**
@@ -693,20 +708,29 @@ function describeText(element, style, signatures) {
   if (clip === null) return null;
 
   const boxes = [];
+  const occlusionBoxes = [];
   for (const node of ownText) {
     const range = document.createRange();
     range.selectNodeContents(node);
     for (const rect of range.getClientRects()) {
       const visible = intersect(rect, clip);
       if (visible === null || visible.width < 1 || visible.height < 1) continue;
-      boxes.push(visible);
+      occlusionBoxes.push(visible);
+      boxes.push(...removeOpaquePopoverCoverage(element, visible));
     }
   }
-  if (boxes.length === 0) return null;
+  if (boxes.length === 0) {
+    /* Keep later generated signatures stable when an opaque popover completely
+       covers this string. The text is absent from the measurement, not from the
+       document's traversal order. */
+    if (occlusionBoxes.length > 0) identify(element, signatures);
+    return null;
+  }
+  const signature = identify(element, signatures);
 
   element.setAttribute("data-uaw-measured", "text");
   return {
-    signature: identify(element, signatures),
+    signature,
     region: element.closest(".titlebar") !== null
       ? "titlebar"
       : element.closest(".statusbar") !== null
@@ -714,7 +738,7 @@ function describeText(element, style, signatures) {
         : null,
     surfaceAncestor: surfaceAncestorOf(element),
     ariaHiddenAncestors: ariaHiddenAncestorsOf(element),
-    occludedBy: occluderOf(element, boxes),
+    occludedBy: occluderOf(element, occlusionBoxes),
     text: ownText.map((node) => node.textContent.trim()).join(" ").slice(0, 80),
     color: style.color,
     fontSizePx: Number.parseFloat(style.fontSize),
@@ -789,6 +813,54 @@ function visibleClip(element) {
     if (clip === null) return null;
   }
   return clip;
+}
+
+/* An opaque portal popover is a real clipping boundary for the text it covers.
+   The bounding rectangle for a text node can continue below that portal; those
+   covered pixels are not a reading surface for the underlying string. */
+function removeOpaquePopoverCoverage(element, box) {
+  let visible = [box];
+  for (const popover of document.querySelectorAll(".popover")) {
+    if (popover.contains(element) || !isOpaqueBackground(getComputedStyle(popover).backgroundColor)) continue;
+    const overlap = intersect(box, popover.getBoundingClientRect());
+    if (overlap === null || !popoverIsAbove(popover, element, overlap)) continue;
+    visible = visible.flatMap((candidate) => subtract(candidate, popover.getBoundingClientRect()));
+  }
+  return visible.filter((candidate) => candidate.width >= 1 && candidate.height >= 1);
+}
+
+function isOpaqueBackground(color) {
+  if (color.startsWith("rgb(")) return true;
+  const rgba = /^rgba\((.*)\)$/u.exec(color);
+  if (rgba === null) return false;
+  const alpha = rgba[1].split(/[,/\s]+/u).filter(Boolean).at(-1);
+  return alpha === undefined || Number(alpha) >= 1;
+}
+
+function popoverIsAbove(popover, element, overlap) {
+  const hits = document.elementsFromPoint(
+    overlap.left + overlap.width / 2,
+    overlap.top + overlap.height / 2,
+  );
+  const popoverIndex = hits.findIndex((candidate) => candidate === popover || popover.contains(candidate));
+  if (popoverIndex === -1) return false;
+  const elementIndex = hits.findIndex((candidate) => candidate === element || element.contains(candidate));
+  return elementIndex === -1 || popoverIndex < elementIndex;
+}
+
+function subtract(box, overlay) {
+  const overlap = intersect(box, overlay);
+  if (overlap === null) return [box];
+  const right = box.left + box.width;
+  const bottom = box.top + box.height;
+  const overlapRight = overlap.left + overlap.width;
+  const overlapBottom = overlap.top + overlap.height;
+  return [
+    { top: box.top, left: box.left, width: overlap.left - box.left, height: box.height },
+    { top: box.top, left: overlapRight, width: right - overlapRight, height: box.height },
+    { top: box.top, left: overlap.left, width: overlap.width, height: overlap.top - box.top },
+    { top: overlapBottom, left: overlap.left, width: overlap.width, height: bottom - overlapBottom },
+  ].filter((candidate) => candidate.width > 0 && candidate.height > 0);
 }
 
 function intersect(a, b) {

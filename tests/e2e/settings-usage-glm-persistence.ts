@@ -146,7 +146,14 @@ async function main(): Promise<void> {
     assert.match(firstUsageText, /Quota window: Resets at/u);
     assert.ok(firstUsageText.includes(expectedDate), `expected "${expectedDate}" in: ${firstUsageText}`);
     assert.doesNotMatch(firstUsageText.split("GLM")[1]!.split(/Codex|Claude|DeepSeek|Kimi/u)[0]!, /%/u, "GLM row must not show a percentage");
-    assert.match(firstUsageText, /Codex[\s\S]*This provider's CLI does not report usage/u);
+    // w257: Codex's row used to hardcode "does not report usage"; it now
+    // reads the same generic sink as GLM/Kimi/DeepSeek (real data flows only
+    // once a native Codex session has actually started, which this scenario
+    // never does), so with no observation seeded it renders the same
+    // "Not yet observed" fallback the other unobserved rows already use.
+    const codexRowText = firstUsageText.split("Codex")[1]!.split(/Claude|GLM|DeepSeek|Kimi/u)[0]!;
+    assert.match(codexRowText, /Not yet observed/u);
+    assert.doesNotMatch(firstUsageText, /This provider's CLI does not report usage/u);
 
     step = "first-close";
     await first.close();

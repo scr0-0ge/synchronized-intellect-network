@@ -93,6 +93,8 @@
     ui-monospace, Consolas, monospace;
 }
 
+:root[data-crt] { --popover-surface: #06080b; }
+
 /* Light tube — positive image. */
 :root[data-tone="light"] {
   --crt-line-color: rgb(0 0 0 / 13%);
@@ -106,6 +108,8 @@
   --crt-roll: rgb(0 0 0 / 5%);
   --crt-vignette: rgb(90 84 70 / 26%);
 }
+
+:root[data-crt][data-tone="light"] { --popover-surface: #faf9f5; }
 
 /* The owner-selectable light-tube ladder. Missing/legacy tier data deliberately
    falls through to B above; only C raises the two dimmer text levels. */

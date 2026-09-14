@@ -14,6 +14,7 @@ import {
   beginCreateProject,
   beginOpenProject,
   beginProjectSelection,
+  canSelectProject,
   completeCreateProject,
   completeOpenProject,
   completeProjectSelection,
@@ -723,6 +724,44 @@ test("nonselected Project disclosure stays separate from its explicit switch act
     assert.match(
       railSource,
       /class="icon-btn project-switch-trigger"[\s\S]*?onClick=\{\(\) => props\.onSelectProject\(index\(\)\)\}/u,
+    );
+  });
+});
+
+test("a pending Project switch explains its disabled switch triggers instead of promising one", async () => {
+  await withProjectRailModule(async ({ ProjectRail }) => {
+    const ready = readyState(visualFixture);
+    const attempt = beginProjectSelection(ready, 1).state;
+    assert.equal(attempt.projectSwitch.phase, "pending");
+    assert.equal(attempt.projectSwitch.targetIndex, 1);
+    assert.equal(canSelectProject(attempt, 1), false);
+    assert.equal(canSelectProject(attempt, 2), false);
+
+    const html = renderProjectRail(ProjectRail, visualFixture, {
+      projectSwitch: attempt.projectSwitch,
+      canSelectProject: (targetIndex: number) =>
+        canSelectProject(attempt, targetIndex),
+    });
+    const sections = projectSections(html);
+    assert.equal(sections.length, 3);
+
+    const target = projectSwitchButton(sections[1] ?? "");
+    assert.equal(
+      hasBooleanAttribute(target, "disabled"),
+      true,
+      "the switch target stays disabled while its view is in flight",
+    );
+    assert.equal(attributeValue(target, "aria-busy"), "true");
+    assert.equal(
+      attributeValue(target, "title"),
+      "A Project switch is already in progress. Wait for it to finish.",
+    );
+
+    const unavailable = projectSwitchButton(sections[2] ?? "");
+    assert.equal(hasBooleanAttribute(unavailable, "disabled"), true);
+    assert.equal(
+      attributeValue(unavailable, "title"),
+      "This registered Project is unavailable.",
     );
   });
 });

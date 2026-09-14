@@ -186,6 +186,7 @@ const promptSuggestionTurn = Object.freeze([
     suggestions: Object.freeze([
       "Check the remaining tests",
       "Explain the implementation trade-off",
+      "Suggest a focused follow-up",
     ]),
   }),
 ]);

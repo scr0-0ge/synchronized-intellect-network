@@ -10,12 +10,14 @@ import type { CodexCatalogObservation } from "../../src/agent-runtime/codex-adap
 import { RuntimeAdapterError } from "../../src/agent-runtime/index.ts";
 import {
   CodexJsonlPeer,
+  readCodexRateLimitObservation,
   type CodexPeerMessageObservation,
 } from "../../src/agent-runtime/codex/protocol.ts";
 import type {
   NormalizedRuntimeEvent,
   RuntimeInput,
   RuntimeResume,
+  RuntimeUsageObservation,
 } from "../../src/agent-runtime/index.ts";
 import { ScriptedTransport } from "./support/scripted-transport.ts";
 
@@ -3811,4 +3813,220 @@ test("shutdown failure exposes neither a path nor an opaque identifier", async (
   assert.equal(publicOutput.includes("thread-fixed"), false);
   assert.equal(publicOutput.includes("turn-fixed"), false);
   assert.equal(publicOutput.includes("item-fixed"), false);
+});
+
+// w257: the settings Usage card wrongly told the owner "this provider's CLI
+// does not report usage" for Codex. `account/rateLimits/read` (live-verified
+// against real codex.exe 0.153.4) does, so `start`/`resume` read it once and
+// forward it through the same provider-agnostic sink GLM/Kimi/DeepSeek use --
+// but only when a sink and an endpoint identity are actually configured.
+test("start reports the account's weekly rate-limit window through the usage sink when configured", async () => {
+  const transport = new ScriptedTransport([
+    JSON.stringify({ jsonrpc: "2.0", id: 1, result: { server: "synthetic" } }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 3,
+      result: { data: [{ id: "gpt-5.6-sol", supportedReasoningEfforts: [{ reasoningEffort: "ultra" }] }] },
+    }),
+    // Shape confirmed live (w257) against the owner's real account, values
+    // synthesized here: only `primary` is populated (10080 min = 7 days),
+    // `secondary` is null -- some plans carry no 5-hour window, only weekly.
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      result: {
+        rateLimits: {
+          limitId: "codex",
+          primary: { usedPercent: 50, windowDurationMins: 10_080, resetsAt: 1_700_000_000 },
+          secondary: null,
+        },
+        accountId: "synthetic-account",
+      },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 5,
+      result: {
+        thread: { id: "thread-fixed" },
+        model: "gpt-5.6-sol",
+        reasoningEffort: "ultra",
+        approvalPolicy: "never",
+        sandbox: { type: "dangerFullAccess" },
+      },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "thread/started",
+      params: { thread: { id: "thread-fixed" } },
+    }),
+    JSON.stringify({ jsonrpc: "2.0", id: 6, result: { turn: { id: "turn-fixed", status: "inProgress" } } }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "turn/started",
+      params: { threadId: "thread-fixed", turn: { id: "turn-fixed", status: "inProgress" } },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/started",
+      params: { threadId: "thread-fixed", turnId: "turn-fixed", item: { id: "item-fixed", type: "agentMessage" } },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        threadId: "thread-fixed",
+        turnId: "turn-fixed",
+        item: { id: "item-fixed", type: "agentMessage", phase: "final_answer", text: "FIXED_MARKER" },
+      },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "turn/completed",
+      params: { threadId: "thread-fixed", turn: { id: "turn-fixed", status: "completed" } },
+    }),
+  ]);
+  const observed: RuntimeUsageObservation[] = [];
+  const adapter = new CodexAdapter(
+    async () => transport,
+    undefined,
+    undefined,
+    undefined,
+    async (observation) => {
+      observed.push(observation);
+    },
+    "codex",
+  );
+  const binding = await adapter.start({
+    projectDirectory: "C:\\synthetic-project",
+    profile: requestedProfile,
+  });
+  await binding.send({ text: "fixed input" });
+  for await (const _event of binding.events()) {
+    // Drain to the terminal event; the assertion is on the usage sink.
+  }
+
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]!.endpointKey, "codex");
+  assert.deepEqual(observed[0]!.windows, [
+    { label: "seven-day", utilization: 0.5, resetsAt: 1_700_000_000_000 },
+  ]);
+});
+
+test("readCodexRateLimitObservation maps both windows and drops an unrecognized duration", () => {
+  const observation = readCodexRateLimitObservation(
+    {
+      rateLimits: {
+        primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+        secondary: { usedPercent: 66, windowDurationMins: 10_080, resetsAt: 1_700_600_000 },
+      },
+    },
+    "codex",
+  );
+  assert.equal(observation?.endpointKey, "codex");
+  assert.deepEqual(observation?.windows, [
+    { label: "five-hour", utilization: 0.42, resetsAt: 1_700_000_000_000 },
+    { label: "seven-day", utilization: 0.66, resetsAt: 1_700_600_000_000 },
+  ]);
+
+  const unrecognizedDuration = readCodexRateLimitObservation(
+    { rateLimits: { primary: { usedPercent: 10, windowDurationMins: 43_200 }, secondary: null } },
+    "codex",
+  );
+  assert.equal(unrecognizedDuration, undefined);
+});
+
+test("a static-catalog Codex endpoint forwards a reported rate-limit snapshot", async () => {
+  const transport = new ScriptedTransport([
+    JSON.stringify({ jsonrpc: "2.0", id: 1, result: { server: "synthetic" } }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      result: {
+        rateLimits: {
+          primary: { usedPercent: 50, windowDurationMins: 10_080, resetsAt: 1_700_000_000 },
+          secondary: null,
+        },
+      },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 3,
+      result: {
+        thread: { id: "thread-fixed" },
+        model: requestedProfile.model,
+        reasoningEffort: requestedProfile.effortLevel,
+        approvalPolicy: "never",
+        sandbox: { type: "dangerFullAccess" },
+      },
+    }),
+  ]);
+  const observed: RuntimeUsageObservation[] = [];
+  const adapter = new CodexAdapter(
+    async () => transport,
+    undefined,
+    undefined,
+    {
+      environmentSource: () => ({ mode: "codex-api", codexHome: "C:\\synthetic-home" }),
+      staticCatalog: {
+        runtime: "codex",
+        models: [{ id: requestedProfile.model, effortLevels: [requestedProfile.effortLevel] }],
+        executionModes: [requestedProfile.executionMode],
+        accessModes: [requestedProfile.accessMode],
+      },
+    },
+    (observation) => { observed.push(observation); },
+    "codex-api",
+  );
+
+  await adapter.start({
+    projectDirectory: "C:\\synthetic-project",
+    profile: requestedProfile,
+  });
+
+  assert.deepEqual(observed.map(({ endpointKey, windows, source }) => ({ endpointKey, windows, source })), [
+    {
+      endpointKey: "codex-api",
+      windows: [{ label: "seven-day", utilization: 0.5, resetsAt: 1_700_000_000_000 }],
+      source: "rate-limit-event",
+    },
+  ]);
+});
+
+for (const malformed of [{}, { rateLimits: null }, null, "not-an-object"]) {
+  test(`readCodexRateLimitObservation degrades to undefined when the top-level shape is missing (${JSON.stringify(malformed)})`, () => {
+    assert.equal(readCodexRateLimitObservation(malformed, "codex"), undefined);
+  });
+}
+
+// With no usable rate-limit window, there is no Usage-card truth to persist.
+for (const malformedWindow of [
+  { primary: { windowDurationMins: 300 } },
+  { primary: { usedPercent: "42", windowDurationMins: 300 } },
+  { primary: { usedPercent: 101, windowDurationMins: 300 } },
+]) {
+  test(`readCodexRateLimitObservation drops a malformed window but keeps the observation (${JSON.stringify(malformedWindow)})`, () => {
+    const observation = readCodexRateLimitObservation({ rateLimits: malformedWindow }, "codex");
+    assert.equal(observation, undefined);
+  });
+}
+
+test("start never calls account/rateLimits/read when no usage sink is configured", async () => {
+  // single-turn-success.jsonl scripts exactly initialize/account/read/
+  // model/list/thread/start/turn/start with no spare response queued for an
+  // extra request; reaching turn-completed at all proves no extra call was
+  // sent (an unscripted call would starve the queue and surface as a
+  // protocol/timeout failure instead).
+  const binding = await fixtureAdapter("single-turn-success.jsonl").start({
+    projectDirectory: "C:\\synthetic-project",
+    profile: requestedProfile,
+  });
+  await binding.send({ text: "fixed input" });
+  const events: NormalizedRuntimeEvent[] = [];
+  for await (const event of binding.events()) events.push(event);
+  assert.equal(events.at(-1)?.kind, "turn-completed");
 });

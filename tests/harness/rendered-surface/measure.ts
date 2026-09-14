@@ -146,6 +146,11 @@ export type MeasuredGround = Readonly<{
   samples: readonly GroundSample[];
 }>;
 
+export type MeasuredPopover = Readonly<{
+  declaredBackgroundColor: string;
+  rect: Readonly<{ top: number; left: number; width: number; height: number }>;
+}>;
+
 /** Points straddling one pane boundary at a matched height. */
 export type MeasuredSeam = Readonly<{
   leftSelector: string;
@@ -256,6 +261,7 @@ export type MeasuredSurface = Readonly<{
     beforeContent: string;
     beforeBackgroundImage: string;
   }>;
+  popover: MeasuredPopover | null;
   grids: readonly MeasuredGrid[];
   texts: readonly MeasuredText[];
   grounds: readonly MeasuredGround[];

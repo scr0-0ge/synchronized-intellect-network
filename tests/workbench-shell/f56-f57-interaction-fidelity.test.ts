@@ -1214,6 +1214,7 @@ test(
       assert.deepEqual(await suggestions.allTextContents(), [
         "Check the remaining tests",
         "Explain the implementation trade-off",
+        "Suggest a focused follow-up",
       ]);
       assert.equal(await page.locator("#direct-input").inputValue(), "");
       assert.equal(
@@ -1268,7 +1269,7 @@ test("non-empty drafts visibly disable every prompt suggestion with a localized 
       const blockedReason = page.locator("#prompt-suggestions-blocked-reason");
       await suggestions.first().waitFor({ state: "visible" });
       const labels = await suggestions.allTextContents();
-      assert.equal(labels.length, 2);
+      assert.equal(labels.length, 3);
 
       await input.fill("Keep this draft exactly as written.");
       assert.deepEqual(
@@ -1313,7 +1314,7 @@ test("non-empty drafts visibly disable every prompt suggestion with a localized 
   }
 });
 
-test("the follow-up suggestion row never overflows and every suggestion stays fully readable at 1440, 900 and 620 wide (w195)", { timeout: 45_000 }, async () => {
+test("follow-up suggestions and composer profile chips never horizontally overflow at 1440, 900 and 620 wide (w195, w275)", { timeout: 45_000 }, async () => {
   for (const width of [1_440, 900, 620]) {
     const { application, page } = await openHarness(width, 900, "scenario=prompt-suggestions");
     try {
@@ -1344,6 +1345,7 @@ test("the follow-up suggestion row never overflows and every suggestion stays fu
         [
           "Check the remaining tests",
           "Explain the implementation trade-off",
+          "Suggest a focused follow-up",
         ],
         `${width}px wide: every suggestion must render its full text, none clipped out of view`,
       );
@@ -1355,6 +1357,7 @@ test("the follow-up suggestion row never overflows and every suggestion stays fu
       const longSuggestions = [
         "Check the remaining tests in this module before merging",
         "Explain the layout trade-off between wrap and scroll here",
+        "Suggest a focused follow-up after this change is ready",
       ];
       await page.locator(".prompt-suggestion").evaluateAll((buttons, texts) => {
         buttons.forEach((button, index) => {
@@ -1388,6 +1391,37 @@ test("the follow-up suggestion row never overflows and every suggestion stays fu
           `${width}px wide with a longer suggestion: scrollHeight ${geometry.scrollHeight} must not exceed clientHeight ${geometry.clientHeight} (wrapped text must not be clipped vertically either)`,
         );
       }
+      const controlbar = await page.locator(".composer .controlbar").evaluate((element) => {
+        const style = getComputedStyle(element);
+        const input = document.querySelector(".composer .input-shell")?.getBoundingClientRect();
+        return {
+          clientWidth: element.clientWidth,
+          scrollWidth: element.scrollWidth,
+          flexWrap: style.flexWrap,
+          overflowX: style.overflowX,
+          inputBottom: input?.bottom,
+          innerHeight: window.innerHeight,
+        };
+      });
+      assert.equal(
+        controlbar.scrollWidth - controlbar.clientWidth <= 1,
+        true,
+        `${width}px wide: the profile chip rail must not use horizontal overflow (${JSON.stringify(controlbar)})`,
+      );
+      assert.equal(
+        controlbar.flexWrap,
+        "wrap",
+        `${width}px wide: profile chips must retain the normal wrapping layout`,
+      );
+      assert.equal(
+        controlbar.overflowX,
+        "visible",
+        `${width}px wide: profile chips must not expose a horizontal scrollbar`,
+      );
+      assert.ok(
+        controlbar.inputBottom !== undefined && controlbar.inputBottom <= controlbar.innerHeight,
+        `${width}px wide: the composer input must remain in the viewport (${JSON.stringify(controlbar)})`,
+      );
     } finally {
       await application.close();
     }

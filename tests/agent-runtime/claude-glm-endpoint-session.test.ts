@@ -205,8 +205,14 @@ test("a GLM session completes over the static catalog, ignores the CLI's claude-
     (event) => event.kind === "turn-completed",
   ) as Extract<NormalizedRuntimeEvent, { kind: "turn-completed" }> | undefined;
   assert.ok(completed);
-  assert.equal(completed.context?.basis, "turn-usage");
+  // The CLI's own `modelUsage` entry is keyed by its fabricated claude
+  // identity ("claude-opus-5[1m]"), not the requested "glm-5.3[1m]", so it
+  // is dropped; the window comes from the static catalog's own `[1m]`
+  // annotation instead (w257 — GLM/DeepSeek self-declare a known window,
+  // never guessed from vendor data).
+  assert.equal(completed.context?.basis, "active-context");
   assert.equal(completed.context?.usedTokens, 8);
+  assert.equal(completed.context?.windowTokens, 1_000_000);
 
   // The CLI's fabricated identity and cost never cross the adapter boundary.
   const serialized = JSON.stringify(events);

@@ -6,6 +6,7 @@ import {
   onCleanup,
   onMount,
   untrack,
+  useContext,
   type Component,
   type JSX,
 } from "solid-js";
@@ -96,6 +97,7 @@ import {
 import {
   profileNotRecordedSummaryCopy,
   recordedProfileSummaryCopy,
+  contextUsagePopoverSummaryCopy,
 } from "./copy/runtime-profile-copy.ts";
 import { dynamicCopy } from "./copy/dynamic-copy.ts";
 import { quotaPauseCopy } from "./copy/session-status-copy.ts";
@@ -114,8 +116,16 @@ import {
   commandRuntimeFamily,
   runtimeClass,
   commandStatusLabel,
+  WorkbenchRendererBridgeContext,
 } from "./view-types.ts";
 import { EmptyState } from "./states.tsx";
+import {
+  subscriptionUsageToUsageObservation,
+  type RuntimeUsageObservation,
+} from "../../agent-runtime/index.ts";
+import type { WorkbenchSubscriptionUsageResult } from "../contract.ts";
+import { type UsageEndpointRowKey } from "./settings-usage.tsx";
+import { settingsUsageCopy } from "./copy/settings-usage-copy.ts";
 
 /** When no preload files bridge exists, drops still insert display names. */
 const fallbackFilesBridge: WorkbenchFilesRendererBridge = Object.freeze({
@@ -570,6 +580,34 @@ export const DirectInputComposer: Component<{
     mode() === "continue" || activeTurn()
       ? props.selected?.session?.context
       : undefined;
+  /**
+   * w257: the context popover's "Usage & resets" lines reuse the same
+   * per-endpoint `RuntimeUsageObservation` sink the Settings Usage card
+   * reads (w234) -- no new IPC channel, just a second subscriber.
+   */
+  const rendererBridge = useContext(WorkbenchRendererBridgeContext);
+  const [usageResult, setUsageResult] =
+    createSignal<WorkbenchSubscriptionUsageResult>({
+      ok: true,
+      observation: null,
+      usage: {},
+    });
+  onMount(() => {
+    const dispose = rendererBridge?.observeSubscriptionUsage?.(setUsageResult);
+    if (dispose) onCleanup(dispose);
+  });
+  const currentUsageObservation = (): RuntimeUsageObservation | undefined => {
+    const rowKey = usageEndpointRowKey(commandRuntimeFamily(props.selected));
+    if (rowKey === undefined) return undefined;
+    const result = usageResult();
+    if (!result.ok) return undefined;
+    if (rowKey === "claude") {
+      return result.observation === null
+        ? undefined
+        : subscriptionUsageToUsageObservation("claude", result.observation);
+    }
+    return result.usage[rowKey];
+  };
   const closePopover = (restoreFocus: boolean): void => {
     const trigger = openPopover()?.trigger;
     setOpenPopover(null);
@@ -932,6 +970,7 @@ export const DirectInputComposer: Component<{
           <ContextUsage
             context={targetContext()}
             endpointAvailable={props.profile.phase !== "runtime-not-located"}
+            usage={currentUsageObservation()}
           />
           <Show
             when={activeTurn()}
@@ -1802,13 +1841,159 @@ const FixedModeChip: Component<{
   </span>
 );
 
+/**
+ * Runtime-family label -> Settings Usage card row key (w257). The label
+ * (`commandRuntimeFamily`) is the durable, always-available identity for the
+ * *selected command* -- unlike the profile picker's `selectedEndpoint()`,
+ * which stays empty until the catalog is loaded (lazily, on first open) and
+ * so cannot identify a freshly-selected, untouched existing session. The
+ * label text itself is a locale-invariant brand name (identical in every
+ * `runtime-profile-copy.ts` dictionary), so switching on it directly is safe.
+ */
+function usageEndpointRowKey(
+  runtimeFamilyLabel: string,
+): UsageEndpointRowKey | undefined {
+  switch (runtimeFamilyLabel) {
+    case "Codex":
+      return "codex";
+    case "Claude":
+      return "claude";
+    case "GLM":
+      return "glm";
+    case "DeepSeek":
+      return "deepseek";
+    case "Kimi":
+      return "kimi";
+    default:
+      return undefined;
+  }
+}
+
+function compactTokenCount(value: number): string {
+  return new Intl.NumberFormat(locale(), {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+/** Shorter than the Settings Usage card's full date+timezone: bare time today, short date otherwise. */
+function shortResetLabel(resetsAtMilliseconds: number): string {
+  const now = new Date();
+  const target = new Date(resetsAtMilliseconds);
+  const sameDay =
+    now.getFullYear() === target.getFullYear() &&
+    now.getMonth() === target.getMonth() &&
+    now.getDate() === target.getDate();
+  return new Intl.DateTimeFormat(
+    locale(),
+    sameDay
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" },
+  ).format(resetsAtMilliseconds);
+}
+
+/** Same vocabulary as the Settings Usage card's per-window line, with the shorter reset time above. */
+function usageWindowPopoverLine(
+  window: RuntimeUsageObservation["windows"][number],
+): string {
+  const label = settingsUsageCopy.windowLabel[window.label];
+  const resets =
+    window.resetsAt === undefined
+      ? settingsUsageCopy.unknown
+      : shortResetLabel(window.resetsAt);
+  return window.utilization === undefined
+    ? settingsUsageCopy.labelled(label, settingsUsageCopy.resets(resets))
+    : settingsUsageCopy.labelled(
+        label,
+        `${settingsUsageCopy.used(
+          new Intl.NumberFormat(locale(), {
+            style: "percent",
+            maximumFractionDigits: 1,
+          }).format(window.utilization),
+        )} · ${settingsUsageCopy.resets(resets)}`,
+      );
+}
+
+const ContextUsagePopover: Component<{
+  readonly anchor: HTMLButtonElement;
+  readonly summaryLine: string;
+  readonly windowLines: readonly string[];
+  readonly onDismiss: () => void;
+}> = (props) => {
+  let popoverElement: HTMLDivElement | undefined;
+  let popoverLifecycle: ReturnType<typeof createProfilePopoverLifecycle> | undefined;
+  const [placement, setPlacement] =
+    createSignal<ProfilePopoverPlacement | null>(null);
+  const contentRevision = () => `${props.summaryLine}|${props.windowLines.join("|")}`;
+  createEffect(() => {
+    const anchor = props.anchor;
+    const element = popoverElement;
+    if (element === undefined) return;
+    const ownerDocument = anchor.ownerDocument;
+    const lifecycle = createProfilePopoverLifecycle({
+      anchor: createBrowserProfilePopoverElement(anchor, "anchor"),
+      popover: createBrowserProfilePopoverElement(element, "popover"),
+      environment: createBrowserProfilePopoverEnvironment(ownerDocument),
+      onBeforeMeasure: () => element.style.removeProperty("width"),
+      focusContent: () => element.focus({ preventScroll: true }),
+      isProfilePopoverTrigger: () => false,
+      onPlacement: (nextPlacement) => {
+        setPlacement(nextPlacement);
+        element.style.width = `${nextPlacement.width}px`;
+      },
+      onDismiss: () => props.onDismiss(),
+    });
+    popoverLifecycle = lifecycle;
+    lifecycle.updateContentRevision(untrack(contentRevision));
+    onCleanup(() => {
+      if (popoverLifecycle === lifecycle) popoverLifecycle = undefined;
+      lifecycle.dispose();
+    });
+  });
+  createEffect(() => {
+    popoverLifecycle?.updateContentRevision(contentRevision());
+  });
+  const style = (): JSX.CSSProperties => ({
+    left: placement() === null ? undefined : `${placement()?.left}px`,
+    top: placement() === null ? undefined : `${placement()?.top}px`,
+    "max-height":
+      placement() === null ? undefined : `${placement()?.maxHeight}px`,
+    visibility: placement() === null ? "hidden" : "visible",
+  });
+  return (
+    <div
+      ref={(element) => {
+        popoverElement = element;
+      }}
+      class="popover picker single-col profile-popover popover-context"
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby="direct-context-popover-heading"
+      tabIndex={-1}
+      style={style()}
+    >
+      <div class="picker-col ctx-popover-body">
+        <p id="direct-context-popover-heading" class="ctx-popover-line ctx-popover-summary">
+          {props.summaryLine}
+        </p>
+        <For each={props.windowLines}>
+          {(line) => <p class="ctx-popover-line">{line}</p>}
+        </For>
+      </div>
+    </div>
+  );
+};
+
 const ContextUsage: Component<{
   readonly context: WorkbenchSessionContextUsage | undefined;
   readonly endpointAvailable: boolean;
+  readonly usage: RuntimeUsageObservation | undefined;
 }> = (props) => {
   const ring = () =>
     contextRingPresentation(props.context, props.endpointAvailable);
   const usedLabel = () => contextUsedTokensLabel(props.context);
+  const [popoverTrigger, setPopoverTrigger] =
+    createSignal<HTMLButtonElement | null>(null);
   return (
     <Show
       when={ring()}
@@ -1825,19 +2010,47 @@ const ContextUsage: Component<{
       }
     >
       {(presentation) => (
-        <span
-          class="ctx-ring"
-          style={{ "--ctx-used": String(presentation().usedPercent) }}
-          data-state={presentation().state}
-          title={presentation().title}
-          aria-label={presentation().ariaLabel}
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true">
-            <circle class="ctx-track" />
-            <circle class="ctx-arc" />
-          </svg>
-          <span class="ctx-pct">{presentation().remainingPercent}%</span>
-        </span>
+        <>
+          <button
+            type="button"
+            class="ctx-ring"
+            style={{ "--ctx-used": String(presentation().usedPercent) }}
+            data-state={presentation().state}
+            title={presentation().title}
+            aria-label={presentation().ariaLabel}
+            aria-haspopup="dialog"
+            aria-expanded={popoverTrigger() !== null}
+            onClick={(event) =>
+              setPopoverTrigger((current) =>
+                current === null ? event.currentTarget : null,
+              )
+            }
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <circle class="ctx-track" />
+              <circle class="ctx-arc" />
+            </svg>
+            <span class="ctx-pct">{presentation().remainingPercent}%</span>
+          </button>
+          <Show when={popoverTrigger()}>
+            {(trigger) => (
+              <Portal mount={trigger().ownerDocument.body}>
+                <ContextUsagePopover
+                  anchor={trigger()}
+                  summaryLine={contextUsagePopoverSummaryCopy(
+                    compactTokenCount(props.context!.usedTokens),
+                    compactTokenCount(props.context!.windowTokens as number),
+                    presentation().usedPercent,
+                  )}
+                  windowLines={(props.usage?.windows ?? []).map(
+                    usageWindowPopoverLine,
+                  )}
+                  onDismiss={() => setPopoverTrigger(null)}
+                />
+              </Portal>
+            )}
+          </Show>
+        </>
       )}
     </Show>
   );

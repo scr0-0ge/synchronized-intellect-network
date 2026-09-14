@@ -15,6 +15,8 @@ import type {
   RuntimeModel,
   RuntimeResume,
   RuntimeStart,
+  RuntimeUsageObservation,
+  RuntimeUsageObserver,
   SessionProfile,
 } from "./index.ts";
 import { RuntimeAdapterError } from "./index.ts";
@@ -27,7 +29,13 @@ import type {
   CodexEndpointEnvironmentResolver,
 } from "./codex/endpoint-env-factory.ts";
 import { resolveCodexEndpointProcessEnvironment } from "./codex/endpoint-env-factory.ts";
-import { asObject, CodexJsonlPeer, reportCodexDiagnostic, toRuntimeError } from "./codex/protocol.ts";
+import {
+  asObject,
+  CodexJsonlPeer,
+  readCodexRateLimitObservation,
+  reportCodexDiagnostic,
+  toRuntimeError,
+} from "./codex/protocol.ts";
 import type { OfficialRuntimeTransportFactory } from "./codex/transport.ts";
 import type { ProviderRequestBudget } from "./provider-request-budget.ts";
 
@@ -275,16 +283,24 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
   private readonly providerRequestBudget: ProviderRequestBudget | undefined;
   private readonly onCatalogObservation: CodexCatalogObserver | undefined;
   readonly #endpointContext: CodexEndpointContext | undefined;
+  /** Provider-agnostic usage sink (w234); runs alongside catalog observation. */
+  readonly #observeUsage: RuntimeUsageObserver | undefined;
+  /** Row identity for `#observeUsage` observations; composition supplies this. */
+  readonly #usageEndpointKey: string | undefined;
 
   constructor(
     createTransport?: OfficialRuntimeTransportFactory,
     providerRequestBudget?: ProviderRequestBudget,
     onCatalogObservation?: CodexCatalogObserver,
     endpointContext?: CodexEndpointContext,
+    observeUsage?: RuntimeUsageObserver,
+    usageEndpointKey?: string,
   ) {
     this.providerRequestBudget = providerRequestBudget;
     this.onCatalogObservation = onCatalogObservation;
     this.#endpointContext = endpointContext;
+    this.#observeUsage = observeUsage;
+    this.#usageEndpointKey = usageEndpointKey;
     // Without an endpoint context the transport is the historical spawn:
     // inherited environment, CLI-owned catalog, chatgpt-account gate. With
     // one (kimi-platform, ticket 17), the default transport factory builds
@@ -316,6 +332,37 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
             }
             return createOfficialCodexTransport(undefined, { environment });
           });
+  }
+
+  /**
+   * w257: the settings Usage card used to hardcode "this provider's CLI does
+   * not report usage" for Codex, which live probing against real codex.exe
+   * 0.153.4 (`account/rateLimits/read`) showed is false -- a Pro-family
+   * account reports a weekly rate-limit window (no 5-hour window, matching
+   * the owner's plan). One read per session start/resume, only when a sink
+   * is configured; a rejected or malformed read is optional telemetry and
+   * never fails the session, so both the request and the observer callback
+   * are swallowed here rather than left to the caller.
+   */
+  private async observeAccountRateLimits(peer: CodexJsonlPeer): Promise<void> {
+    if (this.#observeUsage === undefined || this.#usageEndpointKey === undefined) {
+      return;
+    }
+    let observation: RuntimeUsageObservation | undefined;
+    try {
+      observation = readCodexRateLimitObservation(
+        await peer.request("account/rateLimits/read", null),
+        this.#usageEndpointKey,
+      );
+    } catch {
+      return;
+    }
+    if (observation === undefined) return;
+    try {
+      await this.#observeUsage(observation);
+    } catch {
+      // An observer failure must not affect session start.
+    }
   }
 
   /**
@@ -429,6 +476,9 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
           await readNativeCatalog(peer, createCatalogObservationCollector()),
         );
         assertSelection(catalog, request);
+        await this.observeAccountRateLimits(peer);
+      } else {
+        await this.observeAccountRateLimits(peer);
       }
       const nativeAccess = toNativeAccess(request.profile.accessMode);
       const startResult = asObject(
@@ -498,6 +548,9 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
       await initialize(peer);
       if (staticCatalog === undefined) {
         await assertAuthenticated(peer);
+        await this.observeAccountRateLimits(peer);
+      } else {
+        await this.observeAccountRateLimits(peer);
       }
       const resumeResultValue = await peer.request("thread/resume", {
         threadId: validatedRequest.opaqueSessionReference,
