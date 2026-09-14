@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { hostedProjectView } from "./w26-hosted-project-view.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 
 import {
   reconstructWorkbenchProjectSelectionRequest,
@@ -29,6 +30,7 @@ test("the hosted Project public boundary reconstructs path-free snapshots and re
       observation: { cursor: 1, live: true },
       commands: [],
       initialSelectionKey: null,
+      autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {
@@ -247,6 +249,7 @@ test("the hosted Project boundary preserves exact user text and fails closed on 
         },
       ],
       initialSelectionKey: "command-1",
+      autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
       projectSelection: {
         projects: [
           {

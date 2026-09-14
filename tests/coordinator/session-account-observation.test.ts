@@ -31,6 +31,7 @@ import {
   parseDurableAccountObservation,
   type WorkLedgerAuthGenerationModule,
 } from "../../src/coordinator/work-ledger-auth-generation.ts";
+import { preSevenDowngradeStatements } from "../helpers/legacy-ledger-downgrade.ts";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -489,7 +490,7 @@ test("version two, three, and four era Ledgers all carry forward and still open"
 
     const downgrade = new DatabaseSync(databasePath);
     downgrade.exec(
-      `${downgrades[era].join("\n")}\nPRAGMA user_version = ${era};`,
+      `${preSevenDowngradeStatements().join("\n")}\n${downgrades[era].join("\n")}\nPRAGMA user_version = ${era};`,
     );
     downgrade.close();
 
@@ -521,8 +522,8 @@ test("version two, three, and four era Ledgers all carry forward and still open"
           user_version: number;
         }).user_version,
       ),
-      6,
-      `era ${era} did not reach schema version six`,
+      7,
+      `era ${era} did not reach schema version seven`,
     );
     assert.deepEqual(
       (
@@ -940,7 +941,7 @@ test("a Ledger opened without the observation module keeps its exact prior behav
       (reader.prepare("PRAGMA user_version").get() as { user_version: number })
         .user_version,
     ),
-    6,
+    7,
   );
   reader.close();
   const reopened = await createWorkbenchCoordinator({

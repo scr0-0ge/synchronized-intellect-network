@@ -28,6 +28,10 @@ import { redactFilesystemPaths } from "./path-redaction.ts";
 import { sanitizeWorkbenchContinuationStop, sanitizeWorkbenchContinuationProgress } from "./result-sanitizer.ts";
 import type { WorkbenchContinuationStop, WorkbenchContinuationProgress } from "./contract.ts";
 import {
+  UNAVAILABLE_AUTO_ITERATION_VIEW,
+  type WorkbenchAutoIterationView,
+} from "./auto-iteration-view-contract.ts";
+import {
   cloneEffectiveSessionProfileProjection,
   cloneRequestedSessionProfileProjection,
   unknownEffectiveSessionProfileProjection,
@@ -781,6 +785,7 @@ export function createWorkbenchLiveView(options: {
       observation: { cursor: snapshot.cursor, live: true },
       commands,
       initialSelectionKey: initialSelection?.key ?? null,
+      autoIteration: projectAutoIterationView(options.channel),
     });
   };
 
@@ -1506,6 +1511,52 @@ function isResumableTerminal(entry: {
   readonly failureCategory?: ProjectCommandFailureCategory;
 }): boolean {
   return entry.status === "completed" || entry.status === "recovery-required" || entry.status === "quota-paused" || entry.failureCategory === "interrupted";
+}
+
+/**
+ * The auto-iteration ledger read behind the same snapshot: sanitized ids and
+ * enum states only. Any authority failure degrades to the unavailable
+ * projection instead of failing the whole Project view.
+ */
+function projectAutoIterationView(
+  channel: ProjectChannel,
+): WorkbenchAutoIterationView {
+  const authority = channel.autoIteration;
+  if (authority === undefined) return UNAVAILABLE_AUTO_ITERATION_VIEW;
+  try {
+    const overview = authority.readAutoIterationOverview();
+    return Object.freeze({
+      status: "active",
+      supervisor:
+        overview.supervisor === null
+          ? null
+          : Object.freeze({
+              roleSlotId: overview.supervisor.roleSlotId,
+              generation: overview.supervisor.generation,
+              tenureStatus: overview.supervisor.status,
+            }),
+      workOrders: Object.freeze(
+        overview.workOrders.map((order) =>
+          Object.freeze({
+            workOrderId: order.workOrderId,
+            status: order.status,
+            attemptCount: order.attemptCount,
+            workerSessionBound: order.workerSessionBound,
+            workerRuntimeLifecycle: order.workerRuntimeLifecycle,
+            delivered: order.delivered,
+            reviewDecided: order.reviewDecided,
+            integrated: order.integrated,
+            waitingFor: order.waitingFor,
+          }),
+        ),
+      ),
+      pendingInboxEntries: overview.pendingInboxEntries,
+      quotaBlocked: overview.quotaWaiting,
+      lastObservedAt: overview.lastObservedAt,
+    });
+  } catch {
+    return UNAVAILABLE_AUTO_ITERATION_VIEW;
+  }
 }
 
 function readInterruptCapability(

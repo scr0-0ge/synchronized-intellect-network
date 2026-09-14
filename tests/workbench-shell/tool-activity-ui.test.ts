@@ -365,6 +365,7 @@ function projectResult(
         },
       ],
       initialSelectionKey: seed.key,
+      autoIteration: visualFixture.autoIteration,
     },
   };
 }

@@ -9,6 +9,7 @@ import { captureNames, replayUsage } from "../agent-runtime/claude-usage-replay.
 import { QuotaReplayTransport, quotaFrames, quotaProfile } from "../agent-runtime/fixtures/claude-quota-replay.ts";
 import { sanitizeWorkbenchSubscriptionUsageResult } from "../../src/workbench-shell/result-sanitizer.ts";
 import { subscriptionUsageToUsageObservation } from "../../src/agent-runtime/index.ts";
+import { parseGlmUsageWindowsResponse } from "../../src/agent-runtime/claude/glm-usage-windows.ts";
 import { createProductionGlmRuntimeAdapter } from "../../src/workbench-shell/runtime-endpoint-composition.ts";
 
 test("Settings identifies the usage template even before any provider turn", async () => {
@@ -109,5 +110,31 @@ test("all four real Claude captures plus the real GLM 429 parse render as five r
       assert.doesNotMatch(html, language === "en" ? /7-hour window|7-day window/ : /7 天窗口/);
     }
     setLocale("en");
+  } finally { await server.close(); }
+});
+
+test("Settings renders both percentage windows from the GLM monitor observation", async () => {
+  const server = await createViteSsrTestServer({ configFile: false, appType: "custom", logLevel: "silent",
+    plugins: [solid({ ssr: true })], root: fileURLToPath(new URL("../..", import.meta.url)),
+    server: { middlewareMode: true } });
+  try {
+    const { UsageSnapshot } = await server.ssrLoadModule("/src/workbench-shell/renderer/settings-usage.tsx");
+    const observation = parseGlmUsageWindowsResponse({
+      code: 200,
+      success: true,
+      data: {
+        limits: [
+          { type: "CREDIT_LIMIT", unit: 3, number: 5, percentage: 50, nextResetTime: 1_800_000_000_000 },
+          { type: "CREDIT_LIMIT", unit: 6, number: 1, percentage: 36, nextResetTime: 1_800_100_000_000 },
+        ],
+      },
+    }, "glm", 1_700_000_000_000);
+    assert.ok(observation !== undefined);
+    const html = renderToString(() => UsageSnapshot({
+      result: { ok: true, observation: null }, observations: { glm: observation },
+    }));
+    assert.match(html, /5-hour window: 50%/u);
+    assert.match(html, /7-day window: 36%/u);
+    assert.doesNotMatch(html, /GLM<\/dt><dd>Not yet observed/u);
   } finally { await server.close(); }
 });

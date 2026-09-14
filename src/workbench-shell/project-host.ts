@@ -67,6 +67,7 @@ import {
   type WorkbenchSubmissionResult,
 } from "./contract.ts";
 import { deriveProjectLabel } from "./live-view.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "./auto-iteration-view-contract.ts";
 import {
   discoverProjectLedgers,
   projectDirectoryDigest,
@@ -614,6 +615,7 @@ function createHostController(options: {
               observation: { cursor: 0, live: true },
               commands: [],
               initialSelectionKey: null,
+              autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
             },
           },
           generation,
@@ -959,6 +961,7 @@ function createHostController(options: {
           observation: lastResult.view.observation,
           commands: lastResult.view.commands,
           initialSelectionKey: lastResult.view.initialSelectionKey,
+          autoIteration: lastResult.view.autoIteration,
         },
       },
       generation,

@@ -36,6 +36,7 @@ import type {
   WorkbenchHostedProjectResult,
   WorkbenchProjectListener,
 } from "../../src/workbench-shell/contract.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 import {
   createWorkbenchProjectHost,
   type WorkbenchProjectBackendFactory,
@@ -234,6 +235,7 @@ class RecordingBackendFactory {
             observation: { cursor: 0, live: true },
             commands: [],
             initialSelectionKey: null,
+            autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
           },
         });
         return () => undefined;
@@ -2421,6 +2423,7 @@ test("removing the selected Project supersedes a stalled prior projection before
       observation: { cursor: 1, live: true },
       commands: [],
       initialSelectionKey: null,
+      autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     },
   });
   await heldProbeStarted;

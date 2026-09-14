@@ -20,6 +20,7 @@ import type {
 } from "./profile-projection.ts";
 import type { DurableRuntimeEndpointId } from "./work-ledger-auth-generation.ts";
 import type { SessionContinuationStop } from "./session-continuation-plan.ts";
+import type { AutoIterationProjectAuthority } from "./auto-iteration/coordinator.ts";
 
 export type Cursor = number;
 
@@ -317,6 +318,8 @@ export type ProjectUserInputResponse =
 export type ProjectUserInputResponseResult = { readonly status: "answered" | "cancelled" | "invalid-answer" | "unavailable" };
 
 export interface ProjectChannel {
+  /** Project-local business authority sharing this channel's SQLite transaction unit. */
+  readonly autoIteration?: AutoIterationProjectAuthority;
   /** Ephemeral questions on the existing active binding; never turn-history events. */
   readUserInput?(sessionId: string): readonly ProjectUserInputView[];
   observeUserInput?(listener: () => void): () => void;

@@ -8,7 +8,7 @@ import {
   createProductionClaudeApiRuntimeAdapter,
 } from "../../src/workbench-shell/runtime-endpoint-composition.ts";
 import { ClaudeRuntimeBinding } from "../../src/agent-runtime/claude/session.ts";
-import { QuotaReplayTransport, quotaFrames, quotaProfile } from "../agent-runtime/fixtures/claude-quota-replay.ts";
+import { QuotaReplayTransport, quotaFrames, quotaProfile, quotaResumedFrames } from "../agent-runtime/fixtures/claude-quota-replay.ts";
 import { ScriptedTransport } from "../agent-runtime/support/scripted-transport.ts";
 
 const codexProfile = {
@@ -94,6 +94,132 @@ test("without observeUsage wired, createProductionGlmRuntimeAdapter still comple
   const events = [];
   for await (const event of binding.events()) events.push(event);
   assert.equal(events.at(-1)?.kind, "turn-paused");
+});
+
+/**
+ * w292: composition also wires a proactive read of Zhipu's monitor endpoint
+ * into the GLM adapter, fired once per start/resume alongside (never instead
+ * of) the reactive 429-exhaustion-text sink proven above. The two tests
+ * above are the "before" baseline: today, exactly one "exhaustion-message"
+ * observation ever arrives for GLM and nothing else. The read is
+ * fire-and-forget (started only after the binding already exists, so a slow
+ * or failing Zhipu call can never delay or fail session start), hence
+ * polling `usageObservations` rather than reading it immediately after
+ * `start()` resolves.
+ */
+async function waitForUsageObservation(
+  usageObservations: readonly unknown[],
+  predicate: (observation: { source: string }) => boolean,
+): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (usageObservations.some((observation) => predicate(observation as { source: string }))) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.fail("expected usage observation did not arrive");
+}
+
+test("createProductionGlmRuntimeAdapter fires a proactive Zhipu monitor read on start, tagged zhipu-monitor", async () => {
+  const usageObservations: unknown[] = [];
+  const calls: { url: string }[] = [];
+  const fakeMonitorFetch = (async (input: string | URL) => {
+    calls.push({ url: String(input) });
+    return new Response(
+      JSON.stringify({
+        code: 200,
+        msg: "Operation successful",
+        success: true,
+        data: {
+          level: "pro",
+          limits: [
+            { type: "CREDIT_LIMIT", unit: 3, number: 5, usage: 1, currentValue: 1, remaining: 1, percentage: 50, nextResetTime: 1_800_000_000_000 },
+            { type: "CREDIT_LIMIT", unit: 6, number: 1, usage: 1, currentValue: 1, remaining: 1, percentage: 36, nextResetTime: 1_800_100_000_000 },
+          ],
+        },
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  const adapter = createProductionGlmRuntimeAdapter({
+    environment: { GLM_ANTHROPIC_AUTH_TOKEN: "synthetic-glm-key" },
+    claudePermissionHandling: { readPermissionMode: async () => "manual" },
+    createSessionTransport: async () => new QuotaReplayTransport(quotaFrames),
+    resolveStaticCatalogAugmentation: () => [{ id: quotaProfile.model, effortLevels: [quotaProfile.effortLevel] }],
+    observeUsage: observation => { usageObservations.push(observation); },
+    usageWindowsFetch: fakeMonitorFetch,
+  });
+  await adapter.start({ projectDirectory: "offline-project", profile: quotaProfile });
+
+  await waitForUsageObservation(usageObservations, observation => observation.source === "zhipu-monitor");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, "https://open.bigmodel.cn/api/monitor/usage/quota/limit");
+  const observation = usageObservations.find(
+    (candidate): candidate is { endpointKey: string; windows: unknown; source: string } =>
+      (candidate as { source: string }).source === "zhipu-monitor",
+  )!;
+  assert.equal(observation.endpointKey, "glm");
+  assert.deepEqual(observation.windows, [
+    { label: "five-hour", utilization: 0.5, resetsAt: 1_800_000_000_000 },
+    { label: "seven-day", utilization: 0.36, resetsAt: 1_800_100_000_000 },
+  ]);
+});
+
+test("createProductionGlmRuntimeAdapter reads the monitor again after a successful GLM resume", async () => {
+  const usageObservations: { source: string }[] = [];
+  const transports = [
+    new QuotaReplayTransport(quotaFrames),
+    new QuotaReplayTransport(quotaResumedFrames),
+  ];
+  const adapter = createProductionGlmRuntimeAdapter({
+    environment: { GLM_ANTHROPIC_AUTH_TOKEN: "synthetic-glm-key" },
+    claudePermissionHandling: { readPermissionMode: async () => "manual" },
+    createSessionTransport: async () => transports.shift()!,
+    resolveStaticCatalogAugmentation: () => [{ id: quotaProfile.model, effortLevels: [quotaProfile.effortLevel] }],
+    observeUsage: observation => { usageObservations.push(observation); },
+    usageWindowsFetch: (async () => new Response(JSON.stringify({
+      code: 200,
+      success: true,
+      data: { limits: [
+        { type: "CREDIT_LIMIT", unit: 3, number: 5, percentage: 50, nextResetTime: 1_800_000_000_000 },
+        { type: "CREDIT_LIMIT", unit: 6, number: 1, percentage: 36, nextResetTime: 1_800_100_000_000 },
+      ] },
+    }), { status: 200 })) as typeof fetch,
+  });
+  const started = await adapter.start({ projectDirectory: "offline-project", profile: quotaProfile });
+  await waitForUsageObservation(usageObservations, observation => observation.source === "zhipu-monitor");
+  await started.send({ text: "offline initial input" });
+  for await (const _event of started.events()) { /* establish the resume capability */ }
+
+  await adapter.resume({
+    projectDirectory: "offline-project",
+    profile: quotaProfile,
+    opaqueSessionReference: started.opaqueSessionReference,
+  });
+  await waitForUsageObservation(
+    usageObservations,
+    () => usageObservations.filter(observation => observation.source === "zhipu-monitor").length === 2,
+  );
+});
+
+test("createProductionGlmRuntimeAdapter reports no zhipu-monitor observation when no GLM token is configured", async () => {
+  const usageObservations: unknown[] = [];
+  let fetchCalled = false;
+  const adapter = createProductionGlmRuntimeAdapter({
+    environment: {}, // no GLM_ANTHROPIC_AUTH_TOKEN and no resolveGlmAuthToken
+    claudePermissionHandling: { readPermissionMode: async () => "manual" },
+    createSessionTransport: async () => new QuotaReplayTransport(quotaFrames),
+    resolveStaticCatalogAugmentation: () => [{ id: quotaProfile.model, effortLevels: [quotaProfile.effortLevel] }],
+    observeUsage: observation => { usageObservations.push(observation); },
+    usageWindowsFetch: (async () => {
+      fetchCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch,
+  });
+  await adapter.start({ projectDirectory: "offline-project", profile: quotaProfile });
+  // Negative assertion: give any fire-and-forget chain a chance to run first.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fetchCalled, false);
+  assert.equal(usageObservations.some(observation => (observation as { source: string }).source === "zhipu-monitor"), false);
 });
 
 /**

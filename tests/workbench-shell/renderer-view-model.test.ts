@@ -14,6 +14,7 @@ import type {
   WorkbenchSubmissionResult,
 } from "../../src/workbench-shell/contract.ts";
 import { defaultWorkbenchAppearancePreference } from "../../src/workbench-shell/contract.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../../src/workbench-shell/auto-iteration-view-contract.ts";
 import { commonCopy } from "../../src/workbench-shell/renderer/copy/common-copy.ts";
 import {
   blockedComposerCopy,
@@ -3397,6 +3398,7 @@ function twoProjectView(
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,
+    autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     projectSelection: {
       projects: [
         {
@@ -3427,6 +3429,7 @@ function createdProjectView(
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,
+    autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     projectSelection: {
       projects: [
         ...baseline.projectSelection.projects.map((project) => ({
@@ -3455,6 +3458,7 @@ function view(
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,
+    autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
     projectSelection: {
       projects: [
         {

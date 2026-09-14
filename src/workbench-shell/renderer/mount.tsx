@@ -32,6 +32,7 @@ import type {
 } from "../contract.ts";
 import type { WorkbenchWindowRendererBridge } from "../window-control-bridge.ts";
 import type { HistoryRecoverySnapshotResult } from "../history-recovery-contract.ts";
+import { UNAVAILABLE_AUTO_ITERATION_VIEW } from "../auto-iteration-view-contract.ts";
 import { notificationActivationCommandKey } from "../notification-bridge.ts";
 import type { WorkbenchRendererTransferBridge } from "../preload-bridge.ts";
 import {
@@ -2341,6 +2342,7 @@ const ResolvedWorkbench: Component<{
           observation: Object.freeze({ cursor: 0, live: true as const }),
           commands: Object.freeze([]),
           initialSelectionKey: null,
+          autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
           projectSelection: Object.freeze({ projects: Object.freeze([]) }),
         })
       : hasHostedProjectView(props.result)

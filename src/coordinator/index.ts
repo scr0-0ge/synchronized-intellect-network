@@ -108,6 +108,30 @@ export {
   parseDurableAccountObservation,
   parseDurableAuthenticationContext,
 } from "./work-ledger-auth-generation.ts";
+export {
+  createAutoIterationCoordinator,
+  HANDOFF_BODY_MAX_CODE_POINTS,
+} from "./auto-iteration/coordinator.ts";
+export type {
+  AttemptRuntimeMutation,
+  AttemptSessionBinding,
+  AutoIterationProjectAuthority,
+  HandoffIncludedMutation,
+  InitialSupervisorBinding,
+} from "./auto-iteration/coordinator.ts";
+export type { PendingAutoIterationOutboxEntry } from "./auto-iteration/project-store.ts";
+export type {
+  AutoIterationHostLifecycle,
+  AutoIterationOverview,
+  AutoIterationWorkOrderOverview,
+  ContextUsageObservation,
+  IntegrationCandidateBuildResult,
+  IntegrationCandidateValidation,
+  QuotaObservation,
+  QuotaPoolDefinition,
+  QuotaWindowObservation,
+  SupervisorRotationCompletion,
+} from "./auto-iteration/contract.ts";
 export type {
   AccountObservationVerdict,
   AuthenticationMutationBeginResult,

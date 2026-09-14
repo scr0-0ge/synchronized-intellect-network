@@ -21,12 +21,35 @@ import {
   sessionContinuationStepInput,
 } from "../coordinator/index.ts";
 import type {
+  AutoIterationProjectAuthority,
+  DurableRuntimeEndpointId,
+  PendingAutoIterationOutboxEntry,
   ProjectChannel,
+  ProjectRuntimeResumeIdentity,
   ProjectSnapshot,
   ProjectTurnActivity,
+  ProjectUpdate,
 } from "../coordinator/index.ts";
 import type { WorkLedgerAuthGenerationModule } from "../coordinator/index.ts";
+import type {
+  AutoIterationCoordinatorPort,
+  HandoffIdempotencyKey,
+  HostBoundToolActor,
+  SessionCreationParameters,
+  SupervisorToolRequest,
+  SupervisorToolResponse,
+  WorkerToolRequest,
+  WorkerToolResponse,
+} from "../coordinator/auto-iteration/contract.ts";
 import { resolveSessionProfile } from "../session-profile/index.ts";
+import { createSessionAuthority } from "../coordinator/auto-iteration/session-authority.ts";
+import type { SessionAuthority } from "../coordinator/auto-iteration/session-authority.ts";
+import { createSessionTurnArbiter } from "../coordinator/auto-iteration/session-arbiter.ts";
+import type { SessionTurnArbiter } from "../coordinator/auto-iteration/session-arbiter.ts";
+import {
+  createAutoIterationMcpServer,
+  type AutoIterationMcpServer,
+} from "./auto-iteration-mcp-server.ts";
 import { WORKBENCH_RUNTIME_ENDPOINT_IDS } from "./runtime-endpoint-identity.ts";
 import {
   createDirectSessionProfilePreferenceStore,
@@ -112,6 +135,12 @@ import {
 } from "./runtime-endpoint-adapter.ts";
 
 export interface WorkbenchBackend extends Partial<WorkbenchUserInputBridge> {
+  /**
+   * Trusted host seam for the auto-iteration first loop: the Project's
+   * authority, the per-Session MCP tool servers, and the outbox drain. This
+   * never crosses renderer IPC; the renderer sees the sanitized projection.
+   */
+  readonly autoIteration?: WorkbenchAutoIterationService;
   observeProject(listener: WorkbenchProjectListener): () => void;
   readTurnActivity(): ProjectTurnActivity;
   interruptActiveTurn?(
@@ -276,6 +305,496 @@ function toResumableAdapter(
   });
 }
 
+export interface WorkbenchAutoIterationService {
+  readonly authority: AutoIterationProjectAuthority;
+  /** Appoints the first supervisor tenure for a host-known product Session. */
+  bindInitialSupervisor(request: {
+    readonly roleSlotId: string;
+    readonly sessionId: string;
+  }): Promise<{ readonly roleSlotId: string; readonly tenureId: string; readonly generation: number }>;
+  /**
+   * Starts a product Session through the same production seam the outbox uses
+   * for workers and successors (inspect → resolve → durable command). Returns
+   * the new Session id, or undefined when the launch could not be accepted.
+   */
+  startHostSession(request: {
+    readonly endpointId: DurableRuntimeEndpointId;
+    readonly profile: SessionProfile;
+    readonly input: string;
+  }): Promise<string | undefined>;
+  /** The same server a CLI bootstrap process would reach through the local bridge. */
+  mcpServerForSession(sessionId: string): AutoIterationMcpServer;
+  /** Idempotent pass over the durable outbox; safe to call at any turn boundary. */
+  drainPendingOutbox(): Promise<void>;
+  close(): Promise<void>;
+}
+
+interface AutoIterationServiceOptions {
+  readonly channel: ProjectChannel & {
+    readonly autoIteration: AutoIterationProjectAuthority;
+  };
+  readonly adapter: ResumableAgentRuntimeAdapter;
+  readonly projectDirectory: string;
+}
+
+function createBackendAutoIterationService(
+  options: AutoIterationServiceOptions,
+): WorkbenchAutoIterationService {
+  const { channel, adapter, projectDirectory } = options;
+  const authority: AutoIterationProjectAuthority = channel.autoIteration;
+  const sessionAuthority: SessionAuthority = createSessionAuthority();
+  const arbiter: SessionTurnArbiter = createSessionTurnArbiter();
+  const mcpServersBySession = new Map<string, AutoIterationMcpServer>();
+  let closed = false;
+
+  // The bridge never sees model-supplied identity: each server is bound to one
+  // host-known Session, and every request re-drains the durable outbox so a
+  // single model turn advances the loop.
+  function drainingRequest(
+    actor: Extract<HostBoundToolActor, { readonly kind: "supervisor" }>,
+    request: SupervisorToolRequest,
+  ): Promise<SupervisorToolResponse>;
+  function drainingRequest(
+    actor: Extract<HostBoundToolActor, { readonly kind: "worker" }>,
+    request: WorkerToolRequest,
+  ): Promise<WorkerToolResponse>;
+  function drainingRequest(
+    actor: HostBoundToolActor,
+    request: SupervisorToolRequest | WorkerToolRequest,
+  ): Promise<SupervisorToolResponse | WorkerToolResponse> {
+    const response =
+      actor.kind === "supervisor"
+        ? authority.request(actor, request as SupervisorToolRequest)
+        : authority.request(actor, request as WorkerToolRequest);
+    return response.then((settled) => {
+      void drainPendingOutbox().catch(() => undefined);
+      return settled;
+    });
+  }
+
+  const drainingPort: AutoIterationCoordinatorPort = {
+    request: drainingRequest,
+  };
+
+  function mcpServerForSession(sessionId: string): AutoIterationMcpServer {
+    const existing = mcpServersBySession.get(sessionId);
+    if (existing !== undefined) return existing;
+    const server = createAutoIterationMcpServer({
+      sessionId,
+      authority: sessionAuthority,
+      port: drainingPort,
+    });
+    mcpServersBySession.set(sessionId, server);
+    return server;
+  }
+
+  async function bindInitialSupervisor(request: {
+    readonly roleSlotId: string;
+    readonly sessionId: string;
+  }) {
+    const binding = await authority.bindInitialSupervisor({
+      roleSlotId: request.roleSlotId,
+      sessionId: request.sessionId,
+      generation: 1,
+    });
+    sessionAuthority.bindSession({
+      actor: {
+        kind: "supervisor",
+        sessionId: request.sessionId,
+        tenure: {
+          roleSlotId: binding.roleSlotId,
+          generation: binding.generation,
+        },
+      },
+    });
+    return binding;
+  }
+
+  /** Re-establishes host bindings after a Project reopen from the ledger alone. */
+  function resumeBindings(): void {
+    try {
+      const overview = authority.readAutoIterationOverview();
+      if (overview.supervisor !== null) {
+        sessionAuthority.bindSession({
+          actor: {
+            kind: "supervisor",
+            sessionId: overview.supervisor.sessionId,
+            tenure: {
+              roleSlotId: overview.supervisor.roleSlotId,
+              generation: overview.supervisor.generation,
+            },
+          },
+        });
+      }
+      for (const order of overview.workOrders) {
+        if (order.workerSessionId === null) continue;
+        sessionAuthority.bindSession({
+          actor: {
+            kind: "worker",
+            sessionId: order.workerSessionId,
+            workOrderId: order.workOrderId,
+            attemptId: order.currentAttemptId,
+          },
+        });
+      }
+    } catch {
+      // A ledger that cannot be read for bindings leaves them simply absent;
+      // the durable state is untouched and the next drain retries.
+    }
+  }
+
+  async function sessionSummary(
+    sessionId: string,
+  ): Promise<ProjectSnapshot["commands"][number]["session"] | undefined> {
+    try {
+      const project = await channel.snapshot();
+      return project.commands.find(
+        (command) => command.session?.sessionId === sessionId,
+      )?.session;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function sessionInFlight(sessionId: string): Promise<boolean> {
+    try {
+      const project = await channel.snapshot();
+      return project.commands.some(
+        (command) =>
+          command.session?.sessionId === sessionId &&
+          (command.status === "accepted" || command.status === "in-flight"),
+      );
+    } catch {
+      return true;
+    }
+  }
+
+  async function startSessionForAutoIteration(options_: {
+    readonly idempotencyKey: string;
+    readonly endpointId: DurableRuntimeEndpointId;
+    readonly profile: SessionProfile;
+    readonly input: string;
+  }): Promise<string | undefined> {
+    let catalog: RuntimeCatalog;
+    try {
+      catalog = await adapter.inspect(projectDirectory);
+    } catch {
+      return undefined;
+    }
+    let resolved: SessionProfile;
+    try {
+      resolved = resolveSessionProfile({
+        catalog,
+        catalogRevision: `auto-iteration:${randomUUID()}`,
+        preferences: { global: options_.profile },
+      }).profile;
+    } catch {
+      return undefined;
+    }
+    try {
+      const receipt = await channel.act(
+        Object.freeze({
+          kind: "direct" as const,
+          commandKind: "start" as const,
+          idempotencyKey: options_.idempotencyKey,
+          runtime: "codex" as const,
+          catalogRevision: `auto-iteration:${randomUUID()}`,
+          preferences: Object.freeze({ global: resolved }),
+          profile: resolved,
+          input: options_.input,
+        }),
+        Object.freeze({ endpointId: options_.endpointId }),
+      );
+      const project = await channel.snapshot();
+      return project.commands.find(
+        (command) => command.commandId === receipt.commandId,
+      )?.session?.sessionId;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function resumeIdentityFor(
+    sessionId: string,
+    profile: SessionProfile,
+  ): Promise<ProjectRuntimeResumeIdentity | undefined> {
+    const read = channel.readSessionRuntimeResumeIdentities;
+    if (read === undefined) return undefined;
+    try {
+      const mappings = await read.call(channel, sessionId);
+      const mapping = mappings.find((candidate) =>
+        samePrivateProfile(candidate.selectionProfile, profile),
+      );
+      if (mapping === undefined) return undefined;
+      return {
+        schemaVersion: 1,
+        endpointId: mapping.endpointId,
+        nativeProfile: mapping.nativeProfile,
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function wakeSupervisor(request: {
+    readonly roleSlotId: string;
+    readonly handoff: {
+      readonly workOrderId: string;
+      readonly attemptId: string;
+      readonly handoffId: string;
+    };
+  }): Promise<boolean> {
+    const supervisor = authority.readAutoIterationOverview().supervisor;
+    if (supervisor === null || supervisor.status !== "active") return false;
+    if (arbiter.busy(supervisor.sessionId)) return false;
+    if (await sessionInFlight(supervisor.sessionId)) return false;
+    const session = await sessionSummary(supervisor.sessionId);
+    if (session === undefined || !session.resumable) return false;
+    const resumeIdentity = await resumeIdentityFor(
+      supervisor.sessionId,
+      session.profile,
+    );
+    // Same-Session arbitration: the wakeup runs on the per-Session arbiter,
+    // never on a Project-wide submission tail.
+    void arbiter
+      .submit(supervisor.sessionId, "auto-wakeup", async () => {
+        if (closed) return;
+        try {
+          const receipt = await channel.act(
+            Object.freeze({
+              kind: "direct" as const,
+              commandKind: "continue" as const,
+              idempotencyKey: randomUUID(),
+              runtime: "codex" as const,
+              targetSessionId: session.sessionId,
+              profile: session.profile,
+              ...(resumeIdentity === undefined
+                ? {}
+                : { runtimeResumeIdentity: resumeIdentity }),
+              input:
+                `Workbench auto-iteration: a worker handoff awaits your review ` +
+                `(work order ${request.handoff.workOrderId}). ` +
+                `Use the read_inbox tool, then submit_review_decision.`,
+            }),
+            resumeIdentity === undefined
+              ? undefined
+              : Object.freeze({ endpointId: resumeIdentity.endpointId }),
+          );
+          await authority.markHandoffIncluded({
+            handoff: request.handoff,
+            parentCommandId: receipt.commandId,
+          });
+        } catch (error) {
+          console.warn(
+            "[auto-iteration] supervisor wakeup deferred",
+            request.handoff.workOrderId,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      })
+      .catch(() => undefined);
+    return true;
+  }
+
+  async function completeRotation(request: {
+    readonly roleSlotId: string;
+    readonly tenureId: string;
+    readonly successorSession: SessionCreationParameters;
+  }): Promise<boolean> {
+    const previous = authority.readAutoIterationOverview().supervisor;
+    const successorSessionId = await startSessionForAutoIteration({
+      idempotencyKey: `auto-rotation-${request.tenureId}`,
+      endpointId: request.successorSession.endpointId,
+      profile: request.successorSession.profile,
+      input:
+        "Workbench auto-iteration: you are the successor supervisor Session. " +
+        "Use the read_inbox tool to take over the supervisor role.",
+    });
+    if (successorSessionId === undefined) return false;
+    const tenure = await authority.completeSupervisorRotation({
+      roleSlotId: request.roleSlotId,
+      successorSessionId,
+    });
+    if (previous !== null) sessionAuthority.unbindSession(previous.sessionId);
+    sessionAuthority.bindSession({
+      actor: {
+        kind: "supervisor",
+        sessionId: successorSessionId,
+        tenure: {
+          roleSlotId: tenure.roleSlotId,
+          generation: tenure.generation,
+        },
+      },
+    });
+    return true;
+  }
+
+  async function handleOutboxEntry(
+    entry: PendingAutoIterationOutboxEntry,
+  ): Promise<boolean> {
+    if (entry.kind === "start-attempt") {
+      const payload = entry.payload as {
+        readonly attemptId?: string;
+        readonly workerSession?: SessionCreationParameters;
+        readonly sessionConfiguration?: {
+          readonly requested?: SessionCreationParameters;
+        };
+      };
+      const attemptId = payload?.attemptId;
+      const creation =
+        payload?.workerSession ?? payload?.sessionConfiguration?.requested;
+      if (attemptId === undefined || creation === undefined) return false;
+      const overview = authority.readAutoIterationOverview();
+      const workOrder = overview.workOrders.find(
+        (order) => order.currentAttemptId === attemptId,
+      );
+      if (workOrder === undefined || workOrder.workerSessionBound) return false;
+      const sessionId = await startSessionForAutoIteration({
+        idempotencyKey: `auto-attempt-${attemptId}`,
+        endpointId: creation.endpointId,
+        profile: creation.profile,
+        input:
+          `Workbench auto-iteration: work order ${workOrder.workOrderId} is ` +
+          `assigned to you. Use the read_work_order_status tool, do the work, ` +
+          `then submit_handoff.`,
+      });
+      if (sessionId === undefined) return false;
+      await authority.bindAttemptSession({
+        attemptId,
+        sessionId,
+        configuration: { state: "requested", requested: creation },
+      });
+      await authority.updateAttemptRuntime({
+        attemptId,
+        runtimeLifecycle: "running",
+        slotState: "owned",
+      });
+      sessionAuthority.bindSession({
+        actor: {
+          kind: "worker",
+          sessionId,
+          workOrderId: workOrder.workOrderId,
+          attemptId,
+        },
+      });
+      return true;
+    }
+    if (entry.kind === "inbox-wakeup") {
+      const payload = entry.payload as {
+        readonly roleSlotId?: string;
+        readonly handoff?: HandoffIdempotencyKey;
+      };
+      if (payload?.roleSlotId === undefined || payload?.handoff === undefined) {
+        return false;
+      }
+      return wakeSupervisor({
+        roleSlotId: payload.roleSlotId,
+        handoff: payload.handoff,
+      });
+    }
+    if (entry.kind === "rotation") {
+      const payload = entry.payload as {
+        readonly roleSlotId?: string;
+        readonly tenureId?: string;
+        readonly successorSession?: SessionCreationParameters;
+      };
+      if (
+        payload?.roleSlotId === undefined ||
+        payload?.tenureId === undefined ||
+        payload?.successorSession === undefined
+      ) {
+        return false;
+      }
+      return completeRotation({
+        roleSlotId: payload.roleSlotId,
+        tenureId: payload.tenureId,
+        successorSession: payload.successorSession,
+      });
+    }
+    // review-disposed: the external integration action is not wired for the
+    // first loop; the durable entry stays pending and is retried idempotently.
+    return false;
+  }
+
+  let draining = false;
+  let drainQueued = false;
+  async function drainPendingOutbox(): Promise<void> {
+    if (closed) return;
+    if (draining) {
+      drainQueued = true;
+      return;
+    }
+    draining = true;
+    try {
+      while (!closed) {
+        drainQueued = false;
+        const entries = await authority.readPendingOutbox();
+        let progressed = false;
+        for (const entry of entries) {
+          try {
+            progressed =
+              (await handleOutboxEntry(entry)) || progressed;
+          } catch (error) {
+            console.warn(
+              "[auto-iteration] outbox entry deferred",
+              entry.kind,
+              error instanceof Error ? error.message : error,
+            );
+          }
+        }
+        if (!progressed && !drainQueued) return;
+      }
+    } finally {
+      draining = false;
+    }
+  }
+
+  // Turn-boundary trigger: a durable command update (a turn ending, a session
+  // appearing) re-checks deferred wakeups. Observation failures are ignored;
+  // the outbox itself is the durable driver.
+  let updateIterator: AsyncIterator<ProjectUpdate> | undefined;
+  void (async () => {
+    try {
+      const cursor = (await channel.snapshot()).cursor;
+      if (closed) return;
+      updateIterator = channel.observe({ after: cursor })[Symbol.asyncIterator]();
+      while (!closed) {
+        const next = await updateIterator.next();
+        if (next.done) return;
+        void drainPendingOutbox().catch(() => undefined);
+      }
+    } catch {
+      // The channel may close before this consumer; observation is optional.
+    }
+  })();
+
+  resumeBindings();
+  void drainPendingOutbox().catch(() => undefined);
+
+  return Object.freeze({
+    authority,
+    bindInitialSupervisor,
+    startHostSession: (request: {
+      readonly endpointId: DurableRuntimeEndpointId;
+      readonly profile: SessionProfile;
+      readonly input: string;
+    }) =>
+      startSessionForAutoIteration({
+        idempotencyKey: `auto-host-${randomUUID()}`,
+        endpointId: request.endpointId,
+        profile: request.profile,
+        input: request.input,
+      }),
+    mcpServerForSession,
+    drainPendingOutbox,
+    async close(): Promise<void> {
+      closed = true;
+      await updateIterator?.return?.().catch(() => undefined);
+      await arbiter.close();
+    },
+  });
+}
+
 function createBackend(
   liveView: WorkbenchLiveView,
   channel: ProjectChannel,
@@ -313,7 +832,21 @@ function createBackend(
     (commandId, stop) => { liveView.reportContinuationStop(commandId, stop); },
     (commandId, progress) => { liveView.reportContinuationProgress(commandId, progress); },
   );
+  // The Project channel created by `createWorkbenchBackend` always carries the
+  // auto-iteration authority (schema v7); narrower injected channels keep the
+  // service absent and the view shows the unavailable projection.
+  const autoIteration =
+    channel.autoIteration === undefined
+      ? undefined
+      : createBackendAutoIterationService({
+          channel: channel as ProjectChannel & {
+            readonly autoIteration: AutoIterationProjectAuthority;
+          },
+          adapter,
+          projectDirectory,
+        });
   return Object.freeze({
+    autoIteration,
     observeProject: (listener: WorkbenchProjectListener) =>
       liveView.observe(listener),
     observeUserInput: (listener: () => void) => channel.observeUserInput?.(listener) ?? (() => undefined),
@@ -948,6 +1481,7 @@ function createBackend(
         activeSnapshotRecoveryCommandIds = undefined;
         activeContinuationCapability = undefined;
         await preferenceStore.close();
+        await autoIteration?.close();
         await liveView.close();
         await channel.close();
         await continuationPlan.close();
@@ -1716,3 +2250,4 @@ function deepFreeze<T>(value: T): T {
   for (const child of Object.values(value)) deepFreeze(child);
   return value;
 }
+

@@ -27,6 +27,7 @@ import {
   createSessionMetadataModule,
   normalizeSessionDisplayName,
 } from "../../src/session-metadata.ts";
+import { preSevenDowngradeStatements } from "../helpers/legacy-ledger-downgrade.ts";
 
 const profile: SessionProfile = Object.freeze({
   model: "gpt-5.6-sol",
@@ -644,6 +645,7 @@ test("version-three rows migrate without fabricated names and keep one determini
 
   const downgrade = new DatabaseSync(databasePath);
   downgrade.exec(`
+    ${preSevenDowngradeStatements().join("\n")}
     DROP INDEX sessions_project_display_ordinal_unique;
     ALTER TABLE sessions DROP COLUMN display_ordinal;
     ALTER TABLE sessions DROP COLUMN account_observation_json;
@@ -677,7 +679,7 @@ test("version-three rows migrate without fabricated names and keep one determini
     account_observation_json: null,
     display_ordinal: 1,
   });
-  assert.deepEqual({ ...schemaVersion }, { user_version: 6 });
+  assert.deepEqual({ ...schemaVersion }, { user_version: 7 });
 
   const hydratedAgain = await createWorkbenchCoordinator({ databasePath, adapter })
     .openProject(projectDirectory);
@@ -740,6 +742,7 @@ test("version-five migration preserves every existing Session identity and displ
       firstTerminal.session.sessionId,
     );
   downgrade.exec(`
+    ${preSevenDowngradeStatements().join("\n")}
     DROP INDEX sessions_project_display_ordinal_unique;
     ALTER TABLE sessions DROP COLUMN display_ordinal;
     PRAGMA user_version = 5;
@@ -791,7 +794,7 @@ test("version-five migration preserves every existing Session identity and displ
   durable.close();
   assert.deepEqual(after, before, "migration preserved identities and names");
   assert.deepEqual(ordinals, [1, 2], "migration backfilled stable Project ordinals");
-  assert.deepEqual({ ...version }, { user_version: 6 });
+  assert.deepEqual({ ...version }, { user_version: 7 });
 });
 
 test("a version-six invalid display ordinal row fails open closed", async (t) => {

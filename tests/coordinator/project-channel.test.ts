@@ -145,6 +145,91 @@ test("opening an existing ledger adds indexes for update reads without a schema 
   assert.equal(reopenedSchemaVersion, schemaVersion);
 });
 
+test("schema v6 migrates in place to the Project-owned auto-iteration tables", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "uaw-auto-iteration-migration-"));
+  const projectDirectory = join(root, "project");
+  const databasePath = join(root, "ledger.sqlite");
+  await mkdir(projectDirectory);
+  t.after(async () => rm(root, { recursive: true, force: true }));
+
+  const initial = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingAdapter(),
+  }).openProject(projectDirectory);
+  await initial.close();
+
+  const versionSix = new DatabaseSync(databasePath);
+  versionSix.exec(`
+    PRAGMA foreign_keys = OFF;
+    DROP INDEX IF EXISTS updates_command_kind_cursor;
+    DROP INDEX IF EXISTS updates_project_session_kind;
+    DROP TABLE auto_iteration_review_decisions;
+    DROP TABLE auto_iteration_receipts;
+    DROP TABLE auto_iteration_inbox;
+    DROP TABLE auto_iteration_outbox;
+    DROP TABLE auto_iteration_requests;
+    DROP TABLE auto_iteration_handoffs;
+    DROP TABLE auto_iteration_context_observations;
+    DROP TABLE auto_iteration_quota_observations;
+    DROP TABLE auto_iteration_artifacts;
+    DROP TABLE auto_iteration_attempts;
+    DROP TABLE auto_iteration_work_orders;
+    DROP TABLE auto_iteration_tenures;
+    DROP TABLE auto_iteration_role_slots;
+    ALTER TABLE updates RENAME TO updates_v7;
+    CREATE TABLE updates (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id TEXT NOT NULL REFERENCES projects(project_id),
+      command_id TEXT NOT NULL REFERENCES commands(command_id),
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      session_id TEXT,
+      data_json TEXT
+    ) STRICT;
+    INSERT INTO updates
+    SELECT * FROM updates_v7 WHERE command_id IS NOT NULL;
+    DROP TABLE updates_v7;
+    PRAGMA user_version = 6;
+  `);
+  versionSix.close();
+
+  const migrated = await createWorkbenchCoordinator({
+    databasePath,
+    adapter: new CompletingAdapter(),
+  }).openProject(projectDirectory);
+  assert.ok(migrated.autoIteration);
+  await migrated.close();
+
+  const reader = new DatabaseSync(databasePath, { readOnly: true });
+  const schemaVersion = Number(
+    (reader.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+  );
+  const tables = reader
+    .prepare(
+      `SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name LIKE 'auto_iteration_%'
+        ORDER BY name`,
+    )
+    .all() as unknown as Array<{ readonly name: string }>;
+  reader.close();
+  assert.equal(schemaVersion, 7);
+  assert.deepEqual(tables.map(({ name }) => name), [
+    "auto_iteration_artifacts",
+    "auto_iteration_attempts",
+    "auto_iteration_context_observations",
+    "auto_iteration_handoffs",
+    "auto_iteration_inbox",
+    "auto_iteration_outbox",
+    "auto_iteration_quota_observations",
+    "auto_iteration_receipts",
+    "auto_iteration_requests",
+    "auto_iteration_review_decisions",
+    "auto_iteration_role_slots",
+    "auto_iteration_tenures",
+    "auto_iteration_work_orders",
+  ]);
+});
+
 test("Session recency cursor stops at the last model reply", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "uaw-reply-recency-"));
   const projectDirectory = join(root, "project");
