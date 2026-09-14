@@ -98,7 +98,8 @@ Arguments go straight through to Electron, so a throwaway profile is one flag aw
 - **Which files a turn changed,** computed from the real diff.
 - **Failures have names.** Sixteen of them, each with what to check next.
 - **Model, effort and usage per session,** read from the vendor's own tool at run time, in that
-  vendor's own words — including token counts and reset times where the vendor reports them.
+  vendor's own words — including token counts and reset times where the vendor reports them. Model
+  lists for the API-key endpoints are built in.
 - **Durable local history.** Sessions, turns and outcomes in a SQLite ledger, one per project.
 - **A Windows-native shell.** Custom title bar, tray, light and dark acrylic themes, and a CRT skin.
 - **English and Simplified Chinese,** switchable at run time.

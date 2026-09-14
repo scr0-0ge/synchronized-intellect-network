@@ -227,9 +227,8 @@ export async function stageWorkbenchWindowsApplication(
   ].sort();
 
   // Not a Vite output -- checked into the repo, sourced from workspaceDirectory
-  // rather than buildDirectory -- but the packaged tray and window icon
-  // resolve it at the same relative position (dist/main/../../assets/brand)
-  // that this staging root mirrors, so it has to ship alongside the build.
+  // rather than buildDirectory -- and copied to assets/brand at the staging
+  // root so app.getAppPath() resolves it in both the repository and app.asar.
   let brandAssetFiles: string[];
   const brandAssetsDirectory = join(workspaceDirectory, "assets", "brand");
   try {
