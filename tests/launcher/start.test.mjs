@@ -34,6 +34,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import {
+  captureDescendantTree,
+  sweepDescendantSurvivors,
+} from '../e2e/f72-close-to-tray/descendant-sweep.ts';
+
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const launcherSource = path.join(repositoryRoot, 'start.bat');
 const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
@@ -53,6 +58,7 @@ const nodeArchiveBytes = new Map();
    the elapsed time, so the two can never be confused again. */
 const LAUNCHER_TIMEOUT_MS = 120_000;
 const PRODUCTION_START_TIMEOUT_MS = 90_000;
+const PROCESS_TREE_EXIT_TIMEOUT_MS = 15_000;
 
 function batch(...lines) {
   return [...lines, ''].join('\r\n');
@@ -390,14 +396,24 @@ async function observeProductionStart(t) {
       );
     }
   }
-  t.after(() =>
-    fs.rmSync(scratch, {
-      force: true,
-      recursive: true,
-      maxRetries: 20,
-      retryDelay: 100,
-    }),
-  );
+  t.after(() => {
+    try {
+      fs.rmSync(scratch, {
+        force: true,
+        recursive: true,
+        maxRetries: 20,
+        retryDelay: 100,
+      });
+    } catch (error) {
+      const code =
+        typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'unknown';
+      if (code === 'EPERM') {
+        t.diagnostic(`launcher smoke cleanup could not remove path="${scratch}" code=${code}`);
+        return;
+      }
+      throw error;
+    }
+  });
 
   // start.bat only needs to locate pnpm before it sees the current, complete
   // node_modules. If it unexpectedly attempts an install, make that a loud
@@ -495,6 +511,7 @@ async function observeProductionStart(t) {
     assert.match(stdout, /\[window-placement\] surface=main-window;offscreen@/u);
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
+      const processTree = await captureDescendantTree(child.pid);
       const stopped = spawnSync(
         path.join(systemRoot, 'System32', 'taskkill.exe'),
         ['/pid', String(child.pid), '/t', '/f'],
@@ -502,6 +519,16 @@ async function observeProductionStart(t) {
       );
       assert.equal(stopped.status, 0, `${stopped.stdout}\n${stopped.stderr}`);
       await closeSignal;
+      const sweep = await sweepDescendantSurvivors(processTree, PROCESS_TREE_EXIT_TIMEOUT_MS);
+      t.diagnostic(
+        `launcher smoke process-tree exit: elapsed=${String(sweep.sweepMilliseconds)}ms ` +
+          `limit=${String(PROCESS_TREE_EXIT_TIMEOUT_MS)}ms captured=${String(sweep.preQuitDescendantCount)} ` +
+          `remaining=${
+            sweep.survivorsAfterQuit.length === 0
+              ? 'none'
+              : sweep.survivorsAfterQuit.map(({ pid }) => pid).join(',')
+          }`,
+      );
     }
   }
 
