@@ -67,6 +67,13 @@ const englishCopy = {
     endpointOptionsLabel: "Endpoint options",
     selectableNote:
       "Only endpoints with a Catalog ready status can be selected.",
+    /* w283: the bootstrap Home project (`bootstrap-runtime-adapter.ts`)
+       never inspects any endpoint by design, so `selectableNote` above would
+       promise a catalog read that never comes. `projectRunsNoAgentSessions`
+       in `composer.tsx` detects that uniform not-inspected shape and swaps
+       in this sentence instead. */
+    noSessionsHereNote:
+      "This Project doesn't run Agent Sessions, so no endpoint here can be selected.",
     workIntensityOptionsLabel: "Work Intensity options",
     defaultRow: "Default",
     noIntensitySelected: "No Work Intensity selected",
@@ -153,6 +160,8 @@ const englishCopy = {
       "Loading the current catalog for this Session’s fixed provider…",
     endpointsReadOnOpen:
       "Endpoints are read when you open the picker. Nothing runs before that.",
+    bootstrapProjectUnavailable:
+      "This Project doesn't run Agent Sessions. Choose Create Project… above and pick a directory to start one.",
     nextTurnModesFixed:
       "Model and Work Intensity apply to the next turn. Provider, Exec and Access stay fixed.",
     selectionsStayLocal: "Selections stay local until the Session starts.",
@@ -343,6 +352,7 @@ const simplifiedChineseCopy = {
       "此处显示的模型名称，是渲染器边界当前可用的公开目录标签。",
     endpointOptionsLabel: "端点选项",
     selectableNote: "只能选择状态为“目录就绪”的端点。",
+    noSessionsHereNote: "此项目不运行智能体会话，因此这里没有可选的端点。",
     workIntensityOptionsLabel: "工作强度选项",
     defaultRow: "默认",
     noIntensitySelected: "未选择工作强度",
@@ -409,6 +419,8 @@ const simplifiedChineseCopy = {
     suggestionRequiresEmptyDraft: "请先清空当前草稿，再选择追问建议。",
     loadingContinuationCatalog: "正在加载此会话固定提供方的当前目录…",
     endpointsReadOnOpen: "打开选择器时才会读取端点，在此之前不会运行任何内容。",
+    bootstrapProjectUnavailable:
+      "此项目不运行智能体会话。请点击上方“创建项目…”并选择一个目录来开始。",
     nextTurnModesFixed:
       "模型和工作强度用于下一个回合。提供方、执行模式和访问模式保持不变。",
     selectionsStayLocal: "会话启动前，所选内容只保留在本地。",

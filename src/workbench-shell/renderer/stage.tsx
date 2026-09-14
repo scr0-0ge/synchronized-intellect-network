@@ -34,6 +34,7 @@ import {
   BlockedComposer,
   UnavailableRuntimeComposer,
   DirectInputComposer,
+  projectRunsNoAgentSessions,
 } from "./composer.tsx";
 import type { WorkbenchComposerHistoryNavigator } from "./composer-history.ts";
 import { commonCopy } from "./copy/common-copy.ts";
@@ -488,9 +489,15 @@ const EmptyProjectState: Component<{
       <span class="state-glyph" aria-hidden="true">
         ◇
       </span>
-      <h1>{stageCopy.emptyProjectTitle}</h1>
+      <h1>
+        {projectRunsNoAgentSessions(props.profile)
+          ? stageCopy.bootstrapProjectTitle
+          : stageCopy.emptyProjectTitle}
+      </h1>
       <p>
-        {stageCopy.emptyProjectBody}
+        {projectRunsNoAgentSessions(props.profile)
+          ? stageCopy.bootstrapProjectBody
+          : stageCopy.emptyProjectBody}
       </p>
       <DirectInputComposer
         view={props.view}

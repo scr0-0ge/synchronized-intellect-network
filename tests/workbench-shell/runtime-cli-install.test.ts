@@ -237,6 +237,12 @@ test("every install sentence exists in both locales and the mirror hint names a 
     for (const step of ["node-not-located", "npm-not-located", "not-discovered"] as const) {
       assert.ok(runtimeInstallStepCopy(step).length > 0);
     }
+    // The packaged zip has no start.bat beside the executable, so the
+    // node-not-located sentence must not send the user looking for one. What
+    // is true in every mode: the product tried to prepare its own Node and
+    // failed, and Node itself can be installed from nodejs.org.
+    assert.match(runtimeInstallStepCopy("node-not-located"), /nodejs\.org/u);
+    assert.doesNotMatch(runtimeInstallStepCopy("node-not-located"), /start\.bat/u);
   }
   setLocale("en");
 });

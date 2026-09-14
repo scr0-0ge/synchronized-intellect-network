@@ -75,7 +75,7 @@ const englishCopy = {
     unavailableSentence: "The installer could not be reached. Try again.",
     stepSentences: {
       "node-not-located":
-        "No node.exe was found. Start the Workbench through start.bat, which provides one.",
+        "No node.exe was found and downloading the Workbench's own Node did not succeed (the reason is below). Install Node 22.5 or newer from https://nodejs.org, then try again.",
       "npm-not-located": "The node.exe that was found has no npm beside it.",
       "install-failed":
         "npm could not download or install the package. On a mainland-China network, set NPM_CONFIG_REGISTRY to a mirror such as https://registry.npmmirror.com before starting the Workbench, then try again.",
@@ -136,7 +136,7 @@ const simplifiedChineseCopy = {
     unavailableSentence: "无法联系安装器。请重试。",
     stepSentences: {
       "node-not-located":
-        "未找到 node.exe。请通过 start.bat 启动 Workbench，它会提供一份。",
+        "未找到 node.exe，自动下载 Workbench 自己的 Node 也没成功（原因见下方）。请从 https://nodejs.org 安装 Node 22.5 或更新版本后重试。",
       "npm-not-located": "找到的 node.exe 旁边没有 npm。",
       "install-failed":
         "npm 无法下载或安装该包。中国大陆网络可在启动 Workbench 前把 NPM_CONFIG_REGISTRY 设为镜像，例如 https://registry.npmmirror.com，然后重试。",

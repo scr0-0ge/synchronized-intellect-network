@@ -12,7 +12,10 @@ import type {
   WorkbenchHostedProjectView,
 } from "../../src/workbench-shell/contract.ts";
 import { publicRuntimeEndpointDiscovery } from "../../src/workbench-shell/contract.ts";
-import { initialRendererState } from "../../src/workbench-shell/renderer/view-model.ts";
+import {
+  initialRendererState,
+  type WorkbenchDirectProfileState,
+} from "../../src/workbench-shell/renderer/view-model.ts";
 import { createViteSsrTestServer } from "../helpers/vite-server.ts";
 import {
   emptyVisualFixture,
@@ -582,6 +585,102 @@ test("screens 01-03, 05 and 06 retain the remaining exact static fidelity contra
       assert.match(styles, /\.status-failed\s+\.v\s*\{\s*color:\s*var\(--err\);\s*\}/u);
       assert.match(styles, /\.status-recovery\s+\.v\s*\{\s*color:\s*var\(--warn\);\s*\}/u);
     });
+  });
+});
+
+/*
+ * w283: the packaged bootstrap Home project (`bootstrap-runtime-adapter.ts`)
+ * registers itself the same way an ordinary empty Project does, but its
+ * decorated adapter refuses every inspect/start/resume by design. Before
+ * this fix, the empty-Project screen, the composer's status note and the
+ * endpoint picker's empty state all kept the copy written for a Project that
+ * *can* start a Session, even once a completed catalog load proved this one
+ * never will. `projectRunsNoAgentSessions` (composer.tsx) recognizes that
+ * proof from the uniform not-inspected catalog shape
+ * `discoverRuntimeEndpointComposition` never produces on its own
+ * (`runtime-endpoint-composition.test.ts`'s "a blocked project reports both
+ * fixed endpoints as not inspected" pins the exact shape), without a new
+ * field on the wire.
+ */
+const bootstrapBlockedProfile: WorkbenchDirectProfileState = Object.freeze({
+  ...initialRendererState.profile,
+  phase: "unavailable",
+  result: Object.freeze({
+    ok: false,
+    endpointDiscovery: publicRuntimeEndpointDiscovery([
+      { endpointId: "codex-desktop", category: "not-inspected" },
+      { endpointId: "claude-code-desktop", category: "not-inspected" },
+    ]),
+    error: Object.freeze({
+      category: "profile-unavailable",
+      message:
+        "Codex Session Profile options are unavailable. Keep your draft and try again.",
+    }),
+  }),
+  feedback:
+    "Codex Session Profile options are unavailable. Keep your draft and try again.",
+});
+
+test("the packaged bootstrap Home Project shows honest copy once its uniform not-inspected catalog resolves (w283)", async () => {
+  await withStaticFidelityModule(async (module) => {
+    const emptyHtml = clean(renderToString(() =>
+      module.EmptyProjectState({
+        ...directComposerProps(emptyVisualFixture, undefined),
+        profile: bootstrapBlockedProfile,
+        onProviders: noOp,
+      }),
+    ));
+    assert.match(
+      plainText(emptyHtml),
+      /This Project doesn't run Agent Sessions/u,
+    );
+    assert.match(
+      plainText(emptyHtml),
+      /Choose Create Project… above, then pick a directory to start an Agent Session\./u,
+    );
+    assert.doesNotMatch(
+      plainText(emptyHtml),
+      /Whatever you send first starts a new Agent Session/u,
+    );
+
+    const composer = clean(renderToString(() =>
+      module.DirectInputComposer({
+        ...directComposerProps(emptyVisualFixture, undefined),
+        profile: bootstrapBlockedProfile,
+        onProviders: noOp,
+      }),
+    ));
+    assert.match(
+      plainText(composer),
+      /This Project doesn't run Agent Sessions\. Choose Create Project… above and pick a directory to start one\./u,
+    );
+    assert.doesNotMatch(plainText(composer), /Keep your draft and try again\./u);
+
+    const popover = clean(renderToString(() =>
+      module.ProfilePopover({
+        kind: "endpoint",
+        profile: bootstrapBlockedProfile,
+        endpoints: [],
+        selectedEndpoint: undefined,
+        models: [],
+        selectedModel: undefined,
+        selectedEndpointKey: null,
+        selectedModelKey: null,
+        selectedWorkIntensityKey: null,
+        onEndpoint: noOp,
+        onModel: noOp,
+        onWorkIntensity: noOp,
+        onClose: noOp,
+      }),
+    ));
+    assert.match(
+      plainText(popover),
+      /This Project doesn't run Agent Sessions, so no endpoint here can be selected\./u,
+    );
+    assert.doesNotMatch(
+      plainText(popover),
+      /Only endpoints with a Catalog ready status can be selected\./u,
+    );
   });
 });
 

@@ -861,6 +861,9 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
               });
               return;
             }
+            if (isAuthenticationFailureResult(message)) {
+              throw new RuntimeAdapterError("authentication-required");
+            }
             throw new RuntimeAdapterError("turn-failed");
           }
           let context: RuntimeContextUsage | undefined;
@@ -1176,6 +1179,28 @@ function initialGlmQuotaRefusalText(message: Record<string, unknown>, endpointUr
   return isPlainRecord(block) && block.type === "text" && typeof block.text === "string" &&
     /^API Error: Request rejected \(429\) · \[1310\]\[[^\]\r\n]+\]\[[^\]\r\n]+\]$/u.test(block.text)
     ? block.text : undefined;
+}
+
+/**
+ * The upstream-401 result shape (captured live 2026-09-14, w280: real Claude
+ * CLI 2.1.270 against a fake HTTP 401, same production transport). The CLI
+ * retries internally, then settles on `is_error: true`, `terminal_reason:
+ * "api_error"`, `api_error_status: 401`, `result: "Not logged in · Please run
+ * /login"`. The status code is the tolerant signal -- it survives a CLI text
+ * change across versions; the result-text match is only a fallback for a
+ * build that omits the status field. Without either, the generic
+ * `turn-failed` below stays unchanged -- this never widens what already
+ * fails closed.
+ */
+function isAuthenticationFailureResult(message: Record<string, unknown>): boolean {
+  if (
+    message.subtype !== "success" ||
+    message.is_error !== true ||
+    message.terminal_reason !== "api_error"
+  ) return false;
+  if (message.api_error_status === 401) return true;
+  return typeof message.result === "string" &&
+    /not logged in|please run \/login|authentication_failed/iu.test(message.result);
 }
 
 /** GLM's 429 text names no timezone; only a literal UTC reading is parsed, never guessed. */
