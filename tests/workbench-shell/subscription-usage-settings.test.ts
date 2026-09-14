@@ -28,7 +28,10 @@ test("Settings identifies the usage template even before any provider turn", asy
     }));
     assert.match(html, /Usage &amp; resets/);
     assert.match(html, /Not yet observed/);
-    assert.match(html, /This provider's CLI does not report usage/);
+    // w257: Codex now reads the same generic sink as every other row (real
+    // data arrives once a native Codex session actually starts), so with no
+    // provider ever observed it shows "Not yet observed" like the rest.
+    assert.doesNotMatch(html, /This provider's CLI does not report usage/);
     assert.doesNotMatch(html, /0%/);
   } finally { await server.close(); }
 });
@@ -81,8 +84,10 @@ test("all four real Claude captures plus the real GLM 429 parse render as five r
         for (const time of [observation.observedAt, observation.five_hour.resetsAt * 1000, observation.seven_day.resetsAt * 1000]) {
           assert.ok(html.includes(date(time)), "rendered local human time equals the wire/reset or receipt time");
         }
-        // Codex never reports; Kimi/DeepSeek have not been observed in this render.
-        assert.match(html, language === "en" ? /This provider's CLI does not report usage/ : /此提供方的 CLI 不报告用量/);
+        // Codex/Kimi/DeepSeek have not been observed in this render (w257:
+        // Codex reads the same generic sink now, so it shares this fallback
+        // too instead of a hardcoded "does not report usage").
+        assert.doesNotMatch(html, language === "en" ? /This provider's CLI does not report usage/ : /此提供方的 CLI 不报告用量/);
         assert.match(html, language === "en" ? /Not yet observed/ : /尚未观测/);
         // GLM row: a reset time with no percentage, from the real 429-text parse.
         assert.match(html, language === "en" ? /Quota window: Resets at/ : /配额窗口：重置时间：/);

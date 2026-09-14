@@ -108,6 +108,12 @@ const englishCopy = {
     `Context window ${usedPercent} percent used`,
   contextUsedTokensCopy: (usedTokens: string): string =>
     `${usedTokens} tokens used`,
+  /** w257: the context popover's first, always-shown line. Compact notation matches the circle's own percentage. */
+  contextUsagePopoverSummaryCopy: (
+    used: string,
+    windowTokens: string,
+    usedPercent: number,
+  ): string => `Context: ${used} / ${windowTokens} · ${usedPercent}%`,
   recordedProfileSummaryCopy: (
     profile: RecordedProfileSummaryCopyInput,
   ): string =>
@@ -206,6 +212,11 @@ const simplifiedChineseCopy = {
     `上下文窗口已使用 ${usedPercent}%`,
   contextUsedTokensCopy: (usedTokens: string): string =>
     `已使用 ${usedTokens} 个 token`,
+  contextUsagePopoverSummaryCopy: (
+    used: string,
+    windowTokens: string,
+    usedPercent: number,
+  ): string => `上下文：${used} / ${windowTokens} · ${usedPercent}%`,
   recordedProfileSummaryCopy: (
     profile: RecordedProfileSummaryCopyInput,
   ): string =>
@@ -320,6 +331,18 @@ export function contextWindowAriaCopy(usedPercent: number): string {
 export function contextUsedTokensCopy(usedTokens: string): string {
   return currentLocaleCopy(copyLocaleDictionaries).contextUsedTokensCopy(
     usedTokens,
+  );
+}
+
+export function contextUsagePopoverSummaryCopy(
+  used: string,
+  windowTokens: string,
+  usedPercent: number,
+): string {
+  return currentLocaleCopy(copyLocaleDictionaries).contextUsagePopoverSummaryCopy(
+    used,
+    windowTokens,
+    usedPercent,
   );
 }
 

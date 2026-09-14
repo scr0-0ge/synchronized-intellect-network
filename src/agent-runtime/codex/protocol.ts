@@ -2,8 +2,10 @@ import { RuntimeAdapterError } from "../index.ts";
 import type {
   NormalizedRuntimeUserInputEvent, RuntimeFailureCategory, RuntimeUserInputChannel,
   RuntimeUserInputId, RuntimeUserInputQuestion, RuntimeUserInputRequest, RuntimeUserInputResponse,
+  RuntimeUsageObservation, RuntimeUsageWindow, RuntimeUsageWindowLabel,
 } from "../index.ts";
 import type { OfficialRuntimeTransport } from "./transport.ts";
+import { isVendorRecord } from "../vendor-wire.ts";
 import {
   ProviderRequestBudgetError,
   type ProviderOperationKind,
@@ -205,7 +207,7 @@ export class CodexJsonlPeer {
     this.messageObserver = messageObserver;
   }
 
-  async request(method: string, params: JsonObject = {}): Promise<unknown> {
+  async request(method: string, params: JsonObject | null = {}): Promise<unknown> {
     const id = this.nextRequestId++;
     if (this.providerRequestBudget !== undefined) {
       const operation = codexProviderOperation(method);
@@ -620,8 +622,76 @@ export class CodexJsonlPeer {
 
 function codexProviderOperation(method: string): ProviderOperationKind | undefined {
   if (method === "initialize") return "codex-initialize";
-  if (method === "account/read") return "codex-account-read";
+  // Same budget bucket as `account/read`: both are cheap, zero-inference
+  // account-scoped reads (w257 — the weekly rate-limit snapshot).
+  if (method === "account/read" || method === "account/rateLimits/read") {
+    return "codex-account-read";
+  }
   if (method === "model/list") return "codex-model-list-page";
+  return undefined;
+}
+
+/**
+ * `account/rateLimits/read` -> `GetAccountRateLimitsResponse.rateLimits`
+ * (live-verified against real codex.exe 0.153.4, w257): `primary`/`secondary`
+ * are the two rate-limit windows the backend tracks for the `codex` limit
+ * bucket, distinguished only by `windowDurationMins` -- a Pro-family plan
+ * reported here carries a populated `primary` (10080 min = 7 days) and a
+ * `null` secondary, matching the owner's "no 5-hour limit, weekly only"
+ * account. Any other duration is dropped rather than mislabeled; this is
+ * optional telemetry; a malformed shape degrades to `undefined`, never a
+ * thrown error.
+ */
+export function readCodexRateLimitObservation(
+  value: unknown,
+  endpointKey: string,
+): RuntimeUsageObservation | undefined {
+  if (!isVendorRecord(value, ["rateLimits"])) return undefined;
+  const snapshot = value.rateLimits;
+  if (!isVendorRecord(snapshot)) return undefined;
+  const windows: RuntimeUsageWindow[] = [];
+  for (const key of ["primary", "secondary"] as const) {
+    const window = readCodexRateLimitWindow(snapshot[key]);
+    if (window !== undefined) windows.push(window);
+  }
+  if (windows.length === 0) return undefined;
+  return Object.freeze({
+    endpointKey,
+    windows: Object.freeze(windows),
+    observedAt: Date.now(),
+    source: "rate-limit-event",
+  });
+}
+
+function readCodexRateLimitWindow(value: unknown): RuntimeUsageWindow | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (!isVendorRecord(value, ["usedPercent"])) return undefined;
+  const usedPercent = value.usedPercent;
+  if (
+    typeof usedPercent !== "number" ||
+    !Number.isFinite(usedPercent) ||
+    usedPercent < 0 ||
+    usedPercent > 100
+  ) {
+    return undefined;
+  }
+  const label = codexRateLimitWindowLabel(value.windowDurationMins);
+  if (label === undefined) return undefined;
+  const resetsAt = value.resetsAt;
+  const resetsAtMs =
+    typeof resetsAt === "number" && Number.isSafeInteger(resetsAt) && resetsAt > 0
+      ? resetsAt * 1000
+      : undefined;
+  return Object.freeze({
+    label,
+    utilization: usedPercent / 100,
+    ...(resetsAtMs === undefined ? {} : { resetsAt: resetsAtMs }),
+  });
+}
+
+function codexRateLimitWindowLabel(value: unknown): RuntimeUsageWindowLabel | undefined {
+  if (value === 300) return "five-hour";
+  if (value === 10_080) return "seven-day";
   return undefined;
 }
 

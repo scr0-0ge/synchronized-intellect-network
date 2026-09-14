@@ -44,6 +44,28 @@ test("missing non-init session echoes do not invalidate the captured turn", asyn
   assert.equal(replay.events.at(-1)?.kind, "turn-completed");
 });
 
+test("real Claude 2.1.270 pre-init session_state_changed notice does not kill the turn", async () => {
+  // Captured live on 2026-09-14: CLI 2.1.270 emits this state notice BEFORE
+  // the init frame (2.1.267 put init first). The notice carries no turn
+  // content; init remains the frame that establishes session identity.
+  const replay = await replayCapture({ edit: lines => {
+    const initIndex = lines.findIndex(line => {
+      const frame = JSON.parse(line);
+      return frame.type === "system" && frame.subtype === "init";
+    });
+    const notice = JSON.stringify({
+      type: "system",
+      subtype: "session_state_changed",
+      state: "running",
+      uuid: "w265-pre-init-notice-uuid",
+      session_id: JSON.parse(lines[initIndex]!).session_id,
+    });
+    return [...lines.slice(0, initIndex), notice, ...lines.slice(initIndex)];
+  } });
+  assert.equal(replay.events.at(-1)?.kind, "turn-completed");
+  assert.equal(replay.events.filter(event => event.kind === "agent-message").length, 1);
+});
+
 test("a different session id fails visibly with the frame and both identities in the private log", async t => {
   const summaries: string[] = [];
   t.mock.method(process.stderr, "write", (chunk: string) => { summaries.push(String(chunk)); return true; });

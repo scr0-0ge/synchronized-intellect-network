@@ -202,6 +202,29 @@ test("vendor Claude usage: additive key is dropped with answer intact", async ()
   noExtras(observed);
 });
 
+// w257: the context circle needs a window, not just a used-token count. The
+// CLI's own `modelUsage[model].contextWindow` is trustworthy exactly when
+// `model` matches the identity this session already validated on the wire's
+// `system`/`init` frame -- a native/first-party session never lies about
+// that key, unlike a static-catalog endpoint's CLI (see the GLM fabrication
+// case in claude-glm-endpoint-session.test.ts).
+test("vendor Claude usage: a modelUsage entry keyed by the validated model identity becomes the context window", async () => {
+  const observed = await claude({ mutate: frames => {
+    frames.at(-1)!.modelUsage = {
+      "opus-alias": { contextWindow: 200_000, canonicalModel: "opus-alias", future_vendor_field: privateExtra },
+    };
+  } });
+  assert.deepEqual(observed.events.at(-1), { kind: "turn-completed", status: "completed", context: { basis: "active-context", usedTokens: 65, windowTokens: 200_000 } });
+  noExtras(observed);
+});
+
+test("vendor Claude usage: a modelUsage entry keyed by a different model is dropped, not misattributed", async () => {
+  const observed = await claude({ mutate: frames => {
+    frames.at(-1)!.modelUsage = { "claude-opus-5[1m]": { contextWindow: 1_000_000 } };
+  } });
+  assert.deepEqual(observed.events.at(-1), { kind: "turn-completed", status: "completed", context: { basis: "turn-usage", usedTokens: 65, windowTokens: null } });
+});
+
 test("vendor Claude usage: missing or invalid counts discard the whole optional projection", async () => {
   for (const key of Object.keys(claudeUsage())) for (const missing of [true, false]) {
     const observed = await claude({ mutate: frames => { if (missing) delete frames.at(-1)!.usage[key]; else frames.at(-1)!.usage[key] = -1; } });

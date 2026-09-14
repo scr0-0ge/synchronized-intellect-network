@@ -160,11 +160,16 @@ export function productionCodexCatalogObserver(
 export function createProductionCodexAdapter(
   providerRequestBudget?: ProviderRequestBudget,
   createTransport?: OfficialRuntimeTransportFactory,
+  /** Provider-agnostic usage sink (w234); tagged with endpointKey "codex". */
+  observeUsage?: RuntimeUsageObserver,
 ): CodexAdapter {
   return new CodexAdapter(
     createTransport,
     providerRequestBudget,
     productionCodexCatalogObserver,
+    undefined,
+    observeUsage,
+    "codex",
   );
 }
 
@@ -358,6 +363,7 @@ export function createProductionKimiPlatformRuntimeAdapter(options: {
   readonly codexHomeDirectory?: string;
   /** Live store-backed key resolver; `undefined` result falls back to env. */
   readonly resolveKimiPlatformApiKey?: () => string | undefined;
+  readonly observeUsage?: RuntimeUsageObserver;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   return new CodexAdapter(
@@ -372,6 +378,8 @@ export function createProductionKimiPlatformRuntimeAdapter(options: {
         ? {}
         : { resolveApiKey: options.resolveKimiPlatformApiKey }),
     }),
+    options.observeUsage,
+    "kimi-platform",
   );
 }
 
@@ -393,6 +401,7 @@ export function createProductionClaudeApiRuntimeAdapter(options: {
   readonly resolveClaudeApiKey?: () => string | undefined;
   /** Live preference-backed base URL resolver (w245 Settings field). */
   readonly resolveClaudeApiBaseUrl?: () => string | undefined;
+  readonly observeUsage?: RuntimeUsageObserver;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   return new ClaudeAdapter(
@@ -411,6 +420,9 @@ export function createProductionClaudeApiRuntimeAdapter(options: {
         ? {}
         : { resolveBaseUrl: options.resolveClaudeApiBaseUrl }),
     }),
+    undefined,
+    options.observeUsage,
+    "claude-api",
   );
 }
 
@@ -432,6 +444,7 @@ export function createProductionCodexApiRuntimeAdapter(options: {
   readonly resolveCodexApiKey?: () => string | undefined;
   /** Live preference-backed base URL resolver (w223 Settings field). */
   readonly resolveCodexApiBaseUrl?: () => string | undefined | Promise<string | undefined>;
+  readonly observeUsage?: RuntimeUsageObserver;
 }): ResumableAgentRuntimeAdapter {
   const environment = options.environment ?? process.env;
   return new CodexAdapter(
@@ -448,6 +461,8 @@ export function createProductionCodexApiRuntimeAdapter(options: {
         ? {}
         : { resolveBaseUrl: options.resolveCodexApiBaseUrl }),
     }),
+    options.observeUsage,
+    "codex-api",
   );
 }
 
@@ -567,7 +582,11 @@ export async function createProductionRuntimeEndpointAdapter(options: {
 }): Promise<ResumableAgentRuntimeAdapter> {
   const codexAdapter =
     options.codexAdapter ??
-    createProductionCodexAdapter(options.providerRequestBudget);
+    createProductionCodexAdapter(
+      options.providerRequestBudget,
+      undefined,
+      options.observeUsage,
+    );
   const claudeAdapter =
     options.claudeAdapter ??
     new ClaudeAdapter(
@@ -641,6 +660,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.kimiPlatformEnvironment,
       codexHomeDirectory: options.kimiPlatformCodexHomeDirectory,
       resolveKimiPlatformApiKey: options.resolveKimiPlatformApiKey,
+      observeUsage: options.observeUsage,
     });
   const claudeApiAdapter =
     options.claudeApiAdapter ??
@@ -651,6 +671,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       environment: options.claudeApiEnvironment,
       resolveClaudeApiKey: options.resolveClaudeApiKey,
       resolveClaudeApiBaseUrl: options.resolveClaudeApiBaseUrl,
+      observeUsage: options.observeUsage,
     });
   const codexApiAdapter =
     options.codexApiAdapter ??
@@ -660,6 +681,7 @@ export async function createProductionRuntimeEndpointAdapter(options: {
       codexHomeDirectory: options.codexApiCodexHomeDirectory,
       resolveCodexApiKey: options.resolveCodexApiKey,
       resolveCodexApiBaseUrl: options.resolveCodexApiBaseUrl,
+      observeUsage: options.observeUsage,
     });
   const activeCompositions = new Map<
     string,

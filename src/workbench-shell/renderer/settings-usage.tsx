@@ -9,8 +9,12 @@ export type UsageEndpointRowKey = "codex" | "claude" | "glm" | "deepseek" | "kim
 
 const ROW_ORDER: readonly UsageEndpointRowKey[] = ["codex", "claude", "glm", "deepseek", "kimi"];
 
-/** Providers whose CLI never reports usage. Distinct from "not yet observed". */
-const UNREPORTED_ROWS: ReadonlySet<UsageEndpointRowKey> = new Set(["codex"]);
+/**
+ * Providers whose CLI never reports usage. Distinct from "not yet observed".
+ * Codex left this set in w257: `account/rateLimits/read` (live-verified
+ * against real codex.exe 0.153.4) does report a weekly rate-limit window.
+ */
+const UNREPORTED_ROWS: ReadonlySet<UsageEndpointRowKey> = new Set<UsageEndpointRowKey>([]);
 
 /** Live-mounted card: Claude's row comes from the existing subscription-usage bridge channel; no new IPC. */
 export const SettingsUsage: Component<{

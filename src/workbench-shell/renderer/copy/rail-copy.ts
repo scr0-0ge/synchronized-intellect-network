@@ -28,6 +28,8 @@ const englishCopy = {
     collapseThisTitle: "Collapse this Project's Sessions",
     expandThisTitle: "Expand this Project's Sessions",
     switchProjectTitle: "Switch to this Project",
+    switchPendingTitle:
+      "A Project switch is already in progress. Wait for it to finish.",
     cachedProjectReadOnlyNote:
       "Cached view — read-only. Switch to this Project to select or rename a Session.",
     sessionsNotLoadedNote:
@@ -148,6 +150,7 @@ const simplifiedChineseCopy = {
     collapseThisTitle: "折叠此项目的智能体会话",
     expandThisTitle: "展开此项目的智能体会话",
     switchProjectTitle: "切换到此项目",
+    switchPendingTitle: "项目切换正在进行中，请等待其完成。",
     cachedProjectReadOnlyNote:
       "缓存视图——只读。切换到此项目后可选择或重命名会话。",
     sessionsNotLoadedNote:

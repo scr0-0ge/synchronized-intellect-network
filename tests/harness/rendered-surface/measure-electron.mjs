@@ -180,6 +180,7 @@ async function runDriver() {
       root: collected.root,
       mediaEnvironment: collected.mediaEnvironment,
       fallbackGround: collected.fallbackGround,
+      popover: collected.popover,
       grids: collected.grids,
       texts: collected.texts.map((text) => ({
         ...text,

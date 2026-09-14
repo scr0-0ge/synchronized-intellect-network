@@ -222,7 +222,7 @@ const PROJECT_SURFACES: readonly ProjectSurface[] = Object.freeze([
     ],
     targets: [
       { signature: "span.working", text: "Reading endpoint catalogs…" },
-      { signature: "p.control-note", text: "Loading Agent Runtime Session Profile options…" },
+      { signature: "span", text: "Each runtime is inspected in its own boundary." },
     ],
   },
   {
@@ -236,7 +236,7 @@ const PROJECT_SURFACES: readonly ProjectSurface[] = Object.freeze([
       },
     ],
     targets: [
-      { signature: "p.control-note.is-error", text: "Session Profile options are unavailable" },
+      { signature: "p.picker-note", text: "Only endpoints with a Catalog ready status can be selected." },
       { signature: "span.endpoint-status-label", text: "Inspection failed" },
     ],
   },
@@ -251,7 +251,7 @@ const PROJECT_SURFACES: readonly ProjectSurface[] = Object.freeze([
       },
     ],
     targets: [
-      { signature: "p.control-note", text: "Choose a model and Work Intensity." },
+      { signature: "p.picker-note", text: "Only endpoints with a Catalog ready status can be selected." },
       { signature: "div.picker-col-head", text: "Endpoint" },
     ],
   },
@@ -471,12 +471,12 @@ const FROZEN_BREADTH_INVENTORY: Readonly<Record<string, BreadthInventorySeal>> =
     "f123-model-picker-light": { count: 76, sha256: "8cbc106bc330dd4bdebe55d1eec4971493e341446df7d7cf57a599cc932721e8" },
     "f123-work-intensity-picker-dark": { count: 83, sha256: "95f625f8781b5cd16588b984a6d459519d62bd2f58db9c09695d6de62fd22c76" },
     "f123-work-intensity-picker-light": { count: 83, sha256: "c69e27e70520734a7f425e18857ceec8fbba094ae8252b97dfa9c031248003f4" },
-    "f123-profile-loading-dark": { count: 72, sha256: "a6627c09ba26d76eb933a6a552c82b84cd89ee1af380fe437495dd7d7aea4415" },
-    "f123-profile-loading-light": { count: 72, sha256: "b478bc341cbb956470c2cd240e51cb53fbf6757d9b704bc81b2547b1a7a633f3" },
-    "f123-profile-unavailable-dark": { count: 73, sha256: "e1d22d2cd6b09a0967762c88cbe4db51d7749f078fcb3e70f4729a89deb1e6cc" },
-    "f123-profile-unavailable-light": { count: 73, sha256: "3db290c44e50f04748f9ec176cb1a61fc02ac28fa46e97101c1dff4a9468fda0" },
-    "f123-profile-without-default-dark": { count: 74, sha256: "f732ce43a3624582e91513ccdd7da73f3a1729fa8ae4ac73de8ec4ab87d29d73" },
-    "f123-profile-without-default-light": { count: 74, sha256: "46ae5be52508a4b435e102e7009f0dad7105a7de88d3dc6419e96e57173a76ef" },
+    "f123-profile-loading-dark": { count: 71, sha256: "a7ee40e541b07ce38d5870a99320c3841c10195717a98d2eb6ca452567d124f9" },
+    "f123-profile-loading-light": { count: 71, sha256: "61a698ddd0dd67feb3033e1975149786a54c17deed5e9c915737ea3229012650" },
+    "f123-profile-unavailable-dark": { count: 72, sha256: "8fea3cb1ab83d9777ab98a286332c3b8b53361e255272ac4024a685e1a63d338" },
+    "f123-profile-unavailable-light": { count: 72, sha256: "ed81f54e74bc73f9112cdc661e66ce04c5edf2df0abc98de2a3ddf52d753dc52" },
+    "f123-profile-without-default-dark": { count: 73, sha256: "04a5afb277492b91fdaa71ec47c500bd8a9fd9ecd9b94352fbf1104e82c95625" },
+    "f123-profile-without-default-light": { count: 73, sha256: "2934df5b31f3f755fd95c85bab49d2ad75cb04226df4a1a37b36f20ab8c59db8" },
     /* main-resync census re-seal (worker 19): both lines of descent edited the
        runtime-not-located surface independently -- the lane's WO23 reworded the
        runtimeBoundary sentence ("never asks for a password, API key, or token"
@@ -658,6 +658,8 @@ for (const { definition, tone, request } of REQUESTS) {
       `${request.surfaceId}: renderer console`,
     );
 
+    if (definition.key === "endpoint-picker") assertOpaquePopoverSurface(measured);
+
     for (const target of definition.targets) {
       const text = findTarget(measured, target);
       assertComputedAndPainted(measured.surfaceId, target, text);
@@ -797,6 +799,37 @@ function inspectComputedAndPainted(
   assert.ok(verdict.painted !== null, `${where}: painted contrast reading is absent`);
   assert.ok(verdict.painted.ratio > 1, `${where}: painted glyph has no separation`);
   return verdict;
+}
+
+function assertOpaquePopoverSurface(surface: MeasuredSurface): void {
+  const popover = surface.popover;
+  assert.ok(popover !== null, `${surface.surfaceId}: the endpoint popover was not measured`);
+  assert.equal(
+    parseResolvedColor(popover.declaredBackgroundColor).alpha,
+    1,
+    `${surface.surfaceId}: popover background must be opaque`,
+  );
+  const texts = surface.texts.filter(
+    (text) =>
+      text.occludedBy === null &&
+      text.boxes.some(
+        (box) =>
+          box.left >= popover.rect.left &&
+          box.top >= popover.rect.top &&
+          box.left + box.width <= popover.rect.left + popover.rect.width &&
+          box.top + box.height <= popover.rect.top + popover.rect.height,
+      ),
+  );
+  assert.ok(texts.length >= 4, `${surface.surfaceId}: only ${texts.length} popover strings measured`);
+  for (const text of texts) {
+    const verdict = judgeText(text);
+    assert.equal(
+      verdict.passes,
+      true,
+      `${surface.surfaceId}: popover ${text.signature} ${JSON.stringify(text.text)} ` +
+        `measures ${verdict.ratio}:1 below ${verdict.threshold}:1`,
+    );
+  }
 }
 
 type BreadthAudit = Readonly<{

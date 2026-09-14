@@ -504,6 +504,17 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
         }
         if (message.type === "system") {
           if (message.subtype !== "init") {
+            // Claude CLI 2.1.270 announces its running state before the init
+            // frame (2.1.267 put init first). The notice is already a
+            // post-init droppable, carries no turn content, and cannot be
+            // identity-checked yet — init stays the frame that establishes
+            // the session identity.
+            if (
+              !sessionStarted &&
+              message.subtype === "session_state_changed"
+            ) {
+              continue;
+            }
             if (
               !sessionStarted ||
               !isSafeIdentity(message.subtype)
@@ -854,7 +865,11 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
           }
           let context: RuntimeContextUsage | undefined;
           try {
-            context = readResultContextUsage(message.usage);
+            context = readResultContextUsage(
+              message.usage,
+              message.modelUsage,
+              this.#expectedModel,
+            );
           } catch (error) {
             if (!(error instanceof RuntimeAdapterError) || error.category !== "protocol-invalid") {
               throw error;
@@ -1799,7 +1814,11 @@ function readSessionCapabilities(value: unknown): Set<string> {
   return capabilities;
 }
 
-function readResultContextUsage(value: unknown): RuntimeContextUsage | undefined {
+function readResultContextUsage(
+  value: unknown,
+  modelUsage: unknown,
+  expectedModel: string,
+): RuntimeContextUsage | undefined {
   if (value === undefined) return undefined;
   if (!isPlainRecord(value)) throw new RuntimeAdapterError("protocol-invalid");
   const requiredKeys = [
@@ -1826,7 +1845,52 @@ function readResultContextUsage(value: unknown): RuntimeContextUsage | undefined
   if (!Number.isSafeInteger(usedTokens)) {
     throw new RuntimeAdapterError("protocol-invalid");
   }
-  return Object.freeze({ basis: "turn-usage", usedTokens, windowTokens: null });
+  const windowTokens =
+    readVendorContextWindow(modelUsage, expectedModel, usedTokens) ??
+    parseAnnotatedContextWindow(expectedModel);
+  return windowTokens === undefined
+    ? Object.freeze({ basis: "turn-usage", usedTokens, windowTokens: null })
+    : Object.freeze({ basis: "active-context", usedTokens, windowTokens });
+}
+
+/**
+ * The CLI's own `modelUsage[model].contextWindow` is only trustworthy when
+ * `model` is the exact identity this session already validated on the wire's
+ * `system`/`init` frame (`#expectedModel`). A static-catalog endpoint's CLI
+ * still fabricates a claude-named `modelUsage` entry for a model it never
+ * requested (live spike, F176 GLM case): keying the lookup by the validated
+ * identity drops that entry instead of reporting a foreign model's window.
+ */
+function readVendorContextWindow(
+  modelUsage: unknown,
+  expectedModel: string,
+  usedTokens: number,
+): number | undefined {
+  if (!isVendorRecord(modelUsage)) return undefined;
+  const entry = modelUsage[expectedModel];
+  if (!isVendorRecord(entry, ["contextWindow"])) return undefined;
+  const window = entry.contextWindow;
+  return typeof window === "number" &&
+    Number.isSafeInteger(window) &&
+    window >= usedTokens
+    ? window
+    : undefined;
+}
+
+/**
+ * The static third-party catalogs (GLM, DeepSeek, some Kimi Code models)
+ * encode a known context window in the model id itself, e.g. `glm-5.3[1m]`
+ * or `k3-256k` -- our own catalog literal, not a vendor claim, so reading it
+ * back is not inventing data. A model with no such suffix (native aliases,
+ * `kimi-for-coding`, `k3`) stays unknown rather than guessed.
+ */
+function parseAnnotatedContextWindow(model: string): number | undefined {
+  const match = /[[-](\d+)(k|m)\]?$/iu.exec(model);
+  if (match === null) return undefined;
+  const amount = Number(match[1]);
+  if (!Number.isSafeInteger(amount) || amount <= 0) return undefined;
+  const window = amount * (match[2]!.toLowerCase() === "m" ? 1_000_000 : 1_000);
+  return Number.isSafeInteger(window) ? window : undefined;
 }
 
 function isSafeIdentity(value: unknown): value is string {

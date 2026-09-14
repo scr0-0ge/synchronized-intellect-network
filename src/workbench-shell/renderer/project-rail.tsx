@@ -641,13 +641,15 @@ export const ProjectRail: Component<{
             const switchTitle = () =>
               project.availability !== "available"
                 ? railCopy.collapsedUnavailable
-                : props.draftBlocked
-                  ? railCopy.clearDraftBeforeSwitch
-                  : props.actionBlocked
-                    ? railCopy.pendingActionBeforeSwitch
-                    : commandsLoaded()
-                      ? railCopy.switchProjectTitle
-                      : railCopy.collapsedAvailable;
+                : props.projectSwitch.phase === "pending"
+                  ? railCopy.switchPendingTitle
+                  : props.draftBlocked
+                    ? railCopy.clearDraftBeforeSwitch
+                    : props.actionBlocked
+                      ? railCopy.pendingActionBeforeSwitch
+                      : commandsLoaded()
+                        ? railCopy.switchProjectTitle
+                        : railCopy.collapsedAvailable;
             return (
               <section
                 class="proj"
