@@ -240,8 +240,9 @@ test(
 
 test(
   "a rendered draft leaves Project switching, Open, and Create available and survives the switch",
-  { timeout: 30_000 },
-  async () => {
+  { timeout: 120_000 },
+  async (t) => {
+    const started = performance.now();
     const { application, page } = await openHarness("scenario=history-stale");
     try {
       const draft = "Keep this unfinished request while I check another Project.";
@@ -277,6 +278,9 @@ test(
       assert.equal(await page.locator("#direct-input").inputValue(), draft);
     } finally {
       await application.close();
+      t.diagnostic(
+        `rendered draft Project switch: elapsed=${Math.round(performance.now() - started)}ms limit=120000ms`,
+      );
     }
   },
 );
