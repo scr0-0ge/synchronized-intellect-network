@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import type { Interface as ReadLineInterface } from "node:readline";
 
 import { RuntimeAdapterError } from "../index.ts";
-import type { SessionProfile } from "../index.ts";
+import type { RuntimeWorkbenchMcpServer, SessionProfile } from "../index.ts";
 import { configuredRuntimeExecutable } from "../configured-executable.ts";
 import { CLAUDE_RUNTIME_LOOKUP_SURFACE } from "../runtime-lookup-surface.ts";
 import {
@@ -220,7 +220,9 @@ export async function createOfficialClaudeSessionTransport(
     (request.permissionMode !== "bypassPermissions" &&
       request.permissionMode !== "manual") ||
     (request.resumeSessionIdentity !== undefined &&
-      !isSafeProcessArgument(request.resumeSessionIdentity))
+      !isSafeProcessArgument(request.resumeSessionIdentity)) ||
+    (request.workbenchMcp !== undefined &&
+      !isSafeWorkbenchMcpServer(request.workbenchMcp))
   ) {
     throw new RuntimeAdapterError("invalid-input");
   }
@@ -258,6 +260,25 @@ export async function createOfficialClaudeSessionTransport(
   return new ClaudeProcessTransport(launched.child, launched.flushStderr);
 }
 
+/**
+ * The `--mcp-config` payload. Without a binding it stays the empty server
+ * set (ordinary chat sessions are unchanged). With one, it carries exactly
+ * the `workbench` stdio server: the host-generated bootstrap spec. The user's
+ * other MCP servers are deliberately not merged — `--strict-mcp-config` makes
+ * this file the Session's whole MCP surface.
+ */
+export function claudeMcpConfigJson(
+  server: RuntimeWorkbenchMcpServer | undefined,
+): string {
+  if (server === undefined) return '{"mcpServers":{}}';
+  const entry: Record<string, unknown> = {
+    command: server.command,
+    args: [...server.args],
+  };
+  if (server.env !== undefined) entry.env = { ...server.env };
+  return JSON.stringify({ mcpServers: { workbench: entry } });
+}
+
 export function createClaudeSessionArguments(
   request: ClaudeSessionTransportRequest,
 ): readonly string[] {
@@ -278,7 +299,7 @@ export function createClaudeSessionArguments(
     ultracode ? '{"ultracode":true}' : '{"ultracode":false}',
     "--strict-mcp-config",
     "--mcp-config",
-    '{"mcpServers":{}}',
+    claudeMcpConfigJson(request.workbenchMcp),
     "--setting-sources=",
     "--permission-mode",
     request.permissionMode,
@@ -573,6 +594,26 @@ function isSafeProcessArgument(value: unknown): value is string {
     value.length <= 32_768 &&
     value.trim().length > 0 &&
     !value.includes("\0")
+  );
+}
+
+/** A binding the host issued becomes argv/env of the spawned CLI: same rules. */
+function isSafeWorkbenchMcpServer(
+  server: RuntimeWorkbenchMcpServer,
+): boolean {
+  if (!isSafeProcessArgument(server.command)) return false;
+  if (
+    !Array.isArray(server.args) ||
+    server.args.length === 0 ||
+    !server.args.every((argument) => isSafeProcessArgument(argument))
+  ) {
+    return false;
+  }
+  if (server.env === undefined) return true;
+  if (typeof server.env !== "object" || server.env === null) return false;
+  return Object.entries(server.env).every(
+    ([key, value]) =>
+      isSafeProcessArgument(key) && isSafeProcessArgument(value),
   );
 }
 

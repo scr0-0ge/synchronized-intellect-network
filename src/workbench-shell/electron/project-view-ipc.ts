@@ -19,6 +19,9 @@ import {
   WORKBENCH_REMOVE_SESSION_CHANNEL,
   WORKBENCH_SELECT_PROJECT_CHANNEL,
   WORKBENCH_SUBMIT_CHANNEL,
+  WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
+  WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
+  WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
   WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   publicInvalidProfileDefaultSelection,
   publicCreateProjectResult,
@@ -42,6 +45,10 @@ import {
   publicProjectSwitchUnavailable,
   publicUnavailableSubmission,
   type WorkbenchDirectInputRequest,
+  type WorkbenchAnnualReportJobRequest,
+  type WorkbenchAnnualReportProjectRequest,
+  type WorkbenchAnnualReportSnapshot,
+  type WorkbenchAnnualReportStartResult,
   type WorkbenchCreateProjectResult,
   type WorkbenchDirectSessionProfileDefaultRequest,
   type WorkbenchDirectSessionProfileDefaultResult,
@@ -85,6 +92,11 @@ import {
   sanitizeWorkbenchDirectSessionProfileDefaultResult,
   sanitizeWorkbenchDirectSessionProfileResult,
   sanitizeWorkbenchSubmissionResult,
+  reconstructWorkbenchAnnualReportJobRequest,
+  reconstructWorkbenchAnnualReportProjectRequest,
+  sanitizeWorkbenchAnnualReportOpenResult,
+  sanitizeWorkbenchAnnualReportSnapshot,
+  sanitizeWorkbenchAnnualReportStartResult,
   sanitizeWorkbenchHostedProjectResult,
   createWorkbenchProjectTransferEncoder,
   sanitizeWorkbenchInterruptResult,
@@ -144,6 +156,9 @@ export interface IpcMainBoundary {
       | typeof WORKBENCH_REMOVE_SESSION_CHANNEL
       | typeof WORKBENCH_SELECT_PROJECT_CHANNEL
       | typeof WORKBENCH_SUBMIT_CHANNEL
+      | typeof WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL
+      | typeof WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL
+      | typeof WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL
       | typeof WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
     listener: BoundaryListener,
   ): void;
@@ -164,6 +179,9 @@ export interface IpcMainBoundary {
       | typeof WORKBENCH_REMOVE_SESSION_CHANNEL
       | typeof WORKBENCH_SELECT_PROJECT_CHANNEL
       | typeof WORKBENCH_SUBMIT_CHANNEL
+      | typeof WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL
+      | typeof WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL
+      | typeof WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL
       | typeof WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   ): void;
 }
@@ -203,6 +221,15 @@ export interface ProjectViewSource extends Partial<WorkbenchUserInputBridge> {
   submitDirectInput(
     request: WorkbenchDirectInputRequest,
   ): Promise<WorkbenchSubmissionResult>;
+  startAnnualReportJob?(
+    request: WorkbenchAnnualReportJobRequest,
+  ): Promise<WorkbenchAnnualReportStartResult>;
+  readAnnualReportJob?(
+    request: WorkbenchAnnualReportProjectRequest,
+  ): Promise<WorkbenchAnnualReportSnapshot | null>;
+  resolveAnnualReportOutputDirectory?(
+    request: WorkbenchAnnualReportProjectRequest,
+  ): Promise<string | null>;
   interruptActiveTurn?(
     request: WorkbenchInterruptRequest,
   ): Promise<WorkbenchInterruptResult>;
@@ -240,6 +267,7 @@ export function installWorkbenchProjectViewIpc(options: {
   readonly source: ProjectViewSource | null;
   readonly directoryChooser?: ProjectDirectoryChooser;
   readonly createProjectController?: WorkbenchCreateProjectController;
+  readonly openPath?: (path: string) => Promise<string>;
 }): ProjectViewIpcBinding {
   let activeObservation: ObservationRecord | undefined;
   let disposed = false;
@@ -872,6 +900,62 @@ export function installWorkbenchProjectViewIpc(options: {
     }
   };
 
+  const startAnnualReportHandler: BoundaryListener = async (...values) => {
+    const sender = owningSender(values[0], options.window);
+    const request = reconstructWorkbenchAnnualReportJobRequest(values[1]);
+    if (values.length !== 2 || disposed || !actionOpen || sender === undefined ||
+        !request.ok || options.source?.startAnnualReportJob === undefined) {
+      return sanitizeWorkbenchAnnualReportStartResult(undefined);
+    }
+    return trackAction(
+      async () => sanitizeWorkbenchAnnualReportStartResult(
+        await options.source!.startAnnualReportJob!(request.request),
+      ),
+      sanitizeWorkbenchAnnualReportStartResult(undefined),
+    );
+  };
+
+  const readAnnualReportHandler: BoundaryListener = async (...values) => {
+    const sender = owningSender(values[0], options.window);
+    const request = reconstructWorkbenchAnnualReportProjectRequest(values[1]);
+    if (values.length !== 2 || disposed || !actionOpen || sender === undefined ||
+        !request.ok || options.source?.readAnnualReportJob === undefined) return null;
+    return trackAction(
+      async () => sanitizeWorkbenchAnnualReportSnapshot(
+        await options.source!.readAnnualReportJob!(request.request),
+      ),
+      null,
+    );
+  };
+
+  const openAnnualReportOutputHandler: BoundaryListener = async (...values) => {
+    const sender = owningSender(values[0], options.window);
+    const request = reconstructWorkbenchAnnualReportProjectRequest(values[1]);
+    if (values.length !== 2 || disposed || !actionOpen || sender === undefined ||
+        !request.ok || options.source?.resolveAnnualReportOutputDirectory === undefined ||
+        options.openPath === undefined) {
+      return sanitizeWorkbenchAnnualReportOpenResult(undefined);
+    }
+    const directory = await options.source.resolveAnnualReportOutputDirectory(request.request);
+    if (directory === null) {
+      return sanitizeWorkbenchAnnualReportOpenResult({
+        ok: false,
+        error: { category: "no-output", message: "No annual report output folder is available yet." },
+      });
+    }
+    try {
+      const error = await options.openPath(directory);
+      return error.length === 0
+        ? sanitizeWorkbenchAnnualReportOpenResult({ ok: true, status: "opened" })
+        : sanitizeWorkbenchAnnualReportOpenResult({
+            ok: false,
+            error: { category: "open-failed", message: "The annual report output folder could not be opened." },
+          });
+    } catch {
+      return sanitizeWorkbenchAnnualReportOpenResult(undefined);
+    }
+  };
+
   const reloadListener: BoundaryListener = () => endActiveObservation();
   const terminalLifecycleListener: BoundaryListener = () => {
     actionOpen = false;
@@ -906,6 +990,9 @@ export function installWorkbenchProjectViewIpc(options: {
   options.ipcMain.handle(WORKBENCH_REMOVE_SESSION_CHANNEL, removeSessionHandler);
   options.ipcMain.handle(WORKBENCH_SELECT_PROJECT_CHANNEL, selectProjectHandler);
   options.ipcMain.handle(WORKBENCH_SUBMIT_CHANNEL, submitHandler);
+  options.ipcMain.handle(WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL, startAnnualReportHandler);
+  options.ipcMain.handle(WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL, readAnnualReportHandler);
+  options.ipcMain.handle(WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL, openAnnualReportOutputHandler);
   options.ipcMain.handle(WORKBENCH_INTERRUPT_CHANNEL, interruptHandler);
   options.ipcMain.handle(WORKBENCH_READ_USER_INPUT_CHANNEL, readUserInputHandler);
   options.ipcMain.handle(WORKBENCH_RESPOND_USER_INPUT_CHANNEL, respondUserInputHandler);
@@ -947,6 +1034,9 @@ export function installWorkbenchProjectViewIpc(options: {
       options.ipcMain.removeHandler(WORKBENCH_REMOVE_SESSION_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_SELECT_PROJECT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_SUBMIT_CHANNEL);
+      options.ipcMain.removeHandler(WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL);
+      options.ipcMain.removeHandler(WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL);
+      options.ipcMain.removeHandler(WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_INTERRUPT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_READ_USER_INPUT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_RESPOND_USER_INPUT_CHANNEL);

@@ -93,6 +93,7 @@ import {
   selectedSessionSummaryCopy,
   draftPreservedCountCopy,
   profilePopoverTitleCopy,
+  annualReportPresetsCopy,
 } from "./copy/composer-copy.ts";
 import {
   profileNotRecordedSummaryCopy,
@@ -423,6 +424,7 @@ export const DirectInputComposer: Component<{
   readonly steerFeedback?: WorkbenchPresentationText | null;
   readonly onSteer?: () => void;
   readonly onSubmit: () => void;
+  readonly onStartAnnualReport?: () => void;
   /**
    * The family facades' persisted backend preferences (tickets 20/25). The
    * endpoint picker presents each family's two endpoints as one entry
@@ -437,6 +439,9 @@ export const DirectInputComposer: Component<{
 }> = (props) => {
   const [openPopover, setOpenPopover] =
     createSignal<OpenProfilePopover | null>(null);
+  const [slashMenuDismissed, setSlashMenuDismissed] = createSignal(false);
+  const [slashSelection, setSlashSelection] = createSignal(0);
+  const [slashHelp, setSlashHelp] = createSignal(false);
   const pending = () => props.composer.phase === "pending";
   const defaultSavePending = () =>
     props.profile.defaultPreference.phase === "pending";
@@ -581,6 +586,22 @@ export const DirectInputComposer: Component<{
   const submit = (): void => {
     if (continuationIssue() !== null) return;
     props.onSubmit();
+  };
+  const slashMenuVisible = () =>
+    props.composer.draft.startsWith("/") &&
+    !automaticContinuationPrefix.test(props.composer.draft) &&
+    !slashMenuDismissed();
+  const chooseSlashPreset = (index: number): void => {
+    if (index === 0) {
+      props.onDraft("");
+      setSlashMenuDismissed(true);
+      setSlashHelp(false);
+      props.onStartAnnualReport?.();
+      return;
+    }
+    props.onDraft(annualReportPresetsCopy.helpCommand);
+    setSlashHelp(true);
+    setSlashSelection(0);
   };
   const targetContext = () =>
     mode() === "continue" || activeTurn()
@@ -895,6 +916,36 @@ export const DirectInputComposer: Component<{
         </p>
       </Show>
 
+      <Show when={slashMenuVisible()}>
+        <div class="slash-preset-menu" role="listbox" aria-label={annualReportPresetsCopy.menuLabel}>
+          <Show when={slashHelp()}>
+            <strong class="slash-preset-heading">{annualReportPresetsCopy.helpHeading}</strong>
+          </Show>
+          <button
+            type="button"
+            role="option"
+            aria-selected={slashSelection() === 0}
+            classList={{ selected: slashSelection() === 0 }}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => chooseSlashPreset(0)}
+          >
+            <code>{annualReportPresetsCopy.annualReportCommand}</code>
+            <span>{annualReportPresetsCopy.annualReportDescription}</span>
+          </button>
+          <button
+            type="button"
+            role="option"
+            aria-selected={slashSelection() === 1}
+            classList={{ selected: slashSelection() === 1 }}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => chooseSlashPreset(1)}
+          >
+            <code>{annualReportPresetsCopy.helpCommand}</code>
+            <span>{annualReportPresetsCopy.helpDescription}</span>
+          </button>
+        </div>
+      </Show>
+
       <div
         class="input-shell"
         classList={{
@@ -920,7 +971,15 @@ export const DirectInputComposer: Component<{
             props.composer.phase === "error" || continuationIssue() !== null
           }
           onBlur={noteComposerBlur}
-          onInput={(event) => props.onDraft(event.currentTarget.value)}
+          onInput={(event) => {
+            const value = event.currentTarget.value;
+            props.onDraft(value);
+            setSlashMenuDismissed(false);
+            setSlashHelp(value === annualReportPresetsCopy.helpCommand);
+            if (value.startsWith("/") && props.profile.phase === "idle") {
+              props.onLoadProfile();
+            }
+          }}
           onDragOver={preventFileDropNavigation}
           onDrop={(event) => {
             preventFileDropNavigation(event);
@@ -943,6 +1002,24 @@ export const DirectInputComposer: Component<{
             if (next !== props.composer.draft) props.onDraft(next);
           }}
           onKeyDown={(event) => {
+            if (slashMenuVisible()) {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                setSlashSelection((current) => current === 0 ? 1 : 0);
+                return;
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setSlashMenuDismissed(true);
+                setSlashHelp(false);
+                return;
+              }
+              if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+                event.preventDefault();
+                chooseSlashPreset(slashSelection());
+                return;
+              }
+            }
             const historyDirection = composerHistoryDirection(event);
             if (historyDirection !== null) {
               const recalledDraft = props.onNavigateComposerHistory({

@@ -17,6 +17,7 @@ import type {
   RuntimeStart,
   RuntimeUsageObservation,
   RuntimeUsageObserver,
+  RuntimeWorkbenchMcpServer,
   SessionProfile,
 } from "./index.ts";
 import { RuntimeAdapterError } from "./index.ts";
@@ -36,7 +37,11 @@ import {
   reportCodexDiagnostic,
   toRuntimeError,
 } from "./codex/protocol.ts";
-import type { OfficialRuntimeTransportFactory } from "./codex/transport.ts";
+import type {
+  OfficialRuntimeLaunchContext,
+  OfficialRuntimeTransport,
+  OfficialRuntimeTransportFactory,
+} from "./codex/transport.ts";
 import type { ProviderRequestBudget } from "./provider-request-budget.ts";
 
 
@@ -279,7 +284,9 @@ export interface CodexEndpointContext {
 }
 
 export class CodexAdapter implements ResumableAgentRuntimeAdapter {
-  private readonly createTransport: OfficialRuntimeTransportFactory;
+  private readonly createTransport: (
+    launch?: OfficialRuntimeLaunchContext,
+  ) => Promise<OfficialRuntimeTransport>;
   private readonly providerRequestBudget: ProviderRequestBudget | undefined;
   private readonly onCatalogObservation: CodexCatalogObserver | undefined;
   readonly #endpointContext: CodexEndpointContext | undefined;
@@ -306,32 +313,53 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
     // one (kimi-platform, ticket 17), the default transport factory builds
     // the spawn environment through the codex endpoint environment factory
     // (cleanse, then inject CODEX_HOME + the endpoint key) and runs the
-    // endpoint's filesystem preparation before every spawn.
+    // endpoint's filesystem preparation before every spawn. Custom factories
+    // keep their historical zero-argument shape; the launch context simply
+    // reaches the ones that read it.
+    const launchAware = (
+      factory: OfficialRuntimeTransportFactory,
+    ): ((
+      launch?: OfficialRuntimeLaunchContext,
+    ) => Promise<OfficialRuntimeTransport>) =>
+      factory as (
+        launch?: OfficialRuntimeLaunchContext,
+      ) => Promise<OfficialRuntimeTransport>;
     this.createTransport =
-      createTransport ??
-      (endpointContext === undefined
-        ? createOfficialCodexTransport
-        : async () => {
-            const context = endpointContext;
-            const environment = resolveCodexEndpointProcessEnvironment(
-              context.sourceEnvironment ?? process.env,
-              context.environmentSource,
-            );
-            await context.prepareEndpoint?.();
-            // A context-provided discovery pre-gates the launch (static
-            // endpoints keep inspect and spawn discovery coherent, and
-            // tests stay hermetic); the production transport re-discovers
-            // through its own dependencies exactly as before.
-            if (context.discoverExecutable !== undefined) {
-              const discovery = await context.discoverExecutable().catch(
-                (): CodexExecutableDiscoveryResult => ({ kind: "not-located" }),
+      createTransport === undefined
+        ? endpointContext === undefined
+          ? (launch?: OfficialRuntimeLaunchContext) =>
+              createOfficialCodexTransport(undefined, {
+                ...(launch?.extraArguments === undefined
+                  ? {}
+                  : { extraArguments: launch.extraArguments }),
+              })
+          : async (launch?: OfficialRuntimeLaunchContext) => {
+              const context = endpointContext;
+              const environment = resolveCodexEndpointProcessEnvironment(
+                context.sourceEnvironment ?? process.env,
+                context.environmentSource,
               );
-              if (discovery.kind !== "located") {
-                throw new RuntimeAdapterError("runtime-not-located");
+              await context.prepareEndpoint?.();
+              // A context-provided discovery pre-gates the launch (static
+              // endpoints keep inspect and spawn discovery coherent, and
+              // tests stay hermetic); the production transport re-discovers
+              // through its own dependencies exactly as before.
+              if (context.discoverExecutable !== undefined) {
+                const discovery = await context.discoverExecutable().catch(
+                  (): CodexExecutableDiscoveryResult => ({ kind: "not-located" }),
+                );
+                if (discovery.kind !== "located") {
+                  throw new RuntimeAdapterError("runtime-not-located");
+                }
               }
+              return createOfficialCodexTransport(undefined, {
+                environment,
+                ...(launch?.extraArguments === undefined
+                  ? {}
+                  : { extraArguments: launch.extraArguments }),
+              });
             }
-            return createOfficialCodexTransport(undefined, { environment });
-          });
+        : launchAware(createTransport);
   }
 
   /**
@@ -454,10 +482,12 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
       assertStaticProfileSelection(staticCatalog, request.profile);
     }
 
+    // A malformed binding is an input error, not a runtime failure.
+    const launch = launchContextForWorkbenchMcp(request.workbenchMcp);
     let peer: CodexJsonlPeer;
     try {
       peer = new CodexJsonlPeer(
-        await this.createTransport(),
+        await this.createTransport(launch),
         this.providerRequestBudget,
       );
     } catch (error) {
@@ -533,10 +563,14 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
       assertStaticProfileSelection(staticCatalog, validatedRequest.profile);
     }
 
+    // A malformed binding is an input error, not a runtime failure.
+    const launch = launchContextForWorkbenchMcp(
+      validatedRequest.workbenchMcp,
+    );
     let peer: CodexJsonlPeer;
     try {
       peer = new CodexJsonlPeer(
-        await this.createTransport(),
+        await this.createTransport(launch),
         this.providerRequestBudget,
       );
     } catch (error) {
@@ -1350,8 +1384,33 @@ function readResumeResult(
 }
 
 function validateResumeRequest(request: RuntimeResume): RuntimeResume {
+  // The optional runtime-only Workbench binding is admitted beside the
+  // historical three keys; ordinary resumes keep exactly their shape.
+  if (typeof request !== "object" || request === null) {
+    throw new RuntimeAdapterError("invalid-input");
+  }
+  const keys = Reflect.ownKeys(request).filter(
+    (key): key is string => typeof key === "string",
+  );
+  const allowed = [
+    "projectDirectory",
+    "profile",
+    "opaqueSessionReference",
+    "workbenchMcp",
+  ];
+  if (
+    !keys.every((key) => allowed.includes(key)) ||
+    keys.length < 3 ||
+    keys.length > 4
+  ) {
+    throw new RuntimeAdapterError("invalid-input");
+  }
   const requestObject = asClosedObject(
-    request,
+    {
+      projectDirectory: request.projectDirectory,
+      profile: request.profile,
+      opaqueSessionReference: request.opaqueSessionReference,
+    },
     ["projectDirectory", "profile", "opaqueSessionReference"],
     "invalid-input",
   );
@@ -1385,9 +1444,83 @@ function validateResumeRequest(request: RuntimeResume): RuntimeResume {
   if (profile.executionMode !== "single-agent" || profile.accessMode !== "full-access") {
     throw new RuntimeAdapterError("unsupported-selection");
   }
+  const workbenchMcp = request.workbenchMcp;
   return {
     projectDirectory: requestObject.projectDirectory as string,
     profile,
     opaqueSessionReference: requestObject.opaqueSessionReference as string,
+    ...(workbenchMcp === undefined ? {} : { workbenchMcp }),
   };
+}
+
+function isSafeLaunchText(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 32_768 &&
+    value.trim().length > 0 &&
+    !value.includes("\0")
+  );
+}
+
+/** codex `-c` values are parsed as TOML: maps need an inline table, not JSON. */
+function tomlInlineTable(values: Readonly<Record<string, string>>): string {
+  const entries = Object.entries(values).map(
+    ([key, value]) => `${JSON.stringify(key)}=${JSON.stringify(value)}`,
+  );
+  return `{${entries.join(",")}}`;
+}
+
+/**
+ * The Workbench MCP bridge session overrides (w300): exactly the `-c` pairs
+ * w262 §4.3 measured plus the env table (TOML inline form, measured on
+ * 0.153.4/0.154.0). A JSON array is legal TOML so `args` uses JSON; a JSON
+ * object is NOT a legal TOML table so `env` must not.
+ */
+export function codexWorkbenchLaunchArguments(
+  server: RuntimeWorkbenchMcpServer,
+): readonly string[] {
+  if (!isSafeLaunchText(server.command)) {
+    throw new RuntimeAdapterError("invalid-input");
+  }
+  if (
+    !Array.isArray(server.args) ||
+    server.args.length === 0 ||
+    !server.args.every((argument) => isSafeLaunchText(argument))
+  ) {
+    throw new RuntimeAdapterError("invalid-input");
+  }
+  if (server.env !== undefined) {
+    if (typeof server.env !== "object" || server.env === null) {
+      throw new RuntimeAdapterError("invalid-input");
+    }
+    for (const [key, value] of Object.entries(server.env)) {
+      if (!isSafeLaunchText(key) || !isSafeLaunchText(value)) {
+        throw new RuntimeAdapterError("invalid-input");
+      }
+    }
+  }
+  const overrides: string[] = [
+    "-c",
+    `mcp_servers.workbench.command=${server.command}`,
+    "-c",
+    `mcp_servers.workbench.args=${JSON.stringify([...server.args])}`,
+  ];
+  if (server.env !== undefined && Object.keys(server.env).length > 0) {
+    overrides.push(
+      "-c",
+      `mcp_servers.workbench.env=${tomlInlineTable(server.env)}`,
+    );
+  }
+  return Object.freeze(overrides);
+}
+
+/** The per-launch context for a start/resume carrying a binding, if any. */
+function launchContextForWorkbenchMcp(
+  server: RuntimeWorkbenchMcpServer | undefined,
+): OfficialRuntimeLaunchContext | undefined {
+  if (server === undefined) return undefined;
+  return Object.freeze({
+    extraArguments: codexWorkbenchLaunchArguments(server),
+  });
 }

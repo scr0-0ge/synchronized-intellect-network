@@ -1,5 +1,6 @@
-import { For, Show, type Component } from "solid-js";
+import { For, Show, createEffect, createSignal, onCleanup, useContext, type Component } from "solid-js";
 import type {
+  WorkbenchAnnualReportSnapshot,
   WorkbenchCommandView,
   WorkbenchHostedProjectView,
   WorkbenchFamilyEndpointPreferences,
@@ -26,6 +27,7 @@ import {
   commandRuntimeFamily,
   runtimeClass,
   commandStatusLabel,
+  WorkbenchRendererBridgeContext,
 } from "./view-types.ts";
 import { ProjectActionsMenu } from "./project-rail.tsx";
 import { SessionTranscript, turnStateClass } from "./transcript.tsx";
@@ -43,6 +45,8 @@ import {
   endpointStatusDescriptionCopy,
   stageCopy,
 } from "./copy/stage-copy.ts";
+import { AnnualReportPanel } from "./annual-report-panel.tsx";
+import { annualReportCopy } from "./copy/annual-report-copy.ts";
 
 export const WorkbenchStage: Component<{
   readonly active: boolean;
@@ -85,6 +89,93 @@ export const WorkbenchStage: Component<{
   readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
   readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
 }> = (props) => {
+  const rendererBridge = useContext(WorkbenchRendererBridgeContext);
+  const [annualReportSnapshot, setAnnualReportSnapshot] =
+    createSignal<WorkbenchAnnualReportSnapshot | null>(null);
+  const [annualReportStarting, setAnnualReportStarting] = createSignal(false);
+  const [annualReportOpening, setAnnualReportOpening] = createSignal(false);
+  const [annualReportError, setAnnualReportError] = createSignal<string | null>(null);
+  let annualReportTimer: ReturnType<typeof setTimeout> | undefined;
+  let annualReportGeneration = 0;
+  const projectId = () =>
+    props.view.projectSelection.projects.find((project) => project.selected)?.selectionKey ?? null;
+  const clearAnnualReportTimer = (): void => {
+    if (annualReportTimer !== undefined) clearTimeout(annualReportTimer);
+    annualReportTimer = undefined;
+  };
+  const readAnnualReport = async (
+    expectedProjectId: string,
+    generation: number,
+    waitForStartedJob = false,
+  ): Promise<void> => {
+    clearAnnualReportTimer();
+    const snapshot = await rendererBridge?.readAnnualReportJob?.({ projectId: expectedProjectId }) ?? null;
+    if (generation !== annualReportGeneration || projectId() !== expectedProjectId) return;
+    setAnnualReportSnapshot(snapshot);
+    if (snapshot?.job.status === "running" || (waitForStartedJob && snapshot === null)) {
+      annualReportTimer = setTimeout(() => {
+        void readAnnualReport(expectedProjectId, generation, waitForStartedJob);
+      }, 2_000);
+    }
+  };
+  createEffect(() => {
+    const selectedProjectId = projectId();
+    props.projectScopeEpoch;
+    annualReportGeneration += 1;
+    const generation = annualReportGeneration;
+    clearAnnualReportTimer();
+    setAnnualReportSnapshot(null);
+    setAnnualReportStarting(false);
+    setAnnualReportError(null);
+    if (selectedProjectId !== null) void readAnnualReport(selectedProjectId, generation);
+  });
+  onCleanup(clearAnnualReportTimer);
+  const startAnnualReport = async (): Promise<void> => {
+    const selectedProjectId = projectId();
+    const profile = props.profile;
+    if (selectedProjectId === null || rendererBridge?.startAnnualReportJob === undefined) {
+      setAnnualReportError(annualReportCopy.unavailable);
+      return;
+    }
+    const loaded = profile.result;
+    if (
+      profile.phase !== "ready" || loaded?.ok !== true ||
+      profile.selectedEndpointKey === null || profile.selectedModelKey === null ||
+      profile.selectedWorkIntensityKey === null || profile.selectedExecutionModeKey === null ||
+      profile.selectedAccessModeKey === null
+    ) {
+      props.onLoadProfile();
+      setAnnualReportError(annualReportCopy.chooseProfile);
+      return;
+    }
+    setAnnualReportSnapshot(null);
+    setAnnualReportStarting(true);
+    setAnnualReportError(null);
+    const result = await rendererBridge.startAnnualReportJob({
+      projectId: selectedProjectId,
+      snapshotKey: loaded.profile.snapshotKey,
+      endpointKey: profile.selectedEndpointKey,
+      modelKey: profile.selectedModelKey,
+      workIntensityKey: profile.selectedWorkIntensityKey,
+      executionModeKey: profile.selectedExecutionModeKey,
+      accessModeKey: profile.selectedAccessModeKey,
+    });
+    setAnnualReportStarting(false);
+    if (!result.ok) {
+      setAnnualReportError(result.error.message);
+      return;
+    }
+    const generation = annualReportGeneration;
+    await readAnnualReport(selectedProjectId, generation, true);
+  };
+  const openAnnualReportFolder = async (): Promise<void> => {
+    const selectedProjectId = projectId();
+    if (selectedProjectId === null || rendererBridge?.openAnnualReportOutput === undefined) return;
+    setAnnualReportOpening(true);
+    const result = await rendererBridge.openAnnualReportOutput({ projectId: selectedProjectId });
+    setAnnualReportOpening(false);
+    if (!result.ok) setAnnualReportError(result.error.message);
+  };
   const rendererState = () => ({
     result: { ok: true as const, view: props.view },
     selectedKey: props.selected?.key ?? null,
@@ -121,6 +212,15 @@ export const WorkbenchStage: Component<{
         onOpenProject={props.onOpenProject}
         projectOpen={props.projectOpen}
       />
+      <Show when={annualReportStarting() || annualReportSnapshot() !== null || annualReportError() !== null}>
+        <AnnualReportPanel
+          snapshot={annualReportSnapshot()}
+          starting={annualReportStarting()}
+          error={annualReportError()}
+          opening={annualReportOpening()}
+          onOpenFolder={() => void openAnnualReportFolder()}
+        />
+      </Show>
       <Show
         when={!props.runtimeUnavailable}
         fallback={
@@ -158,6 +258,7 @@ export const WorkbenchStage: Component<{
               onAccessMode={props.onAccessMode}
               onUseAsDefault={props.onUseAsDefault}
               onSubmit={props.onSubmit}
+              onStartAnnualReport={() => void startAnnualReport()}
               endpointPreferences={props.endpointPreferences}
               subscriptionAuthentication={props.subscriptionAuthentication}
             />
@@ -255,6 +356,7 @@ export const WorkbenchStage: Component<{
                     steerFeedback={props.steerFeedback}
                     onSteer={props.onSteer}
                     onSubmit={props.onSubmit}
+                    onStartAnnualReport={() => void startAnnualReport()}
                     endpointPreferences={props.endpointPreferences}
                     subscriptionAuthentication={props.subscriptionAuthentication}
                   />
@@ -299,6 +401,7 @@ export const WorkbenchStage: Component<{
                 onAccessMode={props.onAccessMode}
                 onUseAsDefault={props.onUseAsDefault}
                 onSubmit={props.onSubmit}
+                onStartAnnualReport={() => void startAnnualReport()}
                 endpointPreferences={props.endpointPreferences}
                 subscriptionAuthentication={props.subscriptionAuthentication}
               />
@@ -481,6 +584,7 @@ const EmptyProjectState: Component<{
   readonly onAccessMode: (key: string) => void;
   readonly onUseAsDefault: () => void;
   readonly onSubmit: () => void;
+  readonly onStartAnnualReport: () => void;
   readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
   readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
 }> = (props) => (
@@ -520,6 +624,7 @@ const EmptyProjectState: Component<{
         onAccessMode={props.onAccessMode}
         onUseAsDefault={props.onUseAsDefault}
         onSubmit={props.onSubmit}
+        onStartAnnualReport={props.onStartAnnualReport}
         endpointPreferences={props.endpointPreferences}
         subscriptionAuthentication={props.subscriptionAuthentication}
       />

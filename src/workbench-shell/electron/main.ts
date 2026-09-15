@@ -16,6 +16,7 @@ import {
   safeStorage,
   screen,
   session,
+  shell,
   Tray,
 } from "electron";
 
@@ -85,6 +86,7 @@ import {
   createWorkbenchProjectHost,
   type WorkbenchProjectHost,
 } from "../project-host.ts";
+import type { WorkbenchAnnualReportCapability } from "../backend.ts";
 import {
   createHistoricalRecoveryLibrary,
   type HistoricalRecoveryLibrary,
@@ -205,6 +207,58 @@ import {
 app.setName("synchronized-intellect-network");
 const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 
+declare global {
+  interface ImportMeta {
+    glob(pattern: string): Record<string, () => Promise<unknown>>;
+  }
+}
+
+// The public tree intentionally omits the private annual-report runner. Vite's
+// literal glob resolves it lazily when present and otherwise leaves this UI
+// capability unavailable without putting business logic in the public
+// Workbench shell. Loading is deferred to the first actual use (rather than
+// `{ eager: true }`) because the private runner's dependency chain reaches
+// pdfjs-dist, which the packaged build does not stage into app.asar -- an
+// eager, module-scope import of it left the packaged main process unable to
+// finish loading before `app.whenReady()`, so no window ever opened.
+const annualReportCapabilityLoader = Object.values(
+  import.meta.glob("../../annual-report/job/workbench-annual-report-capability.ts"),
+)[0];
+const annualReportCapability: WorkbenchAnnualReportCapability | undefined =
+  annualReportCapabilityLoader === undefined
+    ? undefined
+    : createLazyAnnualReportCapability(annualReportCapabilityLoader);
+
+function createLazyAnnualReportCapability(
+  load: () => Promise<unknown>,
+): WorkbenchAnnualReportCapability {
+  let loaded: Promise<WorkbenchAnnualReportCapability> | undefined;
+  function resolveCapability(): Promise<WorkbenchAnnualReportCapability> {
+    loaded ??= load().then((module) => {
+      const candidate = (module as { readonly workbenchAnnualReportCapability?: unknown })
+        .workbenchAnnualReportCapability;
+      if (
+        typeof candidate === "object" && candidate !== null &&
+        typeof (candidate as WorkbenchAnnualReportCapability).start === "function" &&
+        typeof (candidate as WorkbenchAnnualReportCapability).readLatest === "function" &&
+        typeof (candidate as WorkbenchAnnualReportCapability).resolveLatestOutputDirectory === "function"
+      ) {
+        return candidate as WorkbenchAnnualReportCapability;
+      }
+      throw new Error("annual-report-capability-shape-invalid");
+    });
+    return loaded;
+  }
+  const capability: WorkbenchAnnualReportCapability = {
+    start: (input) => resolveCapability().then((real) => real.start(input)),
+    readLatest: (projectDirectory) =>
+      resolveCapability().then((real) => real.readLatest(projectDirectory)),
+    resolveLatestOutputDirectory: (projectDirectory) =>
+      resolveCapability().then((real) => real.resolveLatestOutputDirectory(projectDirectory)),
+  };
+  return Object.freeze(capability);
+}
+
 /*
  * Read once, at module scope, because a startup failure can be presented
  * before the ready handler runs and the failure window obeys the same rule as
@@ -303,6 +357,7 @@ let appearancePreferenceStore: WorkbenchAppearancePreferenceStore | null =
 let createProjectController: WorkbenchCreateProjectController | undefined;
 let backendInitialization: Promise<void> = Promise.resolve();
 let shutdownRequested = false;
+let activeAnnualReportJobs = 0;
 
 /**
  * w234 follow-up: re-reads both usage slots (Claude's own field, everyone
@@ -640,6 +695,9 @@ if (!ownsSingleInstanceLock) {
 function startPrimaryWorkbench(): void {
   app.on("second-instance", () => windowRestorer.requestRestore());
   app.on("before-quit", lifecycle.handleBeforeQuit);
+  app.on("window-all-closed", () => {
+    if (activeAnnualReportJobs === 0 && process.platform !== "darwin") app.quit();
+  });
   app.whenReady().then(async () => {
   if (shutdownRequested) return;
   const distributionDirectory = join(
@@ -1070,6 +1128,10 @@ function startPrimaryWorkbench(): void {
                 ...startup,
                 adapter: runtimeAdapter,
                 authGeneration,
+                ...(annualReportCapability === undefined ? {} : { annualReportCapability }),
+                onAnnualReportJobActivityChange(delta) {
+                  activeAnnualReportJobs = Math.max(0, activeAnnualReportJobs + delta);
+                },
               });
             },
           });
@@ -1139,6 +1201,7 @@ function startPrimaryWorkbench(): void {
       source: initializedBackend,
       directoryChooser: createElectronProjectDirectoryChooser(),
       createProjectController: createProjectController,
+      openPath: (path) => shell.openPath(path),
     });
     clipboardIpc = installWorkbenchClipboardIpc({
       ipcMain,

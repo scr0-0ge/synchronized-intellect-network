@@ -88,6 +88,14 @@ const OTHER_EXCLUDED_SUITES: readonly ExcludedSuite[] = Object.freeze([
     reason:
       "covers run-app.bat, a launcher for the author machine that never looks at PATH; start.bat is the launcher here, and tests/launcher/start.test.mjs — which DOES run in this tree — covers it",
   },
+  {
+    path: "tests/workbench-shell/auto-iteration-mcp-bootstrap-claude.test.ts",
+    reason: "requires a real Claude Code CLI on the machine; the public runner has none",
+  },
+  {
+    path: "tests/workbench-shell/auto-iteration-mcp-bootstrap-codex.test.ts",
+    reason: "requires a real Codex CLI on the machine; the public runner has none",
+  },
 ]);
 
 async function exists(relativePath: string): Promise<boolean> {

@@ -116,15 +116,32 @@ export interface SessionProfile {
   readonly accessMode: string;
 }
 
+/**
+ * Runtime-only Workbench MCP stdio server spec for one Agent Session. The
+ * host generates it at execution time (pipe name + one-shot token); it is
+ * never part of durable command state and is re-issued on every start or
+ * resume. Adapters turn it into the CLI's per-Session MCP configuration;
+ * sessions without a binding keep their current MCP behavior unchanged.
+ */
+export interface RuntimeWorkbenchMcpServer {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env?: Readonly<Record<string, string>>;
+}
+
 export interface RuntimeStart {
   readonly projectDirectory: string;
   readonly profile: SessionProfile;
+  /** Workbench MCP bridge binding; absent for ordinary chat sessions. */
+  readonly workbenchMcp?: RuntimeWorkbenchMcpServer;
 }
 
 export interface RuntimeResume {
   readonly projectDirectory: string;
   readonly profile: SessionProfile;
   readonly opaqueSessionReference: string;
+  /** Workbench MCP bridge binding; absent for ordinary chat sessions. */
+  readonly workbenchMcp?: RuntimeWorkbenchMcpServer;
 }
 
 export interface RuntimeContinuationProfileCompatibilityRequest {

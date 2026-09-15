@@ -13,6 +13,7 @@ import {
   type ResumableRuntimeBinding,
   type RuntimeCatalog,
   type RuntimeFailureCategory,
+  type RuntimeWorkbenchMcpServer,
   type SessionProfile,
 } from "../agent-runtime/index.ts";
 import {
@@ -450,7 +451,11 @@ class SqliteProjectChannel implements ProjectChannel {
         );
         if (accepted.newlyAccepted) {
           const executionStart = createPromiseController<void>();
-          this.scheduleExecution(accepted.receipt.commandId, executionStart.promise);
+          this.scheduleExecution(
+            accepted.receipt.commandId,
+            executionStart.promise,
+            commandSnapshot.workbenchMcp,
+          );
           receiptController.resolve(accepted.receipt);
           queueMicrotask(() => executionStart.resolve(undefined));
           return;
@@ -847,7 +852,7 @@ class SqliteProjectChannel implements ProjectChannel {
           payloadDigest,
           command.commandKind,
           sessionId,
-          JSON.stringify(command),
+          JSON.stringify(durableDirectCommand(command)),
           authenticationContextJson,
         );
       if (command.commandKind === "start") {
@@ -1071,13 +1076,14 @@ class SqliteProjectChannel implements ProjectChannel {
   private scheduleExecution(
     commandId: string,
     executionStart: Promise<void>,
+    workbenchMcp?: RuntimeWorkbenchMcpServer,
   ): void {
     const execution = this.executionTail.then(async () => {
       await executionStart;
       try {
-        await this.performExecution(commandId);
+        await this.performExecution(commandId, workbenchMcp);
       } catch {
-        await this.containExecutionFailure(commandId);
+        await this.containExecutionFailure(commandId, workbenchMcp);
       } finally {
         this.executionBinding = undefined;
       }
@@ -1088,7 +1094,10 @@ class SqliteProjectChannel implements ProjectChannel {
     );
   }
 
-  private async containExecutionFailure(commandId: string): Promise<void> {
+  private async containExecutionFailure(
+    commandId: string,
+    workbenchMcp?: RuntimeWorkbenchMcpServer,
+  ): Promise<void> {
     try {
       const row = this.database
         .prepare(
@@ -1110,7 +1119,13 @@ class SqliteProjectChannel implements ProjectChannel {
           row.effect_phase,
         )
       ) {
-        await this.recordRecoveryRequired(commandId, undefined, this.executionBinding);
+        await this.recordRecoveryRequired(
+          commandId,
+          undefined,
+          this.executionBinding,
+          undefined,
+          workbenchMcp,
+        );
         return;
       }
       if (row.status === "in-flight") {
@@ -1121,7 +1136,10 @@ class SqliteProjectChannel implements ProjectChannel {
     }
   }
 
-  private async performExecution(commandId: string): Promise<void> {
+  private async performExecution(
+    commandId: string,
+    workbenchMcp?: RuntimeWorkbenchMcpServer,
+  ): Promise<void> {
     if (this.closed) return;
     // Timers may run late; a queued resume still has the original absolute deadline.
     this.refreshQuotaPauses();
@@ -1288,11 +1306,13 @@ class SqliteProjectChannel implements ProjectChannel {
           ? await this.adapter.start({
               projectDirectory: this.projectDirectory,
               profile: cloneProfile(command.profile),
+              ...(workbenchMcp === undefined ? {} : { workbenchMcp }),
             })
           : await this.adapter.resume({
               projectDirectory: this.projectDirectory,
               profile: cloneProfile(command.profile),
               opaqueSessionReference: existingReference ?? "",
+              ...(workbenchMcp === undefined ? {} : { workbenchMcp }),
             });
       this.executionBinding = binding;
       if (
@@ -1309,11 +1329,11 @@ class SqliteProjectChannel implements ProjectChannel {
         existingReference !== null && error instanceof RuntimeAdapterError &&
           ["protocol-rejected", "runtime-not-located", "authentication-required", "unsupported-selection"].includes(error.category) ? {
           resume: "unconfirmed", reason: recoveryFailureCategory(error) ?? "resume-unconfirmed",
-        } : undefined);
+        } : undefined, workbenchMcp);
       return;
     }
     if (!this.commitBinding(commandId, session.session_id, binding)) {
-      await this.recordRecoveryRequired(commandId, undefined, binding);
+      await this.recordRecoveryRequired(commandId, undefined, binding, undefined, workbenchMcp);
       return;
     }
     if (this.closed) {
@@ -1327,11 +1347,11 @@ class SqliteProjectChannel implements ProjectChannel {
     try {
       await binding.send({ text: command.input });
     } catch (error) {
-      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding);
+      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding, undefined, workbenchMcp);
       return;
     }
     if (this.closed) {
-      await this.recordRecoveryRequired(commandId, undefined, binding);
+      await this.recordRecoveryRequired(commandId, undefined, binding, undefined, workbenchMcp);
       return;
     }
     this.database
@@ -1350,7 +1370,7 @@ class SqliteProjectChannel implements ProjectChannel {
         done: false,
       };
     } catch (error) {
-      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding);
+      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding, undefined, workbenchMcp);
       return;
     }
     this.activeRuntimeIterator = iteratorState;
@@ -1403,7 +1423,7 @@ class SqliteProjectChannel implements ProjectChannel {
         }
       }
     } catch (error) {
-      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding);
+      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding, undefined, workbenchMcp);
       return;
     } finally {
       if (!iteratorState.done) await this.cancelRuntimeIterator(iteratorState);
@@ -1443,7 +1463,7 @@ class SqliteProjectChannel implements ProjectChannel {
       return;
     }
     // The iterator above was already drained or cancelled exactly once.
-    await this.recordRecoveryRequired(commandId);
+    await this.recordRecoveryRequired(commandId, undefined, undefined, undefined, workbenchMcp);
   }
 
   readUserInput(sessionId: string): readonly ProjectUserInputView[] {
@@ -1904,6 +1924,7 @@ class SqliteProjectChannel implements ProjectChannel {
   private async probeRecoveryResume(
     commandId: string,
     binding?: ResumableRuntimeBinding,
+    workbenchMcp?: RuntimeWorkbenchMcpServer,
   ): Promise<ProjectCommandRecovery> {
     if (binding !== undefined) {
       // Stop the old transport before establishing a fresh one-input binding.
@@ -1930,6 +1951,7 @@ class SqliteProjectChannel implements ProjectChannel {
           projectDirectory: this.projectDirectory,
           profile: cloneProfile(command.profile),
           opaqueSessionReference: reference,
+          ...(workbenchMcp === undefined ? {} : { workbenchMcp }),
         }).then(async value => {
           if (expired) await closeUnusedBinding(value);
           return value;
@@ -1960,8 +1982,13 @@ class SqliteProjectChannel implements ProjectChannel {
     failureCategory?: ProjectRecoveryFailureCategory,
     binding?: ResumableRuntimeBinding,
     observed?: ProjectCommandRecovery,
+    workbenchMcp?: RuntimeWorkbenchMcpServer,
   ): Promise<void> {
-    const recovery = observed ?? await this.probeRecoveryResume(commandId, binding);
+    const recovery = observed ?? await this.probeRecoveryResume(
+      commandId,
+      binding,
+      workbenchMcp,
+    );
     const committed = transaction(this.database, () => {
       const row = this.database
         .prepare("SELECT target_session_id FROM commands WHERE command_id = ?")
@@ -4392,6 +4419,7 @@ function validateCommand(
     throw new CoordinatorError("invalid-command");
   }
   const hasRuntimeResumeIdentity = hasOwn(command, "runtimeResumeIdentity");
+  const hasWorkbenchMcp = hasOwn(command, "workbenchMcp");
   if (
     hasRuntimeResumeIdentity &&
     !isRuntimeResumeIdentity(
@@ -4399,6 +4427,12 @@ function validateCommand(
       command.profile,
       endpointIds,
     )
+  ) {
+    throw new CoordinatorError("invalid-command");
+  }
+  if (
+    hasWorkbenchMcp &&
+    !isRuntimeWorkbenchMcpServer(command.workbenchMcp)
   ) {
     throw new CoordinatorError("invalid-command");
   }
@@ -4410,6 +4444,7 @@ function validateCommand(
     "profile",
     "runtime",
     ...(hasRuntimeResumeIdentity ? ["runtimeResumeIdentity"] : []),
+    ...(hasWorkbenchMcp ? ["workbenchMcp"] : []),
   ];
   if (command.commandKind === "start") {
     if (
@@ -4672,6 +4707,9 @@ function cloneDirectCommand(command: DirectProjectCommand): DirectProjectCommand
             command.runtimeResumeIdentity,
           ),
         }),
+    ...(command.workbenchMcp === undefined
+      ? {}
+      : { workbenchMcp: cloneRuntimeWorkbenchMcpServer(command.workbenchMcp) }),
     input: command.input,
   };
   if (command.commandKind === "continue") {
@@ -4723,11 +4761,70 @@ function cloneDirectCommand(command: DirectProjectCommand): DirectProjectCommand
   };
 }
 
+function durableDirectCommand(
+  command: DirectProjectCommand,
+): DirectProjectCommand {
+  if (command.workbenchMcp === undefined) return command;
+  const { workbenchMcp: _runtimeOnly, ...durable } = command;
+  return durable as DirectProjectCommand;
+}
+
+function isRuntimeWorkbenchMcpServer(
+  value: unknown,
+): value is RuntimeWorkbenchMcpServer {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ["args", "command", "env"]) ||
+    typeof value.command !== "string" ||
+    value.command.length === 0 ||
+    value.command.length > 32_768 ||
+    value.command.includes("\0") ||
+    !Array.isArray(value.args) ||
+    value.args.length === 0 ||
+    !value.args.every(
+      (argument) =>
+        typeof argument === "string" &&
+        argument.length > 0 &&
+        argument.length <= 32_768 &&
+        !argument.includes("\0"),
+    )
+  ) {
+    return false;
+  }
+  if (value.env === undefined) return true;
+  if (!isRecord(value.env)) return false;
+  return Object.entries(value.env).every(
+    ([key, entry]) =>
+      key.length > 0 &&
+      key.length <= 32_768 &&
+      !key.includes("\0") &&
+      typeof entry === "string" &&
+      entry.length > 0 &&
+      entry.length <= 32_768 &&
+      !entry.includes("\0"),
+  );
+}
+
+function cloneRuntimeWorkbenchMcpServer(
+  server: RuntimeWorkbenchMcpServer,
+): RuntimeWorkbenchMcpServer {
+  return Object.freeze({
+    command: server.command,
+    args: Object.freeze([...server.args]),
+    ...(server.env === undefined
+      ? {}
+      : { env: Object.freeze({ ...server.env }) }),
+  });
+}
+
 function hydrateStoredCommand(
   value: string,
   endpointIds: readonly DurableRuntimeEndpointId[],
 ): DirectProjectCommand {
   const parsed = JSON.parse(value) as DirectProjectCommand;
+  if (isRecord(parsed) && hasOwn(parsed, "workbenchMcp")) {
+    throw new Error("runtime-only-binding-in-durable-command");
+  }
   validateCommand(parsed, endpointIds);
   return cloneDirectCommand(parsed);
 }

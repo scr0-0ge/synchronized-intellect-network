@@ -92,6 +92,11 @@ import {
   publicRuntimeStartUnsupported,
   type WorkbenchCommandView,
   type WorkbenchAppearancePreference,
+  type WorkbenchAnnualReportJobRequest,
+  type WorkbenchAnnualReportOpenResult,
+  type WorkbenchAnnualReportProjectRequest,
+  type WorkbenchAnnualReportSnapshot,
+  type WorkbenchAnnualReportStartResult,
   type WorkbenchAppearancePreferenceLoadResult,
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
@@ -2297,6 +2302,343 @@ export function reconstructWorkbenchDirectSessionProfileDefaultRequest(
   } catch {
     return Object.freeze({ ok: false });
   }
+}
+
+export type WorkbenchAnnualReportJobRequestReconstruction =
+  | { readonly ok: true; readonly request: WorkbenchAnnualReportJobRequest }
+  | { readonly ok: false };
+
+export function reconstructWorkbenchAnnualReportJobRequest(
+  value: unknown,
+): WorkbenchAnnualReportJobRequestReconstruction {
+  try {
+    if (
+      !isStrictDataRecord(value, [
+        "accessModeKey",
+        "endpointKey",
+        "executionModeKey",
+        "modelKey",
+        "projectId",
+        "snapshotKey",
+        "workIntensityKey",
+      ]) ||
+      typeof value.projectId !== "string" ||
+      !projectSelectionKeyPattern.test(value.projectId)
+    ) {
+      return Object.freeze({ ok: false });
+    }
+    const selection = reconstructWorkbenchDirectSessionProfileDefaultRequest({
+      snapshotKey: value.snapshotKey,
+      endpointKey: value.endpointKey,
+      modelKey: value.modelKey,
+      workIntensityKey: value.workIntensityKey,
+      executionModeKey: value.executionModeKey,
+      accessModeKey: value.accessModeKey,
+    });
+    if (!selection.ok) return Object.freeze({ ok: false });
+    return Object.freeze({
+      ok: true,
+      request: Object.freeze({ projectId: value.projectId, ...selection.request }),
+    });
+  } catch {
+    return Object.freeze({ ok: false });
+  }
+}
+
+export function reconstructWorkbenchAnnualReportProjectRequest(
+  value: unknown,
+): { readonly ok: true; readonly request: WorkbenchAnnualReportProjectRequest } | { readonly ok: false } {
+  try {
+    if (
+      !isStrictDataRecord(value, ["projectId"]) ||
+      typeof value.projectId !== "string" ||
+      !projectSelectionKeyPattern.test(value.projectId)
+    ) {
+      return Object.freeze({ ok: false });
+    }
+    return Object.freeze({ ok: true, request: Object.freeze({ projectId: value.projectId }) });
+  } catch {
+    return Object.freeze({ ok: false });
+  }
+}
+
+const annualReportUnavailable = (): WorkbenchAnnualReportStartResult => Object.freeze({
+  ok: false,
+  error: Object.freeze({
+    category: "annual-report-unavailable" as const,
+    message: "The annual report job could not be started. Keep the folder open and try again.",
+  }),
+});
+
+export function sanitizeWorkbenchAnnualReportStartResult(
+  value: unknown,
+): WorkbenchAnnualReportStartResult {
+  try {
+    if (isStrictDataRecord(value, ["ok", "status"]) && value.ok === true && value.status === "started") {
+      return Object.freeze({ ok: true, status: "started" });
+    }
+    if (
+      isStrictDataRecord(value, ["error", "ok"]) &&
+      value.ok === false &&
+      isStrictDataRecord(value.error, ["category", "message"]) &&
+      ["already-running", "invalid-project", "invalid-profile-selection", "no-pdfs", "annual-report-unavailable"].includes(String(value.error.category)) &&
+      typeof value.error.message === "string" &&
+      value.error.message.length > 0 &&
+      value.error.message.length <= 500
+    ) {
+      return deepFreeze({
+        ok: false,
+        error: {
+          category: value.error.category,
+          message: sanitizeDisplayString(value.error.message),
+        },
+      }) as WorkbenchAnnualReportStartResult;
+    }
+  } catch {
+    // Malformed values collapse to one actionable public failure.
+  }
+  return annualReportUnavailable();
+}
+
+const annualReportOpenUnavailable = (): WorkbenchAnnualReportOpenResult => Object.freeze({
+  ok: false,
+  error: Object.freeze({
+    category: "annual-report-unavailable" as const,
+    message: "The annual report folder could not be opened. Keep the Project open and try again.",
+  }),
+});
+
+export function sanitizeWorkbenchAnnualReportOpenResult(
+  value: unknown,
+): WorkbenchAnnualReportOpenResult {
+  try {
+    if (isStrictDataRecord(value, ["ok", "status"]) && value.ok === true && value.status === "opened") {
+      return Object.freeze({ ok: true, status: "opened" });
+    }
+    if (
+      isStrictDataRecord(value, ["error", "ok"]) &&
+      value.ok === false &&
+      isStrictDataRecord(value.error, ["category", "message"]) &&
+      ["invalid-project", "no-output", "open-failed", "annual-report-unavailable"].includes(String(value.error.category)) &&
+      typeof value.error.message === "string" &&
+      value.error.message.length > 0 &&
+      value.error.message.length <= 500
+    ) {
+      return deepFreeze({
+        ok: false,
+        error: {
+          category: value.error.category,
+          message: sanitizeDisplayString(value.error.message),
+        },
+      }) as WorkbenchAnnualReportOpenResult;
+    }
+  } catch {
+    // Malformed values collapse to one actionable public failure.
+  }
+  return annualReportOpenUnavailable();
+}
+
+export function sanitizeWorkbenchAnnualReportSnapshot(
+  value: unknown,
+): WorkbenchAnnualReportSnapshot | null {
+  try {
+    if (!isStrictDataRecord(value, ["job", "records"])) return null;
+    const job = sanitizeAnnualReportJob(value.job);
+    const records = value.records === null
+      ? null
+      : sanitizeAnnualReportRecords(value.records);
+    if (job === null || records === undefined) return null;
+    return deepFreeze({ job, records });
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeAnnualReportJob(value: unknown): WorkbenchAnnualReportSnapshot["job"] | null {
+  if (
+    !isStrictDataRecord(value, [
+      "configurationVersion", "documents", "endedAt", "lastError", "observedModel",
+      "outputDirectory", "projectDirectory", "report", "schemaVersion", "startedAt", "stats", "status",
+    ]) ||
+    value.schemaVersion !== 1 ||
+    (value.status !== "running" && value.status !== "completed" && value.status !== "failed") ||
+    value.projectDirectory !== "." ||
+    !isRelativeAnnualReportPath(value.outputDirectory) ||
+    !isBoundedText(value.startedAt, 64) ||
+    !(value.endedAt === null || isBoundedText(value.endedAt, 64)) ||
+    !(value.observedModel === null || isBoundedText(value.observedModel, 200)) ||
+    !isBoundedText(value.configurationVersion, 200) ||
+    !(value.lastError === null || isBoundedText(value.lastError, 2_000)) ||
+    !isDenseDataArray(value.documents) ||
+    value.documents.length > 500
+  ) return null;
+  const documents = value.documents.map(sanitizeAnnualReportJobDocument);
+  if (documents.some((item) => item === null)) return null;
+  if (!isStrictDataRecord(value.stats, [
+    "documents", "documentsNeedingHuman", "fields", "fieldsNeedingHuman", "fieldsVerified", "pdfFiles",
+  ])) return null;
+  const stats = value.stats;
+  const statKeys = ["pdfFiles", "documents", "fields", "fieldsVerified", "fieldsNeedingHuman", "documentsNeedingHuman"] as const;
+  if (statKeys.some((key) => !isAnnualReportCount(stats[key]))) return null;
+  if (!isStrictDataRecord(value.report, ["markdownPath", "pdfNote", "pdfPath", "recordsPath"])) return null;
+  for (const key of ["recordsPath", "markdownPath", "pdfPath"] as const) {
+    if (!(value.report[key] === null || isRelativeAnnualReportPath(value.report[key]))) return null;
+  }
+  if (!(value.report.pdfNote === null || isBoundedText(value.report.pdfNote, 1_000))) return null;
+  return deepFreeze({
+    schemaVersion: 1,
+    status: value.status,
+    projectDirectory: "." as const,
+    outputDirectory: normalizeAnnualReportPath(value.outputDirectory as string),
+    startedAt: value.startedAt as string,
+    endedAt: value.endedAt as string | null,
+    observedModel: value.observedModel === null ? null : sanitizeDisplayString(value.observedModel as string),
+    configurationVersion: value.configurationVersion as string,
+    documents,
+    stats: {
+      pdfFiles: stats.pdfFiles as number,
+      documents: stats.documents as number,
+      fields: stats.fields as number,
+      fieldsVerified: stats.fieldsVerified as number,
+      fieldsNeedingHuman: stats.fieldsNeedingHuman as number,
+      documentsNeedingHuman: stats.documentsNeedingHuman as number,
+    },
+    report: {
+      recordsPath: nullableAnnualReportPath(value.report.recordsPath),
+      markdownPath: nullableAnnualReportPath(value.report.markdownPath),
+      pdfPath: nullableAnnualReportPath(value.report.pdfPath),
+      pdfNote: value.report.pdfNote === null ? null : sanitizeDisplayString(value.report.pdfNote as string),
+    },
+    lastError: value.lastError === null ? null : sanitizeDisplayString(value.lastError as string),
+  }) as WorkbenchAnnualReportSnapshot["job"];
+}
+
+function sanitizeAnnualReportJobDocument(value: unknown): WorkbenchAnnualReportSnapshot["job"]["documents"][number] | null {
+  if (
+    !isStrictDataRecord(value, ["fields", "fileName", "pdfPages", "reason", "status", "textLayer"]) ||
+    !isBoundedText(value.fileName, 260) ||
+    !["pending", "in-progress", "completed", "needs-human", "open-failed"].includes(String(value.status)) ||
+    !(value.reason === null || isBoundedText(value.reason, 2_000)) ||
+    !(value.pdfPages === null || isAnnualReportCount(value.pdfPages)) ||
+    !(value.textLayer === null || ["present", "sparse", "absent"].includes(String(value.textLayer))) ||
+    !isDenseDataArray(value.fields) || value.fields.length > 100
+  ) return null;
+  const fields = value.fields.map(sanitizeAnnualReportJobField);
+  if (fields.some((item) => item === null)) return null;
+  return deepFreeze({
+    fileName: sanitizeDisplayString(value.fileName as string), status: value.status,
+    reason: value.reason === null ? null : sanitizeDisplayString(value.reason as string),
+    pdfPages: value.pdfPages as number | null, textLayer: value.textLayer, fields,
+  }) as WorkbenchAnnualReportSnapshot["job"]["documents"][number];
+}
+
+function sanitizeAnnualReportJobField(value: unknown): WorkbenchAnnualReportSnapshot["job"]["documents"][number]["fields"][number] | null {
+  if (
+    !isStrictDataRecord(value, ["attemptMs", "error", "id", "reviewStatus", "status"]) ||
+    !isBoundedText(value.id, 200) ||
+    !["pending", "found", "zero", "empty", "not-found-in-scope", "stated-not-applicable"].includes(String(value.status)) ||
+    !["pending", "unchecked", "passed", "needs-human"].includes(String(value.reviewStatus)) ||
+    !(value.attemptMs === null || isAnnualReportCount(value.attemptMs)) ||
+    !(value.error === null || isBoundedText(value.error, 2_000))
+  ) return null;
+  return deepFreeze({
+    id: value.id, status: value.status, reviewStatus: value.reviewStatus,
+    attemptMs: value.attemptMs, error: value.error === null ? null : sanitizeDisplayString(value.error as string),
+  }) as WorkbenchAnnualReportSnapshot["job"]["documents"][number]["fields"][number];
+}
+
+function sanitizeAnnualReportRecords(value: unknown): WorkbenchAnnualReportSnapshot["records"] | undefined {
+  if (!isDenseDataArray(value) || value.length > 500) return undefined;
+  const records = value.map(sanitizeAnnualReportRecord);
+  return records.some((item) => item === null)
+    ? undefined
+    : records as WorkbenchAnnualReportSnapshot["records"];
+}
+
+function sanitizeAnnualReportRecord(value: unknown): NonNullable<WorkbenchAnnualReportSnapshot["records"]>[number] | null {
+  if (!isStrictDataRecord(value, ["document", "fields", "taskStatus"]) ||
+      (value.taskStatus !== "completed" && value.taskStatus !== "needs-human") ||
+      !isStrictDataRecord(value.document, ["company", "fileName", "pdfPageCount", "reportingPeriod"]) ||
+      !isBoundedText(value.document.fileName, 260) || !isBoundedText(value.document.company, 500) ||
+      !isBoundedText(value.document.reportingPeriod, 500) || !isAnnualReportCount(value.document.pdfPageCount) ||
+      !isDenseDataArray(value.fields) || value.fields.length > 100) return null;
+  const fields = value.fields.map(sanitizeAnnualReportStoredField);
+  if (fields.some((item) => item === null)) return null;
+  return deepFreeze({
+    document: {
+      fileName: sanitizeDisplayString(value.document.fileName as string),
+      pdfPageCount: value.document.pdfPageCount as number,
+      company: sanitizeDisplayString(value.document.company as string),
+      reportingPeriod: sanitizeDisplayString(value.document.reportingPeriod as string),
+    },
+    taskStatus: value.taskStatus,
+    fields,
+  }) as NonNullable<WorkbenchAnnualReportSnapshot["records"]>[number];
+}
+
+function sanitizeAnnualReportStoredField(value: unknown): NonNullable<WorkbenchAnnualReportSnapshot["records"]>[number]["fields"][number] | null {
+  if (!isStrictDataRecord(value, ["attempts", "displayName", "endReason", "id", "note", "reviewStatus", "status", "value"]) ||
+      !isBoundedText(value.id, 200) || !isBoundedText(value.displayName, 500) || !isBoundedText(value.note, 500) ||
+      !["found", "zero", "empty", "not-found-in-scope", "stated-not-applicable"].includes(String(value.status)) ||
+      !["unchecked", "passed", "needs-human"].includes(String(value.reviewStatus)) ||
+      !(value.value === null || isBoundedText(value.value, 4_000)) ||
+      !(value.endReason === null || isBoundedText(value.endReason, 200)) ||
+      !isDenseDataArray(value.attempts) || value.attempts.length > 10) return null;
+  const attempts = value.attempts.map(sanitizeAnnualReportAttempt);
+  if (attempts.some((item) => item === null)) return null;
+  return deepFreeze({
+    id: value.id, displayName: sanitizeDisplayString(value.displayName as string),
+    note: sanitizeDisplayString(value.note as string), status: value.status,
+    reviewStatus: value.reviewStatus,
+    value: value.value === null ? null : sanitizeDisplayString(value.value as string),
+    endReason: value.endReason === null ? null : sanitizeDisplayString(value.endReason as string),
+    attempts,
+  }) as NonNullable<WorkbenchAnnualReportSnapshot["records"]>[number]["fields"][number];
+}
+
+function sanitizeAnnualReportAttempt(value: unknown): NonNullable<WorkbenchAnnualReportSnapshot["records"]>[number]["fields"][number]["attempts"][number] | null {
+  if (!isStrictDataRecord(value, ["checks", "failureReason", "n", "problems", "reviewStatus", "status", "verdict"]) ||
+      !Number.isSafeInteger(value.n) || (value.n as number) < 1 || (value.n as number) > 10 ||
+      !["found", "zero", "empty", "not-found-in-scope", "stated-not-applicable"].includes(String(value.status)) ||
+      !["unchecked", "passed", "needs-human"].includes(String(value.reviewStatus)) ||
+      !["agree", "disagree", "cannot-verify"].includes(String(value.verdict)) ||
+      !(value.failureReason === null || isBoundedText(value.failureReason, 200)) ||
+      !isDenseDataArray(value.checks) || value.checks.some((check) => !isBoundedText(check, 200)) ||
+      !isDenseDataArray(value.problems)) return null;
+  const problems = value.problems.map((problem) => {
+    if (!isStrictDataRecord(problem, ["code", "message"]) || !isBoundedText(problem.code, 200) || !isBoundedText(problem.message, 2_000)) return null;
+    return Object.freeze({ code: problem.code, message: sanitizeDisplayString(problem.message as string) });
+  });
+  if (problems.some((problem) => problem === null)) return null;
+  return deepFreeze({
+    n: value.n, status: value.status, reviewStatus: value.reviewStatus,
+    checks: [...value.checks], verdict: value.verdict, problems,
+    failureReason: value.failureReason === null ? null : sanitizeDisplayString(value.failureReason as string),
+  }) as NonNullable<WorkbenchAnnualReportSnapshot["records"]>[number]["fields"][number]["attempts"][number];
+}
+
+function isAnnualReportCount(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 1_000_000;
+}
+
+function isBoundedText(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum &&
+    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value);
+}
+
+function isRelativeAnnualReportPath(value: unknown): value is string {
+  if (!isBoundedText(value, 2_000)) return false;
+  const normalized = normalizeAnnualReportPath(value);
+  return !normalized.startsWith("/") && !/^[A-Za-z]:/u.test(normalized) &&
+    normalized.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
+function normalizeAnnualReportPath(value: string): string {
+  return value.replaceAll("\\", "/");
+}
+
+function nullableAnnualReportPath(value: unknown): string | null {
+  return value === null ? null : normalizeAnnualReportPath(value as string);
 }
 
 export function reconstructWorkbenchDirectInputRequest(

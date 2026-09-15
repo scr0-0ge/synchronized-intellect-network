@@ -19,6 +19,9 @@ import {
   WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
   WORKBENCH_OBSERVE_CHANNEL,
   WORKBENCH_OPEN_PROJECT_CHANNEL,
+  WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
+  WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
+  WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
   WORKBENCH_PROJECT_VIEW_CHANNEL,
   WORKBENCH_REMOVE_PROJECT_CHANNEL,
   WORKBENCH_REMOVE_SESSION_CHANNEL,
@@ -27,6 +30,8 @@ import {
   WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   type WorkbenchAnyPublicDirectSessionProfileResult,
   type WorkbenchDirectInputRequest,
+  type WorkbenchAnnualReportJobRequest,
+  type WorkbenchAnnualReportProjectRequest,
   type WorkbenchCatalogDefaultPublicProfileResult,
   type WorkbenchCreateProjectResult,
   type WorkbenchStartDirectInputRequest,
@@ -168,6 +173,9 @@ class FakeProjectViewSource {
   readonly sessionMetadataMutations: WorkbenchSessionMetadataMutationRequest[] = [];
   readonly trustedRegistrations: string[] = [];
   readonly submissions: WorkbenchDirectInputRequest[] = [];
+  readonly annualReportStarts: WorkbenchAnnualReportJobRequest[] = [];
+  readonly annualReportReads: WorkbenchAnnualReportProjectRequest[] = [];
+  readonly annualReportOutputs: WorkbenchAnnualReportProjectRequest[] = [];
   readonly interrupts: WorkbenchInterruptRequest[] = [];
   readonly steers: WorkbenchSteerRequest[] = [];
   readonly defaultSaves: WorkbenchDirectSessionProfileDefaultRequest[] = [];
@@ -320,6 +328,21 @@ class FakeProjectViewSource {
     this.submissions.push(request);
     if (this.submissionThrows) throw new Error("PRIVATE_BACKEND_FAILURE");
     return this.submissionResult as WorkbenchSubmissionResult;
+  }
+
+  async startAnnualReportJob(request: WorkbenchAnnualReportJobRequest) {
+    this.annualReportStarts.push(request);
+    return { ok: true as const, status: "started" as const };
+  }
+
+  async readAnnualReportJob(request: WorkbenchAnnualReportProjectRequest) {
+    this.annualReportReads.push(request);
+    return null;
+  }
+
+  async resolveAnnualReportOutputDirectory(request: WorkbenchAnnualReportProjectRequest) {
+    this.annualReportOutputs.push(request);
+    return "C:\\private\\Project\\annual-report\\20260915-120000";
   }
 
   async interruptActiveTurn(
@@ -899,11 +922,14 @@ test("IPC loads one sanitized profile only for the owning window through one fix
     WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
+    WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
+    WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_REMOVE_PROJECT_CHANNEL,
     WORKBENCH_REMOVE_SESSION_CHANNEL,
     WORKBENCH_SELECT_PROJECT_CHANNEL,
     WORKBENCH_SUBMIT_CHANNEL,
+    WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   ].sort());
 
@@ -950,6 +976,53 @@ test("IPC reconstructs and transits an exact replacement source request without 
     true,
   );
   binding.dispose();
+});
+
+test("IPC admits only exact annual-report requests and opens only the source-owned output directory", async () => {
+  const ipcMain = new FakeIpcMain();
+  const owner = new FakeSender();
+  const intruder = new FakeSender();
+  const source = new FakeProjectViewSource();
+  const openedPaths: string[] = [];
+  const binding = installWorkbenchProjectViewIpc({
+    ipcMain,
+    window: new FakeWindow(owner),
+    source,
+    async openPath(path) {
+      openedPaths.push(path);
+      return "";
+    },
+  });
+  const projectId = "project-selection:00000000-0000-4000-8000-000000000071";
+  const request = { projectId, ...defaultRequest() };
+
+  assert.deepEqual(
+    await ipcMain.invoke(WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL, owner, request),
+    { ok: true, status: "started" },
+  );
+  assert.equal(
+    await ipcMain.invoke(WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL, owner, { projectId }),
+    null,
+  );
+  assert.deepEqual(
+    await ipcMain.invoke(WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL, owner, { projectId }),
+    { ok: true, status: "opened" },
+  );
+  assert.deepEqual(source.annualReportStarts, [request]);
+  assert.deepEqual(source.annualReportReads, [{ projectId }]);
+  assert.deepEqual(source.annualReportOutputs, [{ projectId }]);
+  assert.deepEqual(openedPaths, ["C:\\private\\Project\\annual-report\\20260915-120000"]);
+
+  const rejected = await ipcMain.invoke(
+    WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
+    intruder,
+    { ...request, outputDirectory: "C:\\private" },
+  );
+  assert.equal((rejected as { ok: boolean }).ok, false);
+  assert.equal(source.annualReportStarts.length, 1);
+
+  binding.dispose();
+  assert.equal(ipcMain.handlers.size, 0);
 });
 
 test("IPC rejects adversarial replacement request graphs before the Project source", async () => {
@@ -1539,11 +1612,14 @@ test("IPC saves one sanitized default only for the owning window through one fix
     WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
+    WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
+    WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_REMOVE_PROJECT_CHANNEL,
     WORKBENCH_REMOVE_SESSION_CHANNEL,
     WORKBENCH_SELECT_PROJECT_CHANNEL,
     WORKBENCH_SUBMIT_CHANNEL,
+    WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   ].sort());
 
@@ -1681,11 +1757,14 @@ test("IPC invokes one sanitized submission only for the owning window and remove
     WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
+    WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
+    WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_REMOVE_PROJECT_CHANNEL,
     WORKBENCH_REMOVE_SESSION_CHANNEL,
     WORKBENCH_SELECT_PROJECT_CHANNEL,
     WORKBENCH_SUBMIT_CHANNEL,
+    WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   ].sort());
   assert.equal(JSON.stringify(accepted).includes(instruction), false);
@@ -2114,11 +2193,14 @@ test("IPC observation preserves exact user text and rejects an extra event key o
     WORKBENCH_RESPOND_USER_INPUT_CHANNEL,
     WORKBENCH_LOAD_PROFILE_CHANNEL,
     WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL,
+    WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
     WORKBENCH_OPEN_PROJECT_CHANNEL,
+    WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_REMOVE_PROJECT_CHANNEL,
     WORKBENCH_REMOVE_SESSION_CHANNEL,
     WORKBENCH_SELECT_PROJECT_CHANNEL,
     WORKBENCH_SUBMIT_CHANNEL,
+    WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
     WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   ].sort());
   assert.deepEqual([...ipcMain.listeners.keys()].sort(), [

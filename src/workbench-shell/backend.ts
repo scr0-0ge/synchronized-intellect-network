@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   AgentRuntimeAdapter,
@@ -50,6 +51,10 @@ import {
   createAutoIterationMcpServer,
   type AutoIterationMcpServer,
 } from "./auto-iteration-mcp-server.ts";
+import {
+  createAutoIterationBindingRegistry,
+  type AutoIterationBindingRegistry,
+} from "./auto-iteration-mcp-host.ts";
 import { WORKBENCH_RUNTIME_ENDPOINT_IDS } from "./runtime-endpoint-identity.ts";
 import {
   createDirectSessionProfilePreferenceStore,
@@ -82,6 +87,9 @@ import {
   publicUnavailableSubmission,
   publicContinuationUnavailable,
   type WorkbenchAnyDirectSessionProfileResult,
+  type WorkbenchAnnualReportJobRequest,
+  type WorkbenchAnnualReportSnapshot,
+  type WorkbenchAnnualReportStartResult,
   type WorkbenchDirectInputRequest,
   type WorkbenchBackendDirectSessionProfile,
   type WorkbenchBackendContinuationDirectSessionProfile,
@@ -170,7 +178,25 @@ export interface WorkbenchBackend extends Partial<WorkbenchUserInputBridge> {
   submitDirectInput(
     request: WorkbenchDirectInputRequest,
   ): Promise<WorkbenchSubmissionResult>;
+  startAnnualReportJob?(
+    request: Omit<WorkbenchAnnualReportJobRequest, "projectId">,
+  ): Promise<WorkbenchAnnualReportStartResult>;
+  readAnnualReportJob?(): Promise<WorkbenchAnnualReportSnapshot | null>;
+  resolveAnnualReportOutputDirectory?(): Promise<string | null>;
   close(): Promise<void>;
+}
+
+export interface WorkbenchAnnualReportCapability {
+  start(input: Readonly<{
+    projectDirectory: string;
+    adapter: AgentRuntimeAdapter;
+    profile: SessionProfile;
+  }>): Promise<
+    | Readonly<{ status: "no-pdfs" }>
+    | Readonly<{ status: "started"; completion: Promise<void> }>
+  >;
+  readLatest(projectDirectory: string): Promise<WorkbenchAnnualReportSnapshot | null>;
+  resolveLatestOutputDirectory(projectDirectory: string): Promise<string | null>;
 }
 
 /** Backend-only compatibility for the protected headless catalog validator. */
@@ -223,6 +249,20 @@ const noLaunchAdapter: ResumableAgentRuntimeAdapter = Object.freeze({
   },
 });
 
+/**
+ * The bootstrap entry the bridge hands to CLIs: the file sitting beside this
+ * module's compiled output (`main.js` → `auto-iteration-mcp-bootstrap.js`).
+ * In the source tree that is the TypeScript entry itself (Node's own type
+ * stripping runs it); in the packaged app it is only readable when shipped
+ * outside the asar — an unusable entry degrades visibly through the
+ * registry's diagnostics instead of blocking Sessions.
+ */
+function autoIterationBootstrapEntry(): string {
+  return fileURLToPath(
+    new URL("./auto-iteration-mcp-bootstrap.js", import.meta.url),
+  );
+}
+
 export async function createWorkbenchBackend(options: {
   readonly projectDirectory: string;
   readonly databasePath: string;
@@ -232,7 +272,29 @@ export async function createWorkbenchBackend(options: {
   readonly preferenceStore?: DirectSessionProfilePreferenceStore;
   readonly directEndpointPresentation?: WorkbenchDirectEndpointPresentation;
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
+  readonly annualReportCapability?: WorkbenchAnnualReportCapability;
+  readonly onAnnualReportJobActivityChange?: (delta: 1 | -1) => void;
 }): Promise<WorkbenchBackend> {
+  // w300: the Workbench MCP binding registry retains each pipe while the
+  // auto-iteration service carries its bootstrap spec on the exact command
+  // object submitted to the coordinator. Ordinary commands omit the field.
+  const serverLookup: {
+    serverForSession(sessionId: string): AutoIterationMcpServer;
+  } = {
+    serverForSession: () => {
+      throw new Error("auto-iteration-server-lookup-unbound");
+    },
+  };
+  const workbenchBindings = createAutoIterationBindingRegistry({
+    bootstrapEntry: autoIterationBootstrapEntry(),
+    serverForSession: (sessionId) => serverLookup.serverForSession(sessionId),
+    onDiagnostic: (diagnostic) => {
+      console.warn(
+        "[auto-iteration-mcp]",
+        JSON.stringify(diagnostic),
+      );
+    },
+  });
   const adapter = toResumableAdapter(options.adapter ?? noLaunchAdapter);
   const preferenceStore =
     options.preferenceStore ??
@@ -264,6 +326,10 @@ export async function createWorkbenchBackend(options: {
       options.projectDirectory,
       preferenceStore,
       options.directEndpointPresentation ?? productionEndpointPresentation,
+      workbenchBindings,
+      serverLookup,
+      options.annualReportCapability,
+      options.onAnnualReportJobActivityChange,
     );
   } catch (error) {
     // `openProject` has already opened -- and created -- the SQLite ledger for
@@ -273,6 +339,7 @@ export async function createWorkbenchBackend(options: {
     // for a directory whose label cannot be derived (a drive root, F-w187 /
     // public issue #5), and each failed attempt used to leave one more open
     // handle on the ledger file for the lifetime of the process.
+    workbenchBindings.close();
     await channel.close().catch(() => undefined);
     throw error;
   }
@@ -326,6 +393,8 @@ export interface WorkbenchAutoIterationService {
   }): Promise<string | undefined>;
   /** The same server a CLI bootstrap process would reach through the local bridge. */
   mcpServerForSession(sessionId: string): AutoIterationMcpServer;
+  /** Live Workbench MCP bridge registry (w300); guards observe its size. */
+  readonly workbenchBindings: AutoIterationBindingRegistry;
   /** Idempotent pass over the durable outbox; safe to call at any turn boundary. */
   drainPendingOutbox(): Promise<void>;
   close(): Promise<void>;
@@ -337,6 +406,16 @@ interface AutoIterationServiceOptions {
   };
   readonly adapter: ResumableAgentRuntimeAdapter;
   readonly projectDirectory: string;
+  /**
+   * Workbench MCP bridge bindings (w300). The service retains each host pipe,
+   * attaches its spec to the exact coordinator command, and resolves the
+   * per-Session server through `serverForSession` at association time.
+   */
+  readonly workbenchBindings: AutoIterationBindingRegistry;
+  /** Late-bound per-Session server lookup the registry serves through. */
+  readonly serverLookup: {
+    serverForSession(sessionId: string): AutoIterationMcpServer;
+  };
 }
 
 function createBackendAutoIterationService(
@@ -348,6 +427,11 @@ function createBackendAutoIterationService(
   const arbiter: SessionTurnArbiter = createSessionTurnArbiter();
   const mcpServersBySession = new Map<string, AutoIterationMcpServer>();
   let closed = false;
+  // The registry is constructed before this service exists (it must wrap the
+  // adapter handed to the coordinator); association only ever happens after
+  // this assignment, so the indirection is safe.
+  options.serverLookup.serverForSession = (sessionId: string) =>
+    mcpServerForSession(sessionId);
 
   // The bridge never sees model-supplied identity: each server is bound to one
   // host-known Session, and every request re-drains the durable outbox so a
@@ -477,10 +561,17 @@ function createBackendAutoIterationService(
     readonly profile: SessionProfile;
     readonly input: string;
   }): Promise<string | undefined> {
+    // w300: bind the bootstrap spec to THIS command object. The coordinator
+    // carries the runtime-only field to the executor and strips it before
+    // durable storage; no adapter-wide FIFO can give it to another command.
+    const mcpBinding = options.workbenchBindings.reserve(
+      options_.idempotencyKey,
+    );
     let catalog: RuntimeCatalog;
     try {
       catalog = await adapter.inspect(projectDirectory);
     } catch {
+      options.workbenchBindings.release(options_.idempotencyKey);
       return undefined;
     }
     let resolved: SessionProfile;
@@ -491,6 +582,7 @@ function createBackendAutoIterationService(
         preferences: { global: options_.profile },
       }).profile;
     } catch {
+      options.workbenchBindings.release(options_.idempotencyKey);
       return undefined;
     }
     try {
@@ -504,14 +596,22 @@ function createBackendAutoIterationService(
           preferences: Object.freeze({ global: resolved }),
           profile: resolved,
           input: options_.input,
+          ...(mcpBinding === undefined
+            ? {}
+            : { workbenchMcp: mcpBinding.bootstrap }),
         }),
         Object.freeze({ endpointId: options_.endpointId }),
       );
       const project = await channel.snapshot();
-      return project.commands.find(
+      const sessionId = project.commands.find(
         (command) => command.commandId === receipt.commandId,
       )?.session?.sessionId;
+      if (sessionId === undefined) {
+        options.workbenchBindings.release(options_.idempotencyKey);
+      }
+      return sessionId;
     } catch {
+      options.workbenchBindings.release(options_.idempotencyKey);
       return undefined;
     }
   }
@@ -556,23 +656,36 @@ function createBackendAutoIterationService(
       supervisor.sessionId,
       session.profile,
     );
+    // w300: a bound Session's resume re-issues a fresh binding (supervisor
+    // ruling); the Session id is already known so the pipe serves live.
+    const wakeupKey = randomUUID();
+    const mcpBinding = options.workbenchBindings.reserveForSession(
+      wakeupKey,
+      supervisor.sessionId,
+    );
     // Same-Session arbitration: the wakeup runs on the per-Session arbiter,
     // never on a Project-wide submission tail.
     void arbiter
       .submit(supervisor.sessionId, "auto-wakeup", async () => {
-        if (closed) return;
+        if (closed) {
+          options.workbenchBindings.release(wakeupKey);
+          return;
+        }
         try {
           const receipt = await channel.act(
             Object.freeze({
               kind: "direct" as const,
               commandKind: "continue" as const,
-              idempotencyKey: randomUUID(),
+              idempotencyKey: wakeupKey,
               runtime: "codex" as const,
               targetSessionId: session.sessionId,
               profile: session.profile,
               ...(resumeIdentity === undefined
                 ? {}
                 : { runtimeResumeIdentity: resumeIdentity }),
+              ...(mcpBinding === undefined
+                ? {}
+                : { workbenchMcp: mcpBinding.bootstrap }),
               input:
                 `Workbench auto-iteration: a worker handoff awaits your review ` +
                 `(work order ${request.handoff.workOrderId}). ` +
@@ -587,6 +700,7 @@ function createBackendAutoIterationService(
             parentCommandId: receipt.commandId,
           });
         } catch (error) {
+          options.workbenchBindings.release(wakeupKey);
           console.warn(
             "[auto-iteration] supervisor wakeup deferred",
             request.handoff.workOrderId,
@@ -613,6 +727,12 @@ function createBackendAutoIterationService(
         "Use the read_inbox tool to take over the supervisor role.",
     });
     if (successorSessionId === undefined) return false;
+    // w300: the successor Session's pipe starts serving immediately; its
+    // tenure binding below is what turns the supervisor tools on.
+    options.workbenchBindings.associate(
+      `auto-rotation-${request.tenureId}`,
+      successorSessionId,
+    );
     const tenure = await authority.completeSupervisorRotation({
       roleSlotId: request.roleSlotId,
       successorSessionId,
@@ -679,6 +799,14 @@ function createBackendAutoIterationService(
           attemptId,
         },
       });
+      // w300: only now does the pipe know its Session — after the durable
+      // attempt binding AND the in-process actor binding, so the CLI's
+      // buffered MCP handshake replays against a Session that already sees
+      // its worker tools.
+      options.workbenchBindings.associate(
+        `auto-attempt-${attemptId}`,
+        sessionId,
+      );
       return true;
     }
     if (entry.kind === "inbox-wakeup") {
@@ -776,23 +904,35 @@ function createBackendAutoIterationService(
   return Object.freeze({
     authority,
     bindInitialSupervisor,
-    startHostSession: (request: {
+    startHostSession: async (request: {
       readonly endpointId: DurableRuntimeEndpointId;
       readonly profile: SessionProfile;
       readonly input: string;
-    }) =>
-      startSessionForAutoIteration({
-        idempotencyKey: `auto-host-${randomUUID()}`,
+    }) => {
+      const hostKey = `auto-host-${randomUUID()}`;
+      const sessionId = await startSessionForAutoIteration({
+        idempotencyKey: hostKey,
         endpointId: request.endpointId,
         profile: request.profile,
         input: request.input,
-      }),
+      });
+      // w300: serve the pipe as soon as the Session id exists. The actor
+      // binding (bindInitialSupervisor, done by the caller) is what turns
+      // the supervisor tools on; until then the Session's tool list is
+      // legitimately empty.
+      if (sessionId !== undefined) {
+        options.workbenchBindings.associate(hostKey, sessionId);
+      }
+      return sessionId;
+    },
     mcpServerForSession,
+    workbenchBindings: options.workbenchBindings,
     drainPendingOutbox,
     async close(): Promise<void> {
       closed = true;
       await updateIterator?.return?.().catch(() => undefined);
       await arbiter.close();
+      options.workbenchBindings.close();
     },
   });
 }
@@ -804,6 +944,12 @@ function createBackend(
   projectDirectory: string,
   preferenceStore: DirectSessionProfilePreferenceStore,
   endpointPresentation: WorkbenchDirectEndpointPresentation,
+  workbenchBindings: AutoIterationBindingRegistry,
+  serverLookup: {
+    serverForSession(sessionId: string): AutoIterationMcpServer;
+  },
+  annualReportCapability?: WorkbenchAnnualReportCapability,
+  onAnnualReportJobActivityChange?: (delta: 1 | -1) => void,
 ): WorkbenchBackend {
   let closePromise: Promise<void> | undefined;
   const profileLoadPromises = new Set<
@@ -823,6 +969,8 @@ function createBackend(
   const interruptPromises = new Set<Promise<WorkbenchInterruptResult>>();
   const steerPromises = new Set<Promise<WorkbenchSteerResult>>();
   let submissionTail: Promise<void> = Promise.resolve();
+  let annualReportStarting = false;
+  let annualReportCompletion: Promise<void> | undefined;
   let activeSnapshot: CatalogSnapshot | undefined;
   let activeSnapshotRecoveryCommandIds: ReadonlySet<string> | undefined;
   let activeContinuationCapability: ActiveContinuationCapability | undefined;
@@ -846,6 +994,8 @@ function createBackend(
           },
           adapter,
           projectDirectory,
+          workbenchBindings,
+          serverLookup,
         });
   return Object.freeze({
     autoIteration,
@@ -1468,6 +1618,88 @@ function createBackend(
       );
       return operation;
     },
+    async startAnnualReportJob(
+      request: Omit<WorkbenchAnnualReportJobRequest, "projectId">,
+    ): Promise<WorkbenchAnnualReportStartResult> {
+      if (closing || annualReportCapability === undefined) {
+        return annualReportStartFailure(
+          "annual-report-unavailable",
+          "Annual report jobs are unavailable in this build.",
+        );
+      }
+      if (annualReportStarting || annualReportCompletion !== undefined) {
+        return annualReportStartFailure(
+          "already-running",
+          "An annual report job is already running for this Project.",
+        );
+      }
+      const snapshot = activeSnapshot;
+      if (
+        snapshot === undefined ||
+        request.snapshotKey !== snapshot.value.publicResult.profile.snapshotKey
+      ) {
+        return annualReportStartFailure(
+          "invalid-profile-selection",
+          "The selected Session Profile expired. Reload the profile options and try again.",
+        );
+      }
+      const resolved = snapshot.value.resolveSelection(request);
+      if (resolved === undefined) {
+        return annualReportStartFailure(
+          "invalid-profile-selection",
+          "The selected endpoint, model, or intensity is no longer available. Reload the profile options and try again.",
+        );
+      }
+      if (snapshot.directStartByEndpoint[resolved.endpointIndex] !== "supported") {
+        return annualReportStartFailure(
+          "invalid-profile-selection",
+          "The selected endpoint cannot start because its key or runtime is unavailable. Open Settings and try again.",
+        );
+      }
+      annualReportStarting = true;
+      let activityHandedToCompletion = false;
+      onAnnualReportJobActivityChange?.(1);
+      try {
+        const started = await annualReportCapability.start({
+          projectDirectory,
+          adapter,
+          profile: resolved.profile,
+        });
+        if (started.status === "no-pdfs") {
+          return annualReportStartFailure(
+            "no-pdfs",
+            "This Project folder has no top-level PDF files to process.",
+          );
+        }
+        const completion = started.completion.then(
+          () => undefined,
+          () => undefined,
+        );
+        annualReportCompletion = completion;
+        activityHandedToCompletion = true;
+        void completion.finally(() => {
+          if (annualReportCompletion === completion) annualReportCompletion = undefined;
+          onAnnualReportJobActivityChange?.(-1);
+        });
+        return Object.freeze({ ok: true, status: "started" });
+      } catch {
+        return annualReportStartFailure(
+          "annual-report-unavailable",
+          "The annual report job could not be started. Keep the folder open and try again.",
+        );
+      } finally {
+        annualReportStarting = false;
+        if (!activityHandedToCompletion) onAnnualReportJobActivityChange?.(-1);
+      }
+    },
+    readAnnualReportJob(): Promise<WorkbenchAnnualReportSnapshot | null> {
+      if (closing || annualReportCapability === undefined) return Promise.resolve(null);
+      return annualReportCapability.readLatest(projectDirectory).catch(() => null);
+    },
+    resolveAnnualReportOutputDirectory(): Promise<string | null> {
+      if (closing || annualReportCapability === undefined) return Promise.resolve(null);
+      return annualReportCapability.resolveLatestOutputDirectory(projectDirectory).catch(() => null);
+    },
     close(): Promise<void> {
       closing = true;
       continuationPlan.cancel();
@@ -1475,6 +1707,7 @@ function createBackend(
         await Promise.all([...profileLoadPromises.values()]);
         await Promise.all([...preferenceSavePromises]);
         await Promise.all([...submissionPromises]);
+        if (annualReportCompletion !== undefined) await annualReportCompletion;
         await Promise.allSettled([...sessionRemovalPromises]);
         await Promise.allSettled([...sessionMetadataPromises]);
         await Promise.allSettled([...interruptPromises]);
@@ -1491,6 +1724,13 @@ function createBackend(
       return closePromise;
     },
   }) as WorkbenchBackend;
+}
+
+function annualReportStartFailure(
+  category: Exclude<WorkbenchAnnualReportStartResult, { readonly ok: true }>["error"]["category"],
+  message: string,
+): WorkbenchAnnualReportStartResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ category, message }) });
 }
 
 function recoveryRequiredCommandIds(project: ProjectSnapshot): ReadonlySet<string> {
@@ -2252,4 +2492,3 @@ function deepFreeze<T>(value: T): T {
   for (const child of Object.values(value)) deepFreeze(child);
   return value;
 }
-

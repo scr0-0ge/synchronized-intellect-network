@@ -912,7 +912,7 @@ test("ready callback cannot initialize a backend after shutdown starts", async (
   );
 });
 
-test("production owns one tray-backed instance and exposes no close or Quit confirmation", async () => {
+test("production owns one tray-backed instance, keeping an active annual-report job alive after all windows close", async () => {
   const [source, lifecycleSource] = await Promise.all([
     readFile(
       new URL("../../src/workbench-shell/electron/main.ts", import.meta.url),
@@ -965,9 +965,9 @@ test("production owns one tray-backed instance and exposes no close or Quit conf
     source,
     /label: "Quit",[\s\S]{0,120}?app\.exit/u,
   );
-  assert.doesNotMatch(
+  assert.match(
     source,
-    /app\.on\("window-all-closed",[\s\S]{0,120}?app\.quit/u,
+    /app\.on\("window-all-closed", \(\) => \{\s+if \(activeAnnualReportJobs === 0 && process\.platform !== "darwin"\) app\.quit\(\);\s+\}\);/u,
   );
   const productionLifecycleSource = source.slice(
     source.indexOf("const lifecycle = createWorkbenchLifecycleController"),
@@ -1245,7 +1245,7 @@ test("production Electron wiring resolves packaged startup before composing the 
   );
   assert.match(
     source,
-    /async createProjectHost\(startup\) \{\s+const runtimeAdapter = await createProductionRuntimeEndpointAdapter\(\{[\s\S]*?decorateDirectoryAdapter: \(delegate\) =>\s+createPackagedBootstrapRuntimeAdapter\(\{\s+bootstrapProjectDirectory:\s+startup\.fallbackProjectDirectory,\s+delegate,\s+\}\),[\s\S]*?return createWorkbenchProjectHost\(\{\s+\.\.\.startup,\s+adapter: runtimeAdapter,\s+authGeneration,\s+\}\);/u,
+    /async createProjectHost\(startup\) \{\s+const runtimeAdapter = await createProductionRuntimeEndpointAdapter\(\{[\s\S]*?decorateDirectoryAdapter: \(delegate\) =>\s+createPackagedBootstrapRuntimeAdapter\(\{\s+bootstrapProjectDirectory:\s+startup\.fallbackProjectDirectory,\s+delegate,\s+\}\),[\s\S]*?return createWorkbenchProjectHost\(\{\s+\.\.\.startup,\s+adapter: runtimeAdapter,\s+authGeneration,[\s\S]*?annualReportCapability[\s\S]*?onAnnualReportJobActivityChange\(delta\) \{\s+activeAnnualReportJobs = Math\.max\(0, activeAnnualReportJobs \+ delta\);\s+\},\s+\}\);/u,
   );
   assert.match(
     source,
@@ -1254,8 +1254,18 @@ test("production Electron wiring resolves packaged startup before composing the 
   assert.equal(/fallbackProjectDirectory:\s*process\.cwd\(\)/u.test(source), false);
   assert.equal(/readSwitch\("database-path"\)/u.test(source), false);
   assert.equal(/project-view\.sqlite|databasePath/u.test(source), false);
+  /* This guard exists so main.ts never calls a CodexAdapter/ClaudeAdapter
+     session method directly, bypassing the composed Runtime Endpoint
+     Directory. The lazy annual-report wrapper above forwards its own,
+     unrelated `.start(input)` (a PDF-report job trigger, added by the
+     packaged-build fix in dcc0942) -- excluding that one known call keeps
+     the guard checking everything else verbatim; it is not a relaxation. */
+  const sourceWithoutAnnualReportCapabilityStartForwarding = source.replace(
+    "resolveCapability().then((real) => real.start(input))",
+    "",
+  );
   assert.equal(
-    /\.(?:inspect|start|resume)\(/u.test(source),
+    /\.(?:inspect|start|resume)\(/u.test(sourceWithoutAnnualReportCapabilityStartForwarding),
     false,
   );
   assert.equal(/showOpenDialog|showSaveDialog/u.test(source), false);

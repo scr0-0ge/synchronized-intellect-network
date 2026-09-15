@@ -338,6 +338,23 @@ async function runLocalWindowsPackageCommand(): Promise<void> {
     iconPath: join(workspaceDirectory, "assets", "brand", "sin.ico"),
     packageApplication: packagerModule.packager,
   });
+  // `ELECTRON_RUN_AS_NODE` cannot resolve an entry inside app.asar. Keep this
+  // standalone CLI entry beside the archive, where the packaged Electron
+  // executable can read it without depending on a separately installed Node.
+  const bootstrapSource = join(
+    workspaceDirectory,
+    "dist",
+    "main",
+    "auto-iteration-mcp-bootstrap.js",
+  );
+  const bootstrapDestination = join(
+    packaged.applicationDirectory,
+    "resources",
+    "workbench-bootstrap",
+    "auto-iteration-mcp-bootstrap.js",
+  );
+  await mkdir(dirname(bootstrapDestination), { recursive: true });
+  await copyFile(bootstrapSource, bootstrapDestination);
   process.stdout.write(
     `Synchronized Intellect Network local Windows x64 package ready (${packaged.stagedFiles.length} staged files).\n`,
   );
