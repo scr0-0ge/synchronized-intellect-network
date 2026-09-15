@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, basename, dirname, extname } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
@@ -94,12 +94,21 @@ class ScriptedLoopAdapter implements ResumableAgentRuntimeAdapter {
   readonly startInputs: string[] = [];
   readonly startRequests: RuntimeStart[] = [];
   readonly resumeInputs: string[] = [];
+  /** Input texts of turns that actually ran, in send order. */
+  readonly sentInputs: string[] = [];
+  /** Interleaved resume/send trace for diagnosis. */
+  readonly trace: string[] = [];
   private readonly onStart?: (request: RuntimeStart) => Promise<void>;
+  private readonly onResume?: (request: RuntimeResume) => Promise<void>;
   #startGate: Promise<void> | undefined;
   #releaseStartGate: (() => void) | undefined;
 
-  constructor(onStart?: (request: RuntimeStart) => Promise<void>) {
+  constructor(
+    onStart?: (request: RuntimeStart) => Promise<void>,
+    onResume?: (request: RuntimeResume) => Promise<void>,
+  ) {
     this.onStart = onStart;
+    this.onResume = onResume;
   }
 
   /**
@@ -132,8 +141,17 @@ class ScriptedLoopAdapter implements ResumableAgentRuntimeAdapter {
   }
 
   async resume(request: RuntimeResume): Promise<ResumableRuntimeBinding> {
+    this.trace.push(`resume:${request.opaqueSessionReference}`);
+    await this.onResume?.(request);
     this.resumeInputs.push(request.profile.model);
-    return new ScriptedBinding(request.opaqueSessionReference);
+    const binding = new ScriptedBinding(request.opaqueSessionReference);
+    const innerSend = binding.send.bind(binding);
+    binding.send = async (input: RuntimeInput) => {
+      this.trace.push(`send:${input.text.slice(0, 80)}`);
+      this.sentInputs.push(input.text);
+      await innerSend(input);
+    };
+    return binding;
   }
 }
 
@@ -1298,4 +1316,796 @@ test("the product integrates an approved frozen candidate itself: approve -> awa
     mergeCommitSha,
     "the local target branch did not move again",
   );
+});
+test("handoffs arriving during a supervisor turn wake once at the boundary with one merged summary", async (t) => {
+  // The first supervisor wakeup turn is held open, so the later handoff
+  // entries stay pending (same-Session arbitration); when the turn ends the
+  // boundary drain must wake the idle parent ONCE with a bounded summary
+  // carrying every still-pending handoff (issue #8 §3 wakeup, M1 merge).
+  let gate: Promise<void> | undefined;
+  let gateResolve!: () => void;
+  const adapter = new ScriptedLoopAdapter(undefined, async () => {
+    if (gate === undefined) {
+      gate = new Promise<void>((resolve) => {
+        gateResolve = resolve;
+      });
+      await gate;
+    }
+  });
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-m1-parallel-"));
+  const projectDirectory = join(root, "Project");
+  await mkdir(projectDirectory);
+  await git(projectDirectory, "init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await git(projectDirectory, "add", "baseline.txt");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+  const backend = await createWorkbenchBackend({
+    projectDirectory,
+    databasePath: join(root, "workbench.sqlite"),
+    adapter,
+  });
+  t.after(async () => {
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "m1 supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+
+  const submittedOrders: Array<{ workOrderId: string; attemptId: string }> = [];
+  for (const key of ["m1-parallel-submit-a", "m1-parallel-submit-b", "m1-parallel-submit-c"]) {
+    const submitted = await callTool(supervisorServer, "submit_work_order", {
+      requestIdempotencyKey: key,
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      workOrder: workOrderSubmission(profile, baselineCommitSha),
+    });
+    assert.equal(submitted.kind, "work-order-submitted");
+    submittedOrders.push({
+      workOrderId: (submitted.workOrder as Record<string, unknown>).workOrderId as string,
+      attemptId: (submitted.attempt as Record<string, unknown>).attemptId as string,
+    });
+  }
+
+  // Three worker Sessions run at the same time, in distinct worktrees.
+  const workerSessions: string[] = [];
+  for (const order of submittedOrders) {
+    workerSessions.push(
+      await waitFor(`worker Session for ${order.workOrderId}`, () => {
+        const found = findWorkOrder(
+          service.authority.readAutoIterationOverview(),
+          order.workOrderId,
+        );
+        return found?.workerSessionBound ? found.workerSessionId ?? undefined : undefined;
+      }),
+    );
+  }
+  assert.equal(new Set(workerSessions).size, 3, "three distinct worker Sessions");
+  for (const workerSessionId of workerSessions) {
+    assert.notEqual(workerSessionId, supervisorSessionId);
+  }
+  const workerDirectories = adapter.startRequests
+    .map((request) => request.projectDirectory)
+    .filter((directory) => directory !== projectDirectory);
+  assert.equal(workerDirectories.length, 3, "three workers must really overlap");
+  assert.equal(new Set(workerDirectories).size, 3, "worker worktrees must differ");
+
+  // The first handoff opens a wakeup turn; the test holds that turn open.
+  const firstHandoff = await callTool(
+    service.mcpServerForSession(workerSessions[0]!),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m1-parallel-handoff-0",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: {
+          workOrderId: submittedOrders[0]!.workOrderId,
+          attemptId: submittedOrders[0]!.attemptId,
+          handoffId: "handoff-m1-parallel-0",
+        },
+        body: "Delivery 0 is complete.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(firstHandoff.kind, "handoff-submitted");
+  await waitFor("the first wakeup turn to open", () =>
+    adapter.trace.length === 1 ? adapter.trace : undefined,
+  );
+
+  // The other two handoffs arrive while the parent is mid-turn: their wakeup
+  // entries must stay pending until the turn boundary.
+  for (const index of [1, 2]) {
+    const handoff = await callTool(
+      service.mcpServerForSession(workerSessions[index]!),
+      "submit_handoff",
+      {
+        requestIdempotencyKey: `m1-parallel-handoff-${index}`,
+        expectedVersion: 1,
+        observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+        handoff: {
+          idempotencyKey: {
+            workOrderId: submittedOrders[index]!.workOrderId,
+            attemptId: submittedOrders[index]!.attemptId,
+            handoffId: `handoff-m1-parallel-${index}`,
+          },
+          body: `Delivery ${index} is complete.`,
+          artifactIds: [],
+        },
+      },
+    );
+    assert.equal(handoff.kind, "handoff-submitted");
+  }
+  assert.equal(adapter.trace.length, 1, "no second wakeup may start mid-turn");
+  gateResolve();
+
+  await waitFor("all three work orders awaiting review", () => {
+    const overview = service.authority.readAutoIterationOverview();
+    return submittedOrders.every(
+      (order) => findWorkOrder(overview, order.workOrderId)?.status === "awaiting-review",
+    )
+      ? overview
+      : undefined;
+  });
+  await waitFor("wakeup settle in the ledger", async () => {
+    const pending = (await service.authority.readPendingOutbox()).filter(
+      (entry) => entry.kind === "inbox-wakeup",
+    );
+    return pending.length === 0 ? pending : undefined;
+  });
+  assert.equal(
+    adapter.resumeInputs.length,
+    2,
+    `exactly two wakeup turns: ${JSON.stringify(adapter.trace)}`,
+  );
+  assert.equal(adapter.sentInputs.length, 2, "two wakeup turns ran");
+  const boundaryText = adapter.sentInputs[1] ?? "";
+  assert.equal(
+    boundaryText.includes(submittedOrders[1]!.workOrderId) &&
+      boundaryText.includes(submittedOrders[2]!.workOrderId),
+    true,
+    `the boundary wakeup must carry both pending handoffs: ${boundaryText}`,
+  );
+  assert.equal(
+    boundaryText.includes(submittedOrders[0]!.workOrderId),
+    false,
+    "the first handoff already rode the first wakeup",
+  );
+
+  const statuses = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "m1-parallel-read-b",
+    expectedVersion: 2,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrderId: submittedOrders[1]!.workOrderId,
+  });
+  const statuses2 = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "m1-parallel-read-c",
+    expectedVersion: 2,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrderId: submittedOrders[2]!.workOrderId,
+  });
+  const includedReceipt = (statuses.receipts as Array<Record<string, unknown>>).find(
+    (receipt) => receipt.level === "included-in-parent-input",
+  );
+  const includedReceipt2 = (statuses2.receipts as Array<Record<string, unknown>>).find(
+    (receipt) => receipt.level === "included-in-parent-input",
+  );
+  assert.ok(includedReceipt, "the second handoff has an inclusion receipt");
+  assert.ok(includedReceipt2, "the third handoff has an inclusion receipt");
+  assert.equal(
+    includedReceipt!.parentCommandId,
+    includedReceipt2!.parentCommandId,
+    "one parent command carried both handoffs",
+  );
+});
+
+test("the fifth work order queues until a delivery frees a worker slot", async (t) => {
+  const harness = await createHarness("auto-iteration-m1-cap-");
+  t.after(async () => {
+    await harness.backend.close();
+    await removeTree(harness.root);
+  });
+  const service = harness.backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(harness.backend, "m1 cap supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+
+  const orders: Array<{ workOrderId: string; attemptId: string }> = [];
+  for (let index = 0; index < 5; index += 1) {
+    const submitted = await callTool(supervisorServer, "submit_work_order", {
+      requestIdempotencyKey: `m1-cap-submit-${index}`,
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      workOrder: workOrderSubmission(profile, harness.baselineCommitSha),
+    });
+    assert.equal(submitted.kind, "work-order-submitted");
+    orders.push({
+      workOrderId: (submitted.workOrder as Record<string, unknown>).workOrderId as string,
+      attemptId: (submitted.attempt as Record<string, unknown>).attemptId as string,
+    });
+  }
+
+  const workerStartDirectories = () =>
+    harness.adapter.startRequests
+      .map((request) => request.projectDirectory)
+      .filter((directory) => directory !== harness.projectDirectory);
+
+  await waitFor("the first four workers", () => {
+    const overview = service.authority.readAutoIterationOverview();
+    const bound = orders
+      .slice(0, 4)
+      .filter((order) => findWorkOrder(overview, order.workOrderId)?.workerSessionBound);
+    return bound.length === 4 ? overview : undefined;
+  });
+  const overview = service.authority.readAutoIterationOverview();
+  assert.equal(workerStartDirectories().length, 4, "the cap holds four workers");
+  assert.equal(new Set(workerStartDirectories()).size, 4, "worktrees stay isolated");
+  assert.equal(
+    findWorkOrder(overview, orders[4]!.workOrderId)?.status,
+    "queued",
+    "the fifth work order reads as queued",
+  );
+
+  // A delivery frees a slot and the queued order auto-starts.
+  const firstWorkerSessionId = await waitFor("first worker Session", () => {
+    const found = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      orders[0]!.workOrderId,
+    );
+    return found?.workerSessionId ?? undefined;
+  });
+  const handoff = await callTool(
+    service.mcpServerForSession(firstWorkerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m1-cap-handoff-0",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: {
+          workOrderId: orders[0]!.workOrderId,
+          attemptId: orders[0]!.attemptId,
+          handoffId: "handoff-m1-cap-0",
+        },
+        body: "First delivery done.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(handoff.kind, "handoff-submitted");
+  const fifth = await waitFor("the queued order to auto-start", () => {
+    const found = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      orders[4]!.workOrderId,
+    );
+    return found?.workerSessionBound && found.status === "executing" ? found : undefined;
+  });
+  assert.equal(workerStartDirectories().length, 5);
+  assert.equal(fifth.workerSessionId === null, false);
+});
+
+test("a quota block stops even the first worker and release starts it", async (t) => {
+  const harness = await createHarness("auto-iteration-m1-quota-");
+  t.after(async () => {
+    await harness.backend.close();
+    await removeTree(harness.root);
+  });
+  const service = harness.backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(harness.backend, "m1 quota supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+
+  const exhausted = {
+    quotaPoolId: "codex-account:codex",
+    source: "codex-account:account/rateLimits/read" as const,
+    observedAt: 1,
+    status: "observed" as const,
+    windows: [
+      { name: "primary", usedFraction: 1, resetsAt: null, windowDurationMinutes: null },
+    ],
+  };
+  await service.authority.observeQuota(exhausted);
+  const submitted = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m1-quota-submit-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: workOrderSubmission(profile, harness.baselineCommitSha),
+  });
+  assert.equal(submitted.kind, "work-order-submitted");
+  assert.equal(
+    (submitted.workOrder as Record<string, unknown>).status,
+    "waiting-for-quota",
+    "a submission under a quota block must not claim a worker",
+  );
+  const workOrderId = (submitted.workOrder as Record<string, unknown>)
+    .workOrderId as string;
+  await service.drainPendingOutbox();
+  let overview = service.authority.readAutoIterationOverview();
+  assert.equal(overview.quotaWaiting, true);
+  assert.equal(findWorkOrder(overview, workOrderId)?.workerSessionBound, false);
+  assert.equal(
+    harness.adapter.startRequests.filter(
+      (request) => request.projectDirectory !== harness.projectDirectory,
+    ).length,
+    0,
+    "no worker may start while the quota is blocked",
+  );
+
+  await service.authority.observeQuota({
+    ...exhausted,
+    observedAt: 2,
+    windows: [
+      { name: "primary", usedFraction: 0.1, resetsAt: null, windowDurationMinutes: null },
+    ],
+  });
+  overview = service.authority.readAutoIterationOverview();
+  assert.equal(overview.quotaWaiting, false);
+  assert.equal(findWorkOrder(overview, workOrderId)?.status, "executing");
+  await service.drainPendingOutbox();
+  await waitFor("the released worker", () => {
+    const found = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      workOrderId,
+    );
+    return found?.workerSessionBound ? found.workerSessionId ?? undefined : undefined;
+  });
+});
+
+test("a handoff is rejected while its capture job is still running and accepted after it ends", async (t) => {
+  const harness = await createHarness("auto-iteration-m1-job-");
+  t.after(async () => {
+    await harness.backend.close();
+    await removeTree(harness.root);
+  });
+  const service = harness.backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(harness.backend, "m1 job supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+  const submitted = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m1-job-submit-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: workOrderSubmission(profile, harness.baselineCommitSha),
+  });
+  const workOrderId = (submitted.workOrder as Record<string, unknown>).workOrderId as string;
+  const attemptId = (submitted.attempt as Record<string, unknown>).attemptId as string;
+  const workerSessionId = await waitFor("worker Session binding", () => {
+    const order = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      workOrderId,
+    );
+    return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+  });
+
+  // A durable job record frozen mid-run: the "still running" signal exists on
+  // the record, so the host can refuse the handoff without inventing state.
+  const jobsRoot = join(
+    dirname(harness.databasePath),
+    "attempts",
+    basename(harness.databasePath, extname(harness.databasePath)),
+    "jobs",
+  );
+  const jobRecordPath = join(jobsRoot, `capture-${attemptId}.json`);
+  await mkdir(jobsRoot, { recursive: true });
+  await writeFile(
+    jobRecordPath,
+    `${JSON.stringify({
+      schemaVersion: 1,
+      jobId: `capture-${attemptId}`,
+      recipe: "capture-artifact",
+      inputVersion: 1,
+      workingDirectory: harness.projectDirectory,
+      status: "running",
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      processes: [],
+      exit: null,
+      log: { path: "", head: "", tail: "", truncated: false, totalBytes: 0 },
+      output: null,
+      lastError: null,
+    }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const handoffKey = { workOrderId, attemptId, handoffId: "handoff-m1-job-1" };
+  const rejected = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m1-job-handoff-1",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: handoffKey,
+        body: "Submitted while the suite still runs in the background.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(rejected.kind, "rejected");
+  assert.equal(
+    (rejected as unknown as CoordinatorToolRejectedResponse).category,
+    "job-still-running",
+    "the refusal must be readable as job-still-running",
+  );
+  const beforeEnd = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "m1-job-read-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrderId,
+  });
+  assert.equal(
+    (beforeEnd.handoffs as unknown[]).length,
+    0,
+    "a running job must not let the handoff land",
+  );
+
+  // The job ends; the same handoff is then accepted.
+  await rm(jobRecordPath);
+  const accepted = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m1-job-handoff-2",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: handoffKey,
+        body: "Submitted while the suite still runs in the background.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(accepted.kind, "handoff-submitted");
+});
+
+test("a quota block on one pool leaves a different pool's attempt free to dispatch", async (t) => {
+  // Issue #8 M2: quota blocking must be scoped to the pool the attempt's own
+  // endpoint draws from, not applied globally across every pool at once.
+  const harness = await createHarness("auto-iteration-m2-pool-");
+  t.after(async () => {
+    await harness.backend.close();
+    await removeTree(harness.root);
+  });
+  const service = harness.backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(harness.backend, "m2 pool supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+
+  await service.authority.observeQuota({
+    quotaPoolId: "codex-account:codex",
+    source: "codex-account:account/rateLimits/read",
+    observedAt: 1,
+    status: "observed",
+    windows: [
+      { name: "primary", usedFraction: 1, resetsAt: null, windowDurationMinutes: null },
+    ],
+  });
+
+  const submittedCodex = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m2-pool-submit-codex",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: workOrderSubmission(profile, harness.baselineCommitSha),
+  });
+  assert.equal(
+    (submittedCodex.workOrder as Record<string, unknown>).status,
+    "waiting-for-quota",
+    "the codex-pool submission is blocked by its own pool's exhaustion",
+  );
+  const codexWorkOrderId = (submittedCodex.workOrder as Record<string, unknown>)
+    .workOrderId as string;
+
+  const submittedClaude = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m2-pool-submit-claude",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: {
+      ...workOrderSubmission(profile, harness.baselineCommitSha),
+      workerSession: { endpointId: "claude-code-desktop", profile },
+    },
+  });
+  assert.equal(
+    (submittedClaude.workOrder as Record<string, unknown>).status,
+    "executing",
+    "a different pool's submission is unaffected by the codex pool's exhaustion",
+  );
+  const claudeWorkOrderId = (submittedClaude.workOrder as Record<string, unknown>)
+    .workOrderId as string;
+
+  const claudeWorkerSessionId = await waitFor("claude-pool worker Session binding", () => {
+    const order = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      claudeWorkOrderId,
+    );
+    return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+  });
+  assert.notEqual(claudeWorkerSessionId, supervisorSessionId);
+
+  const overview = service.authority.readAutoIterationOverview();
+  assert.equal(
+    findWorkOrder(overview, codexWorkOrderId)?.workerSessionBound,
+    false,
+    "the codex-pool order stays unbound while only its own pool is exhausted",
+  );
+  assert.equal(findWorkOrder(overview, codexWorkOrderId)?.status, "waiting-for-quota");
+  assert.equal(
+    harness.adapter.startRequests.length,
+    2,
+    "only the supervisor and the claude-pool worker started",
+  );
+
+  // Releasing the codex pool lets its own order dispatch too.
+  await service.authority.observeQuota({
+    quotaPoolId: "codex-account:codex",
+    source: "codex-account:account/rateLimits/read",
+    observedAt: 2,
+    status: "observed",
+    windows: [
+      { name: "primary", usedFraction: 0.1, resetsAt: null, windowDurationMinutes: null },
+    ],
+  });
+  await service.drainPendingOutbox();
+  await waitFor("the released codex-pool worker", () => {
+    const order = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      codexWorkOrderId,
+    );
+    return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+  });
+});
+
+test("the supervisor's own creation parameters survive a Project reopen and a high-context observation rotates using them", async (t) => {
+  // Issue #8 M2 tenure cutover: the ≥70% trigger must read durably stored
+  // creation parameters, not an in-memory table a reopen would empty.
+  const harness = await createHarness("auto-iteration-m2-tenure-");
+  let reopenedBackend: WorkbenchBackend | undefined;
+  t.after(async () => {
+    await reopenedBackend?.close().catch(() => undefined);
+    await harness.backend.close();
+    await removeTree(harness.root);
+  });
+  const service = harness.backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(harness.backend, "m2 tenure supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+
+  await harness.backend.close();
+  const reopenedAdapter = new ScriptedLoopAdapter();
+  reopenedBackend = await createWorkbenchBackend({
+    projectDirectory: harness.projectDirectory,
+    databasePath: harness.databasePath,
+    adapter: reopenedAdapter,
+  });
+  const reopenedService = reopenedBackend.autoIteration;
+  assert.ok(reopenedService, "the reopened backend exposes the service");
+
+  // Reads as active with no rotation before the observation lands.
+  const beforeObservation = reopenedService.authority.readAutoIterationOverview();
+  assert.equal(beforeObservation.supervisor?.generation, 1);
+  assert.equal(beforeObservation.supervisor?.status, "active");
+
+  const accepted = await emitContextUsageObservation({
+    source: "claude-control:get_context_usage",
+    observedAt: 1,
+    sessionId: supervisorSessionId,
+    model: profile.model,
+    quality: "authoritative",
+    totalTokens: 950,
+    maxTokens: 1000,
+    fraction: 0.95,
+  });
+  assert.equal(accepted, true, "the reopened backend retained the context sink");
+  await reopenedService.drainPendingOutbox();
+
+  const afterRotation = await waitFor("post-reopen rotation cutover", () => {
+    const current = reopenedService.authority.readAutoIterationOverview();
+    return current.supervisor?.generation === 2 &&
+      current.supervisor.sessionId !== supervisorSessionId
+      ? current
+      : undefined;
+  });
+  assert.equal(afterRotation.supervisor?.status, "active");
+  const successorSessionId = afterRotation.supervisor!.sessionId!;
+  assert.notEqual(successorSessionId, supervisorSessionId);
+
+  // The successor Session was created with the SAME profile as the original
+  // supervisor: the host mirrored the durably stored creation parameters
+  // rather than inventing new ones. It is the only Session started in the
+  // reopened backend (the original supervisor was re-bound from the ledger,
+  // never re-started).
+  assert.equal(reopenedAdapter.startRequests.length, 1);
+  assert.deepEqual(reopenedAdapter.startRequests[0]!.profile, profile);
+
+  // The old generation cannot submit new decisions after cutover.
+  const staleRejection = await reopenedService.authority.request(
+    {
+      kind: "supervisor",
+      sessionId: supervisorSessionId,
+      tenure: { roleSlotId: "project-supervisor", generation: 1 },
+    },
+    {
+      kind: "read-inbox",
+      requestIdempotencyKey: "m2-tenure-stale-read",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      roleSlotId: "project-supervisor",
+    },
+  );
+  assert.equal(staleRejection.kind, "rejected");
+  assert.equal((staleRejection as CoordinatorToolRejectedResponse).category, "stale-generation");
+});
+
+test("a wakeup whose continue lands in recovery-required does not falsely seal a delivery receipt, and the retried wakeup after recovery delivers it", async (t) => {
+  // Issue #8 M2 (w342 evidence §7.b): `channel.act` resolves at durable
+  // acceptance, before resume/send is even attempted. A wakeup whose resume
+  // fails must not have `markHandoffIncluded` seal a receipt for input the
+  // parent Session never actually received.
+  let resumeCalls = 0;
+  const adapter = new ScriptedLoopAdapter(undefined, async () => {
+    resumeCalls += 1;
+    if (resumeCalls === 1) {
+      throw new Error("simulated wakeup resume failure");
+    }
+  });
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-m2-recovery-"));
+  const projectDirectory = join(root, "Project");
+  await mkdir(projectDirectory);
+  await git(projectDirectory, "init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await git(projectDirectory, "add", "baseline.txt");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+  const backend = await createWorkbenchBackend({
+    projectDirectory,
+    databasePath: join(root, "workbench.sqlite"),
+    adapter,
+  });
+  t.after(async () => {
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "m2 recovery supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+  const submitted = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m2-recovery-submit-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: workOrderSubmission(profile, baselineCommitSha),
+  });
+  assert.equal(submitted.kind, "work-order-submitted");
+  const workOrderId = (submitted.workOrder as Record<string, unknown>)
+    .workOrderId as string;
+  const attemptId = (submitted.attempt as Record<string, unknown>)
+    .attemptId as string;
+  const workerSessionId = await waitFor("worker Session binding", () => {
+    const order = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      workOrderId,
+    );
+    return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+  });
+
+  const handoffKey: HandoffIdempotencyKey = {
+    workOrderId,
+    attemptId,
+    handoffId: "handoff-m2-recovery-1",
+  };
+  const handoff = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m2-recovery-handoff-1",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: handoffKey,
+        body: "Delivered while the wakeup resume fails once.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(handoff.kind, "handoff-submitted");
+
+  // The first wakeup attempt's resume fails; the coordinator's own recovery
+  // probe (a second, independent resume) then confirms the Session is
+  // reachable, so no external action is needed for it to become resumable
+  // again.
+  await waitFor(
+    "the failed wakeup and its recovery probe",
+    () => (resumeCalls >= 2 ? resumeCalls : undefined),
+  );
+
+  // Core fix: no inclusion receipt, and the wakeup entry stays pending.
+  const statusAfterFailure = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "m2-recovery-read-1",
+    expectedVersion: 2,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrderId,
+  });
+  assert.deepEqual(
+    (statusAfterFailure.receipts as Array<Record<string, unknown>>).map(
+      (receipt) => receipt.level,
+    ),
+    ["persisted"],
+    "a wakeup that failed to become parent input must not seal an inclusion receipt",
+  );
+  assert.equal(
+    (await service.authority.readPendingOutbox()).some(
+      (entry) => entry.kind === "inbox-wakeup",
+    ),
+    true,
+    "the wakeup entry stays pending after a failed delivery",
+  );
+
+  // The retried wakeup (triggered by the recovery-required update itself)
+  // succeeds this time and delivers the handoff.
+  await waitFor("the retried wakeup to deliver", async () => {
+    const status = await callTool(supervisorServer, "read_work_order_status", {
+      requestIdempotencyKey: "m2-recovery-read-2",
+      expectedVersion: 2,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      workOrderId,
+    });
+    const levels = (status.receipts as Array<Record<string, unknown>>).map(
+      (receipt) => receipt.level,
+    );
+    return levels.includes("included-in-parent-input") ? status : undefined;
+  });
+  await waitFor("wakeup settle in the ledger", async () => {
+    const pending = (await service.authority.readPendingOutbox()).filter(
+      (entry) => entry.kind === "inbox-wakeup",
+    );
+    return pending.length === 0 ? pending : undefined;
+  });
+  const finalOrder = findWorkOrder(
+    service.authority.readAutoIterationOverview(),
+    workOrderId,
+  );
+  assert.equal(finalOrder?.status, "awaiting-review");
 });

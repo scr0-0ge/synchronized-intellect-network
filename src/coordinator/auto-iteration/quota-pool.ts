@@ -58,6 +58,31 @@ function freezePool(
 }
 
 /**
+ * Issue #8 M2: the production endpoint-to-pool assignment. Each endpoint is
+ * its own account today (no two endpoints share a subscription), so the map
+ * is 1:1; a future shared subscription becomes a data change here, not a
+ * call-site change. `Record` over the full `DurableRuntimeEndpointId` union
+ * keeps this exhaustive at compile time.
+ */
+const PRODUCTION_ENDPOINT_QUOTA_POOL_IDS: Readonly<
+  Record<DurableRuntimeEndpointId, string>
+> = Object.freeze({
+  "codex-desktop": "codex-account:codex",
+  "codex-api": "codex-account:codex-api",
+  "claude-code-desktop": "claude-account:claude",
+  "claude-api": "claude-account:claude-api",
+  "glm-coding-plan": "glm-account:glm",
+  "kimi-code": "kimi-account:kimi-code",
+  "kimi-platform": "kimi-account:kimi-platform",
+  "deepseek-api": "deepseek-account:deepseek",
+});
+
+/** The pool a durable endpoint id draws quota from in production. */
+export function productionQuotaPoolId(endpointId: DurableRuntimeEndpointId): string {
+  return PRODUCTION_ENDPOINT_QUOTA_POOL_IDS[endpointId];
+}
+
+/**
  * Keeps account ownership separate from Session identity. Sessions on endpoints
  * backed by the same subscription resolve to one pool; API-key endpoints use a
  * different definition and therefore never borrow that subscription window.

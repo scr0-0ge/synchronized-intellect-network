@@ -942,6 +942,29 @@ export class AutoIterationProjectStore {
       );
   }
 
+  /** The newest read per quota pool; submissions consult it before claiming a worker. */
+  latestQuotaObservations(): readonly QuotaObservation[] {
+    const rows = this.database
+      .prepare(
+        `SELECT quota_pool_id, source, observed_at, status, windows_json
+           FROM auto_iteration_quota_observations`,
+      )
+      .all() as unknown as {
+        quota_pool_id: string;
+        source: QuotaObservation["source"];
+        observed_at: number;
+        status: QuotaObservation["status"];
+        windows_json: string;
+      }[];
+    return rows.map((row) => ({
+      quotaPoolId: row.quota_pool_id,
+      source: row.source,
+      observedAt: Number(row.observed_at),
+      status: row.status,
+      windows: JSON.parse(row.windows_json) as QuotaObservation["windows"],
+    }));
+  }
+
   /** Latest per observed Session identity. */
   recordContextObservation(observation: ContextUsageObservation): void {
     this.database

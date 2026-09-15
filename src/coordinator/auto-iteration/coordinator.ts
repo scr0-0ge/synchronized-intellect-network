@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { DurableRuntimeEndpointId } from "../work-ledger-auth-generation.ts";
 import type {
   ArtifactReference,
   AttemptRuntimeMutation,
@@ -28,6 +29,8 @@ import type {
   ReadWorkOrderStatusRequest,
   ReviewDecision,
   ReviewDecisionSubmittedResponse,
+  SessionConfigurationState,
+  SessionCreationParameters,
   SubmitHandoffRequest,
   SubmitReviewDecisionRequest,
   SubmitWorkOrderRequest,
@@ -43,11 +46,19 @@ import type {
   WorkOrderStatusResponse,
   WorkOrderSubmittedResponse,
 } from "./contract.ts";
+import { productionQuotaPoolId } from "./quota-pool.ts";
 import { AutoIterationProjectStore } from "./project-store.ts";
 import { assertWorkOrderTransition } from "./state-machine.ts";
 
 /** Matches the existing renderer direct-input bound and is measured in code points. */
 export const HANDOFF_BODY_MAX_CODE_POINTS = 8_000;
+
+/**
+ * Issue #8 M1: at most this many worker attempts are in flight per Project.
+ * Work orders beyond the cap keep their start-attempt outbox entry pending
+ * (that entry is the queue) and read as `queued` until a slot frees.
+ */
+export const WORKER_ATTEMPT_CONCURRENCY_LIMIT = 4;
 
 export type {
   AttemptRuntimeMutation,
@@ -74,13 +85,16 @@ class AutoIterationRejection extends Error {
 export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
   private readonly store: AutoIterationProjectStore;
   private readonly createId: () => string;
+  private readonly resolveQuotaPoolId: (endpointId: DurableRuntimeEndpointId) => string;
 
   constructor(
     store: AutoIterationProjectStore,
     createId: () => string = randomUUID,
+    resolveQuotaPoolId: (endpointId: DurableRuntimeEndpointId) => string = productionQuotaPoolId,
   ) {
     this.store = store;
     this.createId = createId;
+    this.resolveQuotaPoolId = resolveQuotaPoolId;
   }
 
   async bindInitialSupervisor(binding: InitialSupervisorBinding) {
@@ -118,14 +132,29 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
         currentTenureId: tenureId,
         version: 1,
       });
-      this.store.insertTenure({
-        tenureId,
-        roleSlotId: binding.roleSlotId,
-        generation: binding.generation,
-        sessionId: binding.sessionId,
-        status: "active",
-        version: 1,
-      });
+      this.store.insertTenure(
+        {
+          tenureId,
+          roleSlotId: binding.roleSlotId,
+          generation: binding.generation,
+          sessionId: binding.sessionId,
+          status: "active",
+          version: 1,
+        },
+        // Issue #8 M2: the tenure record is the durable home for the
+        // Session's own creation parameters (no schema bump: this reuses the
+        // existing session_configuration_json column). A later rotation's
+        // cutover already mirrors this value forward generation to
+        // generation (completeSupervisorRotation's successorConfiguration
+        // fallback), so recording it here is enough for every later hop to
+        // survive a Project reopen.
+        binding.sessionCreationParameters === undefined
+          ? undefined
+          : ({
+              state: "requested",
+              requested: binding.sessionCreationParameters,
+            } satisfies SessionConfigurationState),
+      );
       this.store.appendEvent("supervisor-bound", tenureId, undefined, binding.sessionId);
       return { roleSlotId: binding.roleSlotId, tenureId, generation: binding.generation };
     });
@@ -362,16 +391,34 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
         supervisorRole === undefined || supervisorRole.currentTenureId === null
           ? undefined
           : this.store.tenure(supervisorRole.currentTenureId);
-      const workOrders = this.store.workOrders().map((workOrder) => {
+      const workOrders = this.store.workOrders();
+      let occupyingBefore = 0;
+      const workOrderViews = workOrders.map((workOrder) => {
         const attempts = this.store.attempts(workOrder.workOrderId);
         const current =
           attempts.find((attempt) => attempt.attemptId === workOrder.currentAttemptId) ??
           attempts.at(-1);
         const delivered = this.store.handoffs(workOrder.workOrderId).length > 0;
         const reviewDecided = this.store.reviews(workOrder.workOrderId).length > 0;
+        // Issue #8 M1 queue projection: an executing order whose worker has
+        // not started while `limit` earlier orders still occupy worker slots
+        // reads as `queued`; its start-attempt outbox entry stays pending.
+        const occupies =
+          workOrder.status === "executing" &&
+          current !== undefined &&
+          !terminalRuntimeLifecycle(current.runtimeLifecycle);
+        const unbound = current === undefined || current.sessionId === null;
+        const queued =
+          workOrder.status === "executing" &&
+          unbound &&
+          occupyingBefore >= WORKER_ATTEMPT_CONCURRENCY_LIMIT;
+        if (occupies) occupyingBefore += 1;
+        const status: AutoIterationWorkOrderOverview["status"] = queued
+          ? "queued"
+          : workOrder.status;
         return {
           workOrderId: workOrder.workOrderId,
-          status: workOrder.status,
+          status,
           currentAttemptId: workOrder.currentAttemptId,
           attemptCount: attempts.length,
           workerSessionBound: current?.sessionId !== null && current !== undefined,
@@ -381,7 +428,9 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
           delivered,
           reviewDecided,
           integrated: workOrder.status === "integrated",
-          waitingFor: workOrderWaitingFor(workOrder.status, current),
+          waitingFor: queued
+            ? "worker-start"
+            : workOrderWaitingFor(workOrder.status, current),
         } satisfies AutoIterationWorkOrderOverview;
       });
       return {
@@ -395,13 +444,29 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
                 status: supervisorTenure.status,
                 sessionId: supervisorTenure.sessionId,
               },
-        workOrders,
+        workOrders: workOrderViews,
         pendingInboxEntries: this.store.pendingInboxEntryCount(),
-        quotaWaiting: workOrders.some(
+        quotaWaiting: workOrderViews.some(
           (order) => order.status === "waiting-for-quota",
         ),
         lastObservedAt: this.store.latestObservationTime(),
       };
+    });
+  }
+
+  readSupervisorSessionCreationParameters(
+    sessionId: string,
+  ): SessionCreationParameters | undefined {
+    return this.store.readTransaction(() => {
+      const role = this.store
+        .roleSlots()
+        .find((candidate) => candidate.responsibility === "supervisor");
+      if (role === undefined || role.currentTenureId === null) return undefined;
+      const tenure = this.store.tenure(role.currentTenureId);
+      if (tenure === undefined || tenure.sessionId !== sessionId) return undefined;
+      return extractSessionCreationParameters(
+        this.store.successorConfiguration(tenure.tenureId),
+      );
     });
   }
 
@@ -428,11 +493,10 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
    */
   private applyQuotaBlocking(observation: QuotaObservation): void {
     if (observation.status !== "observed") return;
-    const windows = observation.windows;
-    const exhausted = windows.some(
-      (window) => window.usedFraction !== null && window.usedFraction >= 1,
-    );
+    const exhausted = exhaustedQuotaWindows(observation.windows);
     for (const workOrder of this.store.workOrders()) {
+      const attempt = this.store.attempt(workOrder.currentAttemptId);
+      if (this.attemptQuotaPoolId(attempt) !== observation.quotaPoolId) continue;
       if (exhausted) {
         if (workOrder.status !== "executing") continue;
         this.store.updateWorkOrder(
@@ -480,6 +544,12 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     this.store.transaction(() => {
       this.store.recordContextObservation(observation);
     });
+  }
+
+  /** The quota pool this attempt's requested endpoint would draw from. */
+  private attemptQuotaPoolId(attempt: ExecutionAttempt | undefined): string | undefined {
+    if (attempt === undefined) return undefined;
+    return this.resolveQuotaPoolId(attempt.sessionConfiguration.requested.endpointId);
   }
 
   request(
@@ -580,6 +650,21 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     }
     const workOrderId = `work-order-${this.createId()}`;
     const attemptId = `attempt-${this.createId()}`;
+    // A submission whose OWN target pool's newest read says the window is
+    // exhausted lands straight in the quota wait; it dispatches on release
+    // like any other paused order. A different pool's exhaustion never
+    // blocks this submission (issue #8 M2: pool-scoped, not global).
+    const targetPoolId = this.resolveQuotaPoolId(
+      request.workOrder.workerSession.endpointId,
+    );
+    const status = exhaustedQuotaWindows(
+      this.store
+        .latestQuotaObservations()
+        .filter((entry) => entry.quotaPoolId === targetPoolId)
+        .flatMap((entry) => entry.windows),
+    )
+      ? "waiting-for-quota"
+      : "executing";
     const workOrder: WorkOrder = {
       workOrderId,
       objective: request.workOrder.objective,
@@ -592,7 +677,7 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       responsibleRoleSlotId: request.workOrder.responsibleRoleSlotId,
       issuedBy: actor.tenure,
       completionCondition: request.workOrder.completionCondition,
-      status: "executing",
+      status,
       currentAttemptId: attemptId,
       version: 1,
     };
@@ -1194,6 +1279,42 @@ function advance(from: WorkOrderStatus, to: WorkOrderStatus): WorkOrderStatus {
 
 function handoffDedupeKey(key: HandoffIdempotencyKey): string {
   return `${key.workOrderId}\u0000${key.attemptId}\u0000${key.handoffId}`;
+}
+
+/** Defensive parse of a stored `SessionConfigurationState`'s `requested` field. */
+function extractSessionCreationParameters(
+  stored: unknown,
+): SessionCreationParameters | undefined {
+  if (stored === null || typeof stored !== "object") return undefined;
+  const requested = (stored as { readonly requested?: unknown }).requested;
+  if (requested === null || typeof requested !== "object") return undefined;
+  const { endpointId, profile } = requested as {
+    readonly endpointId?: unknown;
+    readonly profile?: unknown;
+  };
+  if (typeof endpointId !== "string" || endpointId.length === 0) return undefined;
+  if (profile === null || typeof profile !== "object") return undefined;
+  return { endpointId, profile } as SessionCreationParameters;
+}
+
+/** A read window at or past its limit; null means explicitly unknown, not full. */
+function exhaustedQuotaWindows(
+  windows: readonly QuotaObservation["windows"][number][],
+): boolean {
+  return windows.some((window) => (window.usedFraction ?? 0) >= 1);
+}
+
+/** Attempt lifecycles after which the worker slot is free again (issue #8 M1 refill). */
+function terminalRuntimeLifecycle(
+  lifecycle: ExecutionAttempt["runtimeLifecycle"],
+): boolean {
+  return (
+    lifecycle === "completed" ||
+    lifecycle === "failed" ||
+    lifecycle === "cancelled" ||
+    lifecycle === "interrupted" ||
+    lifecycle === "recovery-required"
+  );
 }
 
 function workOrderWaitingFor(
