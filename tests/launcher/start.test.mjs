@@ -34,7 +34,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { captureProcessTree, waitForProcessTreeExit } from './process-tree.mjs';
+import { captureProcessTree, ownedUnder, waitForProcessTreeExit } from './process-tree.mjs';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const launcherSource = path.join(repositoryRoot, 'start.bat');
@@ -507,13 +507,20 @@ async function observeProductionStart(t) {
     assert.match(stdout, /\[window-placement\] surface=main-window;offscreen@/u);
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
-      const processTree = captureProcessTree(child.pid, t);
+      // Never a whole-tree /T and never by name: eight lanes share this
+      // machine, and one of them is the owner's own Claude Desktop (w361).
+      const processTree = captureProcessTree(child.pid, t, {
+        isOwned: ownedUnder([repositoryRoot, profile]),
+      });
       const stopped = spawnSync(
         path.join(systemRoot, 'System32', 'taskkill.exe'),
-        ['/pid', String(child.pid), '/t', '/f'],
+        ['/f', ...processTree.flatMap((pid) => ['/pid', String(pid)])],
         { encoding: 'utf8', windowsHide: true },
       );
-      assert.equal(stopped.status, 0, `${stopped.stdout}\n${stopped.stderr}`);
+      t.diagnostic(
+        `production start taskkill: status=${String(stopped.status)} pids=${processTree.join(',')} ` +
+          `${`${stopped.stdout}\n${stopped.stderr}`.trim()}`,
+      );
       await closeSignal;
       await waitForProcessTreeExit(t, processTree);
     }

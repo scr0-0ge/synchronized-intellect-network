@@ -41,7 +41,7 @@ import {
 import { runtimeInstallCopy } from '../../src/workbench-shell/renderer/copy/runtime-lookup-copy.ts';
 import { toolsCopy } from '../../src/workbench-shell/renderer/copy/settings-copy.ts';
 import { stageCopy } from '../../src/workbench-shell/renderer/copy/stage-copy.ts';
-import { captureProcessTree, waitForProcessTreeExit } from './process-tree.mjs';
+import { captureProcessTree, ownedUnder, waitForProcessTreeExit } from './process-tree.mjs';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const systemRoot = process.env.SystemRoot ?? 'C:\\Windows';
@@ -486,8 +486,12 @@ test(
     } finally {
       // Quit through the product (its graceful exit is part of what a
       // stranger gets), wait for the whole tree, and only then stop by pid --
-      // never by name: eight lanes share this machine.
-      const processTree = captureProcessTree(rootPid, t, 'packaged smoke');
+      // never by name, never a whole-tree /T: eight lanes share this machine,
+      // and one of them is the owner's own Claude Desktop (w361).
+      const processTree = captureProcessTree(rootPid, t, {
+        label: 'packaged smoke',
+        isOwned: ownedUnder([applicationDirectory, profile]),
+      });
       const quitStarted = performance.now();
       quit = await Promise.race([
         application.close().then(
@@ -510,11 +514,12 @@ test(
       if (remaining.length > 0) {
         const stopped = spawnSync(
           path.join(systemRoot, 'System32', 'taskkill.exe'),
-          ['/pid', String(rootPid), '/t', '/f'],
+          ['/f', ...remaining.flatMap((pid) => ['/pid', String(pid)])],
           { encoding: 'utf8', windowsHide: true },
         );
         t.diagnostic(
-          `packaged smoke taskkill: status=${String(stopped.status)} ${`${stopped.stdout}\n${stopped.stderr}`.trim()}`,
+          `packaged smoke taskkill: status=${String(stopped.status)} pids=${remaining.join(',')} ` +
+            `${`${stopped.stdout}\n${stopped.stderr}`.trim()}`,
         );
         remaining = await waitForProcessTreeExit(t, processTree, 'packaged smoke');
       }
