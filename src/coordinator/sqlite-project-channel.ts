@@ -5044,6 +5044,7 @@ const runtimeFailureCategories = new Set([
   "invalid-input",
   "protocol-invalid",
   "protocol-rejected",
+  "rate-limited",
   "runtime-shutdown",
   "runtime-not-located",
   "runtime-unavailable",
