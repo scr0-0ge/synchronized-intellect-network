@@ -16,6 +16,7 @@ import type { ProjectTurnActivity } from "../coordinator/index.ts";
 import type { WorkLedgerAuthGenerationModule } from "../coordinator/index.ts";
 import {
   createWorkbenchBackend,
+  type WorkbenchAnnualReportCapability,
   type WorkbenchBackend,
 } from "./backend.ts";
 import {
@@ -35,6 +36,10 @@ import {
   publicProjectUnavailable,
   publicUnavailableSubmission,
   type WorkbenchDirectInputRequest,
+  type WorkbenchAnnualReportJobRequest,
+  type WorkbenchAnnualReportProjectRequest,
+  type WorkbenchAnnualReportSnapshot,
+  type WorkbenchAnnualReportStartResult,
   type WorkbenchDirectSessionProfileDefaultRequest,
   type WorkbenchDirectSessionProfileDefaultResult,
   type WorkbenchDirectSessionProfileLoadRequest,
@@ -147,6 +152,8 @@ export type WorkbenchProjectBackendFactory = (options: {
   readonly packagedBootstrap?: boolean;
   readonly adapter?: AgentRuntimeAdapter;
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
+  readonly annualReportCapability?: WorkbenchAnnualReportCapability;
+  readonly onAnnualReportJobActivityChange?: (delta: 1 | -1) => void;
 }) => Promise<WorkbenchBackend>;
 
 export type WorkbenchProjectAvailabilityProbe = (
@@ -211,6 +218,15 @@ export interface WorkbenchProjectHost extends WorkbenchUserInputBridge {
   submitDirectInput(
     request: WorkbenchDirectInputRequest,
   ): Promise<WorkbenchSubmissionResult>;
+  startAnnualReportJob(
+    request: WorkbenchAnnualReportJobRequest,
+  ): Promise<WorkbenchAnnualReportStartResult>;
+  readAnnualReportJob(
+    request: WorkbenchAnnualReportProjectRequest,
+  ): Promise<WorkbenchAnnualReportSnapshot | null>;
+  resolveAnnualReportOutputDirectory(
+    request: WorkbenchAnnualReportProjectRequest,
+  ): Promise<string | null>;
   interruptActiveTurn(
     request: WorkbenchInterruptRequest,
   ): Promise<WorkbenchInterruptResult>;
@@ -235,6 +251,8 @@ export async function createWorkbenchProjectHost(options: {
   readonly availabilityProbeTimeoutMilliseconds?: number;
   readonly atomicReplace?: WorkbenchProjectRegistryAtomicReplace;
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
+  readonly annualReportCapability?: WorkbenchAnnualReportCapability;
+  readonly onAnnualReportJobActivityChange?: (delta: 1 | -1) => void;
 }): Promise<WorkbenchProjectHost> {
   const dataDirectory = canonicalDirectory(options.dataDirectory);
   const packagedBootstrapProjectDirectory =
@@ -242,7 +260,17 @@ export async function createWorkbenchProjectHost(options: {
       ? undefined
       : canonicalDirectory(options.packagedBootstrapProjectDirectory);
   const paths = registryPaths(dataDirectory);
-  const backendFactory = options.backendFactory ?? defaultBackendFactory;
+  const baseBackendFactory = options.backendFactory ?? defaultBackendFactory;
+  const backendFactory: WorkbenchProjectBackendFactory = (input) =>
+    baseBackendFactory({
+      ...input,
+      ...(options.annualReportCapability === undefined
+        ? {}
+        : { annualReportCapability: options.annualReportCapability }),
+      ...(options.onAnnualReportJobActivityChange === undefined
+        ? {}
+        : { onAnnualReportJobActivityChange: options.onAnnualReportJobActivityChange }),
+    });
   const availabilityProbe = boundedProjectAvailabilityProbe(
     options.availabilityProbe ?? defaultAvailabilityProbe,
     resolveAvailabilityProbeTimeoutMilliseconds(
@@ -1524,6 +1552,48 @@ function createHostController(options: {
         publicUnavailableSubmission(),
       );
     },
+    startAnnualReportJob(
+      request: WorkbenchAnnualReportJobRequest,
+    ): Promise<WorkbenchAnnualReportStartResult> {
+      const selected = selectionRecords.get(request.projectId);
+      if (
+        closed || switching || teardownBlocked || active === undefined ||
+        selected?.recordKey !== active.record.recordKey
+      ) {
+        return Promise.resolve(annualReportProjectFailure());
+      }
+      const start = active.backend.startAnnualReportJob;
+      if (start === undefined) return Promise.resolve(annualReportProjectFailure());
+      const { projectId: _projectId, ...selection } = request;
+      return trackAction(
+        () => start.call(active!.backend, selection),
+        annualReportProjectFailure(),
+      );
+    },
+    readAnnualReportJob(
+      request: WorkbenchAnnualReportProjectRequest,
+    ): Promise<WorkbenchAnnualReportSnapshot | null> {
+      const selected = selectionRecords.get(request.projectId);
+      if (
+        closed || switching || teardownBlocked || active === undefined ||
+        selected?.recordKey !== active.record.recordKey
+      ) return Promise.resolve(null);
+      const read = active.backend.readAnnualReportJob;
+      if (read === undefined) return Promise.resolve(null);
+      return trackAction(() => read.call(active!.backend), null);
+    },
+    resolveAnnualReportOutputDirectory(
+      request: WorkbenchAnnualReportProjectRequest,
+    ): Promise<string | null> {
+      const selected = selectionRecords.get(request.projectId);
+      if (
+        closed || switching || teardownBlocked || active === undefined ||
+        selected?.recordKey !== active.record.recordKey
+      ) return Promise.resolve(null);
+      const resolveOutput = active.backend.resolveAnnualReportOutputDirectory;
+      if (resolveOutput === undefined) return Promise.resolve(null);
+      return trackAction(() => resolveOutput.call(active!.backend), null);
+    },
     interruptActiveTurn(
       request: WorkbenchInterruptRequest,
     ): Promise<WorkbenchInterruptResult> {
@@ -1598,6 +1668,16 @@ function createHostController(options: {
     },
   });
   return controller;
+}
+
+function annualReportProjectFailure(): WorkbenchAnnualReportStartResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "invalid-project" as const,
+      message: "This Project selection expired. Keep the current Project open and try again.",
+    }),
+  });
 }
 
 function createFirstProjectionCompletion(

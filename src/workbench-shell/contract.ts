@@ -44,6 +44,12 @@ export const WORKBENCH_INTERRUPT_CHANNEL = "workbench:interrupt-active-turn";
 export const WORKBENCH_STEER_CHANNEL = "workbench:steer-active-turn";
 export const WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL =
   "workbench:use-direct-session-profile-as-default";
+export const WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL =
+  "workbench:start-annual-report-job";
+export const WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL =
+  "workbench:read-annual-report-job";
+export const WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL =
+  "workbench:open-annual-report-output";
 export const WORKBENCH_SELECT_PROJECT_CHANNEL = "workbench:select-project";
 export const WORKBENCH_REMOVE_SESSION_CHANNEL = "workbench:remove-session";
 export const WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL =
@@ -1507,6 +1513,135 @@ export interface WorkbenchDirectSessionProfileSelection {
   readonly accessModeKey: string;
 }
 
+export interface WorkbenchAnnualReportJobRequest
+  extends WorkbenchDirectSessionProfileSelection {
+  /** The current Project's renderer-scoped selection key. */
+  readonly projectId: string;
+}
+
+export interface WorkbenchAnnualReportProjectRequest {
+  /** The current Project's renderer-scoped selection key. */
+  readonly projectId: string;
+}
+
+export type WorkbenchAnnualReportStartResult =
+  | Readonly<{ ok: true; status: "started" }>
+  | Readonly<{
+      ok: false;
+      error: Readonly<{
+        category:
+          | "already-running"
+          | "invalid-project"
+          | "invalid-profile-selection"
+          | "no-pdfs"
+          | "annual-report-unavailable";
+        message: string;
+      }>;
+    }>;
+
+export type WorkbenchAnnualReportOpenResult =
+  | Readonly<{ ok: true; status: "opened" }>
+  | Readonly<{
+      ok: false;
+      error: Readonly<{
+        category: "invalid-project" | "no-output" | "open-failed" | "annual-report-unavailable";
+        message: string;
+      }>;
+    }>;
+
+export type WorkbenchAnnualReportFieldStatus =
+  | "pending"
+  | "found"
+  | "zero"
+  | "empty"
+  | "not-found-in-scope"
+  | "stated-not-applicable";
+
+export type WorkbenchAnnualReportReviewStatus =
+  | "pending"
+  | "unchecked"
+  | "passed"
+  | "needs-human";
+
+export interface WorkbenchAnnualReportJobField {
+  readonly id: string;
+  readonly status: WorkbenchAnnualReportFieldStatus;
+  readonly reviewStatus: WorkbenchAnnualReportReviewStatus;
+  readonly attemptMs: number | null;
+  readonly error: string | null;
+}
+
+export interface WorkbenchAnnualReportJobDocument {
+  readonly fileName: string;
+  readonly status: "pending" | "in-progress" | "completed" | "needs-human" | "open-failed";
+  readonly reason: string | null;
+  readonly pdfPages: number | null;
+  readonly textLayer: "present" | "sparse" | "absent" | null;
+  readonly fields: readonly WorkbenchAnnualReportJobField[];
+}
+
+export interface WorkbenchAnnualReportStoredAttempt {
+  readonly n: number;
+  readonly status: Exclude<WorkbenchAnnualReportFieldStatus, "pending">;
+  readonly reviewStatus: Exclude<WorkbenchAnnualReportReviewStatus, "pending">;
+  readonly checks: readonly string[];
+  readonly verdict: "agree" | "disagree" | "cannot-verify";
+  readonly problems: readonly Readonly<{ code: string; message: string }>[];
+  readonly failureReason: string | null;
+}
+
+export interface WorkbenchAnnualReportStoredField {
+  readonly id: string;
+  readonly displayName: string;
+  readonly note: string;
+  readonly status: Exclude<WorkbenchAnnualReportFieldStatus, "pending">;
+  readonly reviewStatus: Exclude<WorkbenchAnnualReportReviewStatus, "pending">;
+  readonly value: string | null;
+  readonly endReason: string | null;
+  readonly attempts: readonly WorkbenchAnnualReportStoredAttempt[];
+}
+
+export interface WorkbenchAnnualReportStoredRecord {
+  readonly document: Readonly<{
+    fileName: string;
+    pdfPageCount: number;
+    company: string;
+    reportingPeriod: string;
+  }>;
+  readonly taskStatus: "completed" | "needs-human";
+  readonly fields: readonly WorkbenchAnnualReportStoredField[];
+}
+
+export interface WorkbenchAnnualReportSnapshot {
+  readonly job: Readonly<{
+    schemaVersion: 1;
+    status: "running" | "completed" | "failed";
+    projectDirectory: ".";
+    outputDirectory: string;
+    startedAt: string;
+    endedAt: string | null;
+    observedModel: string | null;
+    configurationVersion: string;
+    documents: readonly WorkbenchAnnualReportJobDocument[];
+    stats: Readonly<{
+      pdfFiles: number;
+      documents: number;
+      fields: number;
+      fieldsVerified: number;
+      fieldsNeedingHuman: number;
+      documentsNeedingHuman: number;
+    }>;
+    report: Readonly<{
+      recordsPath: string | null;
+      markdownPath: string | null;
+      pdfPath: string | null;
+      pdfNote: string | null;
+    }>;
+    lastError: string | null;
+  }>;
+  readonly records: readonly WorkbenchAnnualReportStoredRecord[] | null;
+}
+
 export type WorkbenchDesiredDefault =
   | {
       readonly kind: "resolved";
@@ -2004,6 +2139,15 @@ export interface WorkbenchRendererBridge
   submitDirectInput(
     request: WorkbenchDirectInputRequest,
   ): Promise<WorkbenchSubmissionResult>;
+  startAnnualReportJob?(
+    request: WorkbenchAnnualReportJobRequest,
+  ): Promise<WorkbenchAnnualReportStartResult>;
+  readAnnualReportJob?(
+    request: WorkbenchAnnualReportProjectRequest,
+  ): Promise<WorkbenchAnnualReportSnapshot | null>;
+  openAnnualReportOutput?(
+    request: WorkbenchAnnualReportProjectRequest,
+  ): Promise<WorkbenchAnnualReportOpenResult>;
   interruptActiveTurn?(
     request: WorkbenchInterruptRequest,
   ): Promise<WorkbenchInterruptResult>;

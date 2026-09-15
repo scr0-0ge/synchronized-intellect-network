@@ -172,6 +172,13 @@ test(
     assert.ok(fs.existsSync(packagedExecutable), `missing ${packagedExecutable}`);
     const asar = path.join(applicationDirectory, 'resources', 'app.asar');
     assert.ok(fs.existsSync(asar), `missing ${asar}`);
+    const bootstrap = path.join(
+      applicationDirectory,
+      'resources',
+      'workbench-bootstrap',
+      'auto-iteration-mcp-bootstrap.js',
+    );
+    assert.ok(fs.statSync(bootstrap).size > 0, `missing or empty ${bootstrap}`);
     t.diagnostic(`packaging total: elapsed=${String(packageStep.elapsedMs)}ms limit=${String(PACKAGE_TIMEOUT_MS)}ms`);
     packaged = Object.freeze({ executable: packagedExecutable, totalMs: packageStep.elapsedMs });
   },
@@ -338,6 +345,11 @@ test(
           // assets/brand.
           const appPath = app.getAppPath();
           const brandAssetsDirectory = nodePath.join(appPath, 'assets', 'brand');
+          const bootstrapEntry = nodePath.join(
+            process.resourcesPath,
+            'workbench-bootstrap',
+            'auto-iteration-mcp-bootstrap.js',
+          );
           const describeImage = (file) => ({
             path: file,
             exists: nodeFs.existsSync(file),
@@ -347,6 +359,11 @@ test(
             pid: process.pid,
             packaged: app.isPackaged,
             appPath,
+            bootstrap: {
+              entry: bootstrapEntry,
+              command: process.execPath,
+              exists: nodeFs.existsSync(bootstrapEntry),
+            },
             userData: app.getPath('userData'),
             appData: app.getPath('appData'),
             windows: BrowserWindow.getAllWindows().map((window) => ({
@@ -403,6 +420,18 @@ test(
           typeof runtime.trayObjectCount === 'number' && runtime.trayObjectCount > 0,
           `no live Tray object: the product's own tray creation failed\n${runtimeText}\n${transcript()}`,
         );
+      });
+
+      await t.test('the packaged MCP host command targets the external bootstrap entry', () => {
+        const expectedBootstrap = path.join(
+          applicationDirectory,
+          'resources',
+          'workbench-bootstrap',
+          'auto-iteration-mcp-bootstrap.js',
+        );
+        assert.equal(runtime.bootstrap.exists, true, runtimeText);
+        assert.equal(runtime.bootstrap.entry, expectedBootstrap, runtimeText);
+        assert.equal(runtime.bootstrap.command, packaged.executable, runtimeText);
       });
 
       await t.test('the first-run bootstrap Project shows the honest copy once its catalog resolves', async () => {

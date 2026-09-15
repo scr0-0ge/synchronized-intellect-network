@@ -806,6 +806,87 @@ kbd {
   grid-template-rows: auto minmax(0, 1fr) auto auto auto;
 }
 
+.stage:has(> .annual-report-panel) {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
+.stage:has(> .annual-report-panel):has(> .prompt-suggestions) {
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+}
+
+.annual-report-panel {
+  min-width: 0;
+  max-height: min(48vh, 560px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px max(16px, var(--reading-inset));
+  border-bottom: 1px solid var(--line-0);
+  background: var(--bg-1);
+}
+.annual-report-panel-head,
+.annual-report-document-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+.annual-report-panel h2,
+.annual-report-panel h3,
+.annual-report-panel p { margin: 0; }
+.annual-report-panel h2 { font-size: 14px; font-weight: 650; }
+.annual-report-panel h3 { min-width: 0; font-size: 12.5px; overflow-wrap: anywhere; }
+.annual-report-stats,
+.annual-report-progress,
+.annual-report-document-reason,
+.annual-report-exceptions { color: var(--fg-1); font-size: 11.5px; }
+.annual-report-progress { margin-top: 10px !important; font-family: var(--mono); overflow-wrap: anywhere; }
+.annual-report-error { margin-top: 10px !important; color: var(--err); overflow-wrap: anywhere; }
+.annual-report-documents { display: grid; gap: 10px; margin-top: 12px; }
+.annual-report-document {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.annual-report-document-reason { margin-top: 7px !important; color: var(--warn); overflow-wrap: anywhere; }
+.annual-report-field-table { display: grid; min-width: 0; margin-top: 8px; }
+.annual-report-field-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.2fr) minmax(150px, 1.5fr) minmax(92px, .7fr) minmax(92px, .7fr);
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 4px;
+  border-top: 1px solid var(--line-0);
+}
+.annual-report-field-row > span { min-width: 0; overflow-wrap: anywhere; }
+.annual-report-field-header { color: var(--fg-3); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.annual-report-chip {
+  display: inline-flex;
+  max-width: 100%;
+  padding: 2px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  color: var(--fg-1);
+  background: var(--bg-3);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+.annual-report-chip.review-passed,
+.annual-report-chip.status-found,
+.annual-report-chip.status-zero,
+.annual-report-chip.status-stated-not-applicable,
+.annual-report-chip.task-completed { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, var(--line-1)); }
+.annual-report-chip.review-needs-human,
+.annual-report-chip.status-empty,
+.annual-report-chip.status-not-found-in-scope,
+.annual-report-chip.task-needs-human,
+.annual-report-chip.task-open-failed { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--line-1)); }
+.annual-report-exceptions { margin-top: 12px; }
+.annual-report-exceptions ul { margin: 7px 0 0; padding-left: 18px; }
+.annual-report-exceptions li { margin-top: 4px; overflow-wrap: anywhere; }
+
 .stage-head {
   display: flex;
   align-items: center;
@@ -1405,11 +1486,40 @@ kbd {
    nothing at all. */
 .composer > .target-bar,
 .composer > .controlbar,
+.composer > .slash-preset-menu,
 .composer > .input-shell,
 .composer > .composer-foot {
   max-width: var(--reading-measure);
   margin-inline: auto;
 }
+
+.slash-preset-menu {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 7px !important;
+  padding: 5px;
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 24%);
+}
+.slash-preset-heading { padding: 4px 7px; color: var(--fg-1); font-size: 11px; }
+.slash-preset-menu button {
+  display: grid;
+  grid-template-columns: minmax(105px, auto) minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--fg-1);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.slash-preset-menu button:hover,
+.slash-preset-menu button.selected { background: var(--accent-dim); color: var(--fg-0); }
+.slash-preset-menu code { color: var(--accent); font-family: var(--mono); font-size: 11px; }
+.slash-preset-menu span { min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
 
 .composer.centered {
   border-top: 0;
@@ -3232,6 +3342,20 @@ kbd {
   .sb-item.sb-mode { display: none; }
   .appearance-row { grid-template-columns: minmax(0, 1fr); gap: 9px; }
   .appearance-options { justify-content: flex-start; }
+  .annual-report-panel-head { align-items: flex-start; flex-direction: column; }
+  .annual-report-field-header { display: none; }
+  .annual-report-field-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    padding-block: 9px;
+  }
+  .annual-report-field-row > span::before {
+    content: attr(data-label) ": ";
+    color: var(--fg-3);
+    font-size: 10px;
+    font-weight: 700;
+  }
+  .slash-preset-menu button { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
 
 /* 360px is the supported minimum window width. Keeping the 180px rail beside

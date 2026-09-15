@@ -44,6 +44,9 @@ import {
   WORKBENCH_SAVE_CLAUDE_PERMISSION_HANDLING_CHANNEL,
   WORKBENCH_SAVE_ENDPOINT_PREFERENCE_CHANNEL,
   WORKBENCH_SUBMIT_CHANNEL,
+  WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
+  WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
+  WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
   WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   publicInvalidProfileDefaultSelection,
   publicAppearancePreferenceUnavailable,
@@ -69,6 +72,11 @@ import {
   publicProjectSwitchUnavailable,
   publicUnavailableSubmission,
   type WorkbenchDirectInputRequest,
+  type WorkbenchAnnualReportJobRequest,
+  type WorkbenchAnnualReportOpenResult,
+  type WorkbenchAnnualReportProjectRequest,
+  type WorkbenchAnnualReportSnapshot,
+  type WorkbenchAnnualReportStartResult,
   type WorkbenchAppearancePreference,
   type WorkbenchAppearancePreferenceLoadResult,
   type WorkbenchAppearancePreferenceSaveResult,
@@ -174,6 +182,11 @@ import {
   sanitizeWorkbenchSessionMetadataMutationResult,
   sanitizeWorkbenchSessionRemovalResult,
   sanitizeWorkbenchSubmissionResult,
+  reconstructWorkbenchAnnualReportJobRequest,
+  reconstructWorkbenchAnnualReportProjectRequest,
+  sanitizeWorkbenchAnnualReportOpenResult,
+  sanitizeWorkbenchAnnualReportSnapshot,
+  sanitizeWorkbenchAnnualReportStartResult,
   sanitizeSubscriptionAuthenticationPublicRequest,
   sanitizeSubscriptionAuthenticationPublicResponse,
 } from "./result-sanitizer.ts";
@@ -294,6 +307,9 @@ export interface FixedProjectViewIpc {
       | typeof WORKBENCH_SAVE_CLAUDE_PERMISSION_HANDLING_CHANNEL
       | typeof WORKBENCH_SAVE_ENDPOINT_PREFERENCE_CHANNEL
       | typeof WORKBENCH_SUBMIT_CHANNEL
+      | typeof WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL
+      | typeof WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL
+      | typeof WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL
       | typeof WORKBENCH_WRITE_CLIPBOARD_TEXT_CHANNEL
       | typeof WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
     ...values: unknown[]
@@ -348,6 +364,9 @@ export type WorkbenchPreloadBridge = WorkbenchRendererTransferBridge &
       | "cancel"
       | "notifyTurnCompleted"
       | "writeClipboardText"
+      | "startAnnualReportJob"
+      | "readAnnualReportJob"
+      | "openAnnualReportOutput"
     >
   > &
   // CLI update surface (ticket 18): declared on its own contract module —
@@ -1156,6 +1175,45 @@ export function createWorkbenchPreloadBridge(
         );
       } catch {
         return publicUnavailableSubmission();
+      }
+    },
+    async startAnnualReportJob(
+      request: WorkbenchAnnualReportJobRequest,
+    ): Promise<WorkbenchAnnualReportStartResult> {
+      const reconstructed = reconstructWorkbenchAnnualReportJobRequest(request);
+      if (!reconstructed.ok) return sanitizeWorkbenchAnnualReportStartResult(undefined);
+      try {
+        return sanitizeWorkbenchAnnualReportStartResult(
+          await ipc.invoke(WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL, reconstructed.request),
+        );
+      } catch {
+        return sanitizeWorkbenchAnnualReportStartResult(undefined);
+      }
+    },
+    async readAnnualReportJob(
+      request: WorkbenchAnnualReportProjectRequest,
+    ): Promise<WorkbenchAnnualReportSnapshot | null> {
+      const reconstructed = reconstructWorkbenchAnnualReportProjectRequest(request);
+      if (!reconstructed.ok) return null;
+      try {
+        return sanitizeWorkbenchAnnualReportSnapshot(
+          await ipc.invoke(WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL, reconstructed.request),
+        );
+      } catch {
+        return null;
+      }
+    },
+    async openAnnualReportOutput(
+      request: WorkbenchAnnualReportProjectRequest,
+    ): Promise<WorkbenchAnnualReportOpenResult> {
+      const reconstructed = reconstructWorkbenchAnnualReportProjectRequest(request);
+      if (!reconstructed.ok) return sanitizeWorkbenchAnnualReportOpenResult(undefined);
+      try {
+        return sanitizeWorkbenchAnnualReportOpenResult(
+          await ipc.invoke(WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL, reconstructed.request),
+        );
+      } catch {
+        return sanitizeWorkbenchAnnualReportOpenResult(undefined);
       }
     },
     observeUserInput(listener: () => void): () => void {

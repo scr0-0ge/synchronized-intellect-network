@@ -188,6 +188,15 @@ const englishCopy = {
     instructionError:
       "Automatic continuation wasn't sent: make the instruction after the newline non-empty. Use these two lines:",
   },
+  annualReportPresetsCopy: {
+    menuLabel: "Composer presets",
+    helpHeading: "Available presets",
+    annualReportCommand: "/annual-report",
+    annualReportDescription:
+      "Extract the default annual-report fields from every PDF in this folder and build the report",
+    helpCommand: "/help",
+    helpDescription: "List the available composer presets",
+  },
   selectedSessionSummaryCopy: (summary: string): string =>
     `Selected Session: ${summary}`,
   blockedComposerCopy: {
@@ -443,6 +452,14 @@ const simplifiedChineseCopy = {
     nextLineError: "自动续办未发送：请在步数后的下一行填写指令。请使用这两行：",
     instructionError: "自动续办未发送：换行后的指令不能为空。请使用这两行：",
   },
+  annualReportPresetsCopy: {
+    menuLabel: "输入区预设",
+    helpHeading: "可用预设",
+    annualReportCommand: "/annual-report",
+    annualReportDescription: "从此文件夹内每份 PDF 提取默认年报字段并生成报告",
+    helpCommand: "/help",
+    helpDescription: "列出可用的输入区预设",
+  },
   selectedSessionSummaryCopy: (summary: string): string =>
     `所选会话：${summary}`,
   blockedComposerCopy: {
@@ -594,6 +611,7 @@ export const interruptCopy = localizedCopy.interruptCopy;
 export const steerCopy = localizedCopy.steerCopy;
 export const composerFeedbackCopy = localizedCopy.composerFeedbackCopy;
 export const automaticContinuationCopy = localizedCopy.automaticContinuationCopy;
+export const annualReportPresetsCopy = localizedCopy.annualReportPresetsCopy;
 
 export function selectedSessionSummaryCopy(summary: string): string {
   return currentLocaleCopy(copyLocaleDictionaries).selectedSessionSummaryCopy(

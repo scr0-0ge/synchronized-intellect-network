@@ -119,6 +119,7 @@ export interface CodexProcessTransportDependencies {
   launchExecutable(
     executable: CodexExecutableHandle,
     environment?: NodeJS.ProcessEnv,
+    extraArguments?: readonly string[],
   ): Promise<ChildProcessWithoutNullStreams>;
   stageExecutable(executable: CodexExecutableHandle): Promise<{
     readonly executable: CodexExecutableHandle;
@@ -138,9 +139,13 @@ export interface CodexProcessTransportDependencies {
  * present, is passed to every launch (direct and staged): the child then runs
  * on exactly this environment instead of inheriting the parent's. Absent
  * options keep the historical spawn byte-identical (`codex-desktop`).
+ * `extraArguments` (Workbench MCP bridge) are prepended ahead of the frozen
+ * app-server arguments for this one launch only; the constant itself is
+ * untouched.
  */
 export interface CodexProcessTransportOptions {
   readonly environment?: NodeJS.ProcessEnv;
+  readonly extraArguments?: readonly string[];
 }
 
 /**
@@ -202,11 +207,13 @@ const productionDependencies: CodexProcessTransportDependencies = Object.freeze(
   launchExecutable: (
     executable: CodexExecutableHandle,
     environment?: NodeJS.ProcessEnv,
+    extraArguments?: readonly string[],
   ) =>
     launchCodexRuntime(
       executableLaunch(executable),
       productionRuntimeSpawn,
       environment,
+      extraArguments,
     ),
   stageExecutable: stageProductionCodexRuntime,
   removeCleanupDirectory: removeCodexCleanupDirectory,
@@ -319,11 +326,16 @@ export async function createOfficialCodexTransport(
   }
   const executable = discovery.executable;
   const environment = options.environment;
+  const extraArguments = options.extraArguments;
   let cleanupDirectory: string | undefined;
   let child: ChildProcessWithoutNullStreams;
 
   try {
-    child = await dependencies.launchExecutable(executable, environment);
+    child = await dependencies.launchExecutable(
+      executable,
+      environment,
+      extraArguments,
+    );
     recordDiagnostic(dependencies, { kind: "direct-launch-succeeded" });
   } catch (error) {
     const fallbackEligible = isAccessDenied(error);
@@ -351,7 +363,11 @@ export async function createOfficialCodexTransport(
       throw new RuntimeAdapterError("runtime-unavailable");
     }
     try {
-      child = await dependencies.launchExecutable(staged.executable, environment);
+      child = await dependencies.launchExecutable(
+        staged.executable,
+        environment,
+        extraArguments,
+      );
       recordDiagnostic(dependencies, { kind: "staged-launch-succeeded" });
     } catch (stagedLaunchError) {
       recordDiagnostic(dependencies, {
@@ -730,11 +746,28 @@ export function launchCodexRuntime(
   plan: WindowsRuntimeLaunch,
   spawnProcess: CodexRuntimeSpawn = productionRuntimeSpawn,
   environment?: NodeJS.ProcessEnv,
+  extraArguments?: readonly string[],
 ): Promise<ChildProcessWithoutNullStreams> {
+  if (
+    extraArguments !== undefined &&
+    !extraArguments.every(
+      (argument) =>
+        typeof argument === "string" &&
+        argument.length > 0 &&
+        !argument.includes("\0"),
+    )
+  ) {
+    return Promise.reject(new RuntimeAdapterError("invalid-input"));
+  }
   return new Promise((resolve, reject) => {
     const child = spawnProcess(
       plan.executable,
-      codexSpawnArguments(plan, CODEX_APP_SERVER_ARGUMENTS),
+      codexSpawnArguments(
+        plan,
+        extraArguments === undefined || extraArguments.length === 0
+          ? CODEX_APP_SERVER_ARGUMENTS
+          : [...extraArguments, ...CODEX_APP_SERVER_ARGUMENTS],
+      ),
       {
         stdio: "pipe",
         windowsHide: true,

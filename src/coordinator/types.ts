@@ -4,6 +4,7 @@ import type {
   RuntimeUserInputResponse,
   NormalizedRuntimeUserInputEvent,
   RuntimeFailureCategory,
+  RuntimeWorkbenchMcpServer,
   SessionProfile,
 } from "../agent-runtime/index.ts";
 import type {
@@ -125,6 +126,8 @@ interface DirectProjectCommandBase {
   readonly profile: SessionProfile;
   /** Private durable route back to the native profile selected at acceptance. */
   readonly runtimeResumeIdentity?: ProjectRuntimeResumeIdentity;
+  /** Execution-only Workbench MCP binding; validation strips it before storage. */
+  readonly workbenchMcp?: RuntimeWorkbenchMcpServer;
 }
 
 export interface StartDirectProjectCommand extends DirectProjectCommandBase {

@@ -7,10 +7,19 @@ export default defineConfig({
     outDir: resolve("dist/main"),
     emptyOutDir: true,
     target: "node22",
-    ssr: resolve("src/workbench-shell/electron/main.ts"),
+    // Two SSR entries: the Electron main bundle and the standalone MCP
+    // bootstrap the CLIs spawn (`workbench` stdio server). Named entries keep
+    // `dist/main/main.js` byte-stable for the launcher and packaging stage.
+    ssr: true,
     rollupOptions: {
       external: ["electron"],
-      output: { entryFileNames: "main.js" },
+      input: {
+        main: resolve("src/workbench-shell/electron/main.ts"),
+        "auto-iteration-mcp-bootstrap": resolve(
+          "src/workbench-shell/auto-iteration-mcp-bootstrap.ts",
+        ),
+      },
+      output: { entryFileNames: "[name].js" },
     },
   },
 });

@@ -466,6 +466,9 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
         projectDirectory: request.projectDirectory,
         profile: request.profile,
         permissionMode,
+        ...(request.workbenchMcp === undefined
+          ? {}
+          : { workbenchMcp: request.workbenchMcp }),
       }));
     } catch (error) {
       if (error instanceof RuntimeAdapterError) throw error;
@@ -549,6 +552,9 @@ export class ClaudeAdapter implements ResumableAgentRuntimeAdapter {
         profile: request.profile,
         permissionMode: capability.permissionMode,
         resumeSessionIdentity: capability.sessionIdentity,
+        ...(request.workbenchMcp === undefined
+          ? {}
+          : { workbenchMcp: request.workbenchMcp }),
       }));
     } catch (error) {
       if (error instanceof RuntimeAdapterError) throw error;
@@ -680,7 +686,9 @@ async function stopRejectedSessionTransport(transport: {
 function validateStartRequest(request: RuntimeStart): void {
   if (
     !isPlainDataRecord(request) ||
-    Reflect.ownKeys(request).length !== 2 ||
+    !hasExactlyKnownKeys(request, ["projectDirectory", "profile"], [
+      "workbenchMcp",
+    ]) ||
     !isSafeText(request.projectDirectory, 32_768) ||
     !isPlainDataRecord(request.profile) ||
     !isRecordWithKnownKeys(
@@ -704,7 +712,11 @@ function validateStartRequest(request: RuntimeStart): void {
 function validateResumeRequest(request: RuntimeResume): void {
   if (
     !isPlainDataRecord(request) ||
-    Reflect.ownKeys(request).length !== 3 ||
+    !hasExactlyKnownKeys(
+      request,
+      ["projectDirectory", "profile", "opaqueSessionReference"],
+      ["workbenchMcp"],
+    ) ||
     !isSafeText(request.opaqueSessionReference, 240)
   ) {
     throw new RuntimeAdapterError("invalid-input");
@@ -713,6 +725,26 @@ function validateResumeRequest(request: RuntimeResume): void {
     projectDirectory: request.projectDirectory,
     profile: request.profile,
   });
+}
+
+/**
+ * Exact key check that keeps tolerating the historical two/three-key shapes
+ * while admitting the optional runtime-only Workbench MCP binding.
+ */
+function hasExactlyKnownKeys(
+  record: Readonly<Record<string, unknown>>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const keys = Reflect.ownKeys(record).filter(
+    (key): key is string => typeof key === "string",
+  );
+  if (keys.length < required.length || keys.length > required.length + optional.length) {
+    return false;
+  }
+  return keys.every(
+    (key) => required.includes(key) || optional.includes(key),
+  );
 }
 
 function sameLockedProfileFields(

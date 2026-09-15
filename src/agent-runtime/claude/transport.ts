@@ -1,4 +1,4 @@
-import type { SessionProfile } from "../index.ts";
+import type { RuntimeWorkbenchMcpServer, SessionProfile } from "../index.ts";
 
 export interface ClaudeCatalogTransport {
   send(line: string): Promise<void>;
@@ -40,6 +40,11 @@ export interface ClaudeSessionTransportRequest {
   readonly permissionMode: ClaudePermissionMode;
   /** Provider identity retained only inside the Claude Adapter/transport. */
   readonly resumeSessionIdentity?: string;
+  /**
+   * Workbench MCP bridge binding for this Session, when the host issued one.
+   * Becomes the single `workbench` stdio server in `--mcp-config`.
+   */
+  readonly workbenchMcp?: RuntimeWorkbenchMcpServer;
 }
 
 export type ClaudeSessionTransportFactory = (

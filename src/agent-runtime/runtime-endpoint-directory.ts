@@ -534,6 +534,9 @@ function createDirectoryRuntimeAdapter(
         binding = await resolution.endpoint.adapter.start({
           projectDirectory: request.projectDirectory,
           profile: resolution.profile.runtimeProfile,
+          ...(request.workbenchMcp === undefined
+            ? {}
+            : { workbenchMcp: request.workbenchMcp }),
         });
       } catch (error) {
         if (error instanceof RuntimeAdapterError) throw error;
@@ -563,6 +566,9 @@ function createDirectoryRuntimeAdapter(
           projectDirectory: request.projectDirectory,
           profile: resolution.profile.runtimeProfile,
           opaqueSessionReference: request.opaqueSessionReference,
+          ...(request.workbenchMcp === undefined
+            ? {}
+            : { workbenchMcp: request.workbenchMcp }),
         });
       } catch (error) {
         if (error instanceof RuntimeAdapterError) throw error;
