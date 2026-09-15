@@ -58,7 +58,7 @@ test("Windows packaging stages only the minimal production manifest and accepted
     {
       name: "synchronized-intellect-network",
       productName: "Synchronized Intellect Network",
-      version: "0.0.0",
+      version: "0.1.0",
       private: true,
       type: "module",
       main: "main/main.js",
