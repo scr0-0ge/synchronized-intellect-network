@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -312,6 +313,10 @@ export async function createWorkbenchBackend(options: {
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
   readonly annualReportCapability?: WorkbenchAnnualReportCapability;
   readonly onAnnualReportJobActivityChange?: (delta: 1 | -1) => void;
+  /** Issue #8 M4: overridable for tests; see `AutoIterationServiceOptions`. */
+  readonly scanWorkspaceProcesses?: (
+    workspacePath: string,
+  ) => Promise<readonly WorkspaceProcessRecord[]>;
 }): Promise<WorkbenchBackend> {
   // w300: the Workbench MCP binding registry retains each pipe while the
   // auto-iteration service carries its bootstrap spec on the exact command
@@ -375,6 +380,7 @@ export async function createWorkbenchBackend(options: {
       ),
       options.annualReportCapability,
       options.onAnnualReportJobActivityChange,
+      options.scanWorkspaceProcesses,
     );
   } catch (error) {
     // `openProject` has already opened -- and created -- the SQLite ledger for
@@ -469,7 +475,113 @@ interface AutoIterationServiceOptions {
   readonly serverLookup: {
     serverForSession(sessionId: string): AutoIterationMcpServer;
   };
+  /**
+   * Issue #8 M4 (w349 unsettled): overridable so tests can exercise the
+   * red/green path with a fake list instead of a real Win32_Process scan.
+   * Defaults to `processesReferencingWorkspace`.
+   */
+  readonly scanWorkspaceProcesses?: (
+    workspacePath: string,
+  ) => Promise<readonly WorkspaceProcessRecord[]>;
 }
+
+export interface WorkspaceProcessRecord {
+  readonly pid: number;
+  readonly commandLine: string;
+}
+
+/**
+ * Issue #8 M4: a worker Session backgrounding a process (e.g. a test suite
+ * left running) leaves no host job record, so `captureHandoffArtifacts`'s
+ * existing job-status check cannot see it. Windows exposes no per-PID
+ * working-directory query, and the worker Session's own OS process id is
+ * not part of any interface this host layer can reach (agent-runtime keeps
+ * native process identity to itself) — so this is a best-effort command-line
+ * match against the workspace's real path, using the same read-only
+ * Win32_Process primitive the launcher test's process-tree helper walks by
+ * PID, rather than a PID-tree walk this layer cannot root. A background
+ * process invoked without that path appearing in its argv is not caught.
+ * Never signals or terminates a process; a scan failure fails open (treated
+ * as no survivors) so an environment without PowerShell cannot wedge every
+ * handoff shut.
+ */
+async function processesReferencingWorkspace(
+  workspacePath: string,
+): Promise<readonly WorkspaceProcessRecord[]> {
+  if (process.platform !== "win32") return [];
+  const script =
+    "$items = @(Get-CimInstance Win32_Process -ErrorAction Stop | " +
+    "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Env:UAW_AUTO_ITERATION_WORKSPACE_MATCH) }); " +
+    "[Console]::Out.Write((ConvertTo-Json -Compress @($items | ForEach-Object { " +
+    "@{ pid = [int64]$_.ProcessId; commandLine = [string]$_.CommandLine } })))";
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return new Promise((resolveResult) => {
+    let child;
+    try {
+      child = spawn(
+        "powershell.exe",
+        ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        {
+          windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env, UAW_AUTO_ITERATION_WORKSPACE_MATCH: workspacePath },
+        },
+      );
+    } catch {
+      resolveResult([]);
+      return;
+    }
+    let stdout = "";
+    let settled = false;
+    const finish = (records: readonly WorkspaceProcessRecord[]) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveResult(records);
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish([]);
+    }, 10_000);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.once("error", () => finish([]));
+    child.once("close", (code) => {
+      if (code !== 0 || stdout.trim().length === 0) {
+        finish([]);
+        return;
+      }
+      try {
+        const parsed: unknown = JSON.parse(stdout.trim());
+        const list = Array.isArray(parsed) ? parsed : [parsed];
+        finish(
+          list
+            .filter(
+              (entry): entry is { pid: unknown; commandLine: unknown } =>
+                typeof entry === "object" && entry !== null,
+            )
+            .map((entry) => ({
+              pid: Number(entry.pid),
+              commandLine: String(entry.commandLine ?? ""),
+            }))
+            .filter((entry) => Number.isFinite(entry.pid)),
+        );
+      } catch {
+        finish([]);
+      }
+    });
+  });
+}
+
+/**
+ * Issue #8 M4 backpressure: at most this many handoff events are actually
+ * included in one wakeup's parent input; the rest wait for the next wakeup
+ * instead of being silently sealed as delivered without ever being shown
+ * (w349 gap: the summary text already capped its listing at 8, but
+ * `markHandoffIncluded` used to run over the full, unbounded list).
+ */
+export const WAKEUP_HANDOFF_BATCH_LIMIT = 8;
 
 class AutoIterationJobStillRunningError extends Error {
   constructor(jobId: string) {
@@ -507,6 +619,8 @@ function createBackendAutoIterationService(
     workspaceManager,
     jobs: executionJobs,
   });
+  const scanWorkspaceProcesses =
+    options.scanWorkspaceProcesses ?? processesReferencingWorkspace;
   // Gate plan for gateDefinitionVersion "issue-8-m3-v1" (frozen into every
   // candidate w337 records). The product WorkOrder contract carries no
   // per-order gate selection yet, so the default is build + typecheck; the
@@ -600,6 +714,20 @@ function createBackendAutoIterationService(
         status.stdout.trim().length > 0
       ) {
         throw new Error("artifact-capture-workspace-mismatch");
+      }
+      // Issue #8 M4 (w349 unsettled): the job status above only reflects
+      // this host's own capture job; a worker-started background process
+      // (e.g. a backgrounded test run) is invisible to it. Reject with the
+      // same category so the caller sees one consistent "not delivered yet"
+      // signal, and log the concrete reason host-side.
+      const survivors = await scanWorkspaceProcesses(workspace.path);
+      if (survivors.length > 0) {
+        console.warn(
+          "[auto-iteration] handoff rejected: workspace still has a running process",
+          attemptId,
+          survivors.map((entry) => `${entry.pid}:${entry.commandLine}`).join("; "),
+        );
+        throw new AutoIterationJobStillRunningError(`${jobId}:worker-background-process`);
       }
     }
     const references: readonly ArtifactReference[] = [
@@ -913,6 +1041,28 @@ function createBackendAutoIterationService(
           },
         });
       }
+      // Issue #8 M4 (w353 unsettled): the same gap as the worker loop above
+      // used to have — a Review Attempt still awaiting its verdict at reopen
+      // time had no path back to a tool binding. Durable order state alone
+      // decides which handoffs still need one; reviewSessionIdsByHandoff
+      // (reviewSessionIdFor's backing map) is repopulated alongside it.
+      for (const order of overview.workOrders) {
+        if (order.status !== "awaiting-review") continue;
+        const handoff = authority.readCurrentHandoff(order.workOrderId);
+        if (handoff === undefined) continue;
+        const policy = authority.readWorkOrder(order.workOrderId)?.review ?? {
+          kind: "none" as const,
+        };
+        if (policy.kind !== "independent") continue;
+        if (authority.readReviewResult(handoff) !== undefined) continue;
+        const sessionId = authority.readReviewSessionId(handoff);
+        if (sessionId === undefined) continue;
+        sessionAuthority.bindSession({ actor: { kind: "reviewer", sessionId, handoff } });
+        reviewSessionIdsByHandoff.set(
+          `${handoff.workOrderId}:${handoff.attemptId}:${handoff.handoffId}`,
+          sessionId,
+        );
+      }
     } catch {
       // A ledger that cannot be read for bindings leaves them simply absent;
       // the durable state is untouched and the next drain retries.
@@ -982,7 +1132,7 @@ function createBackendAutoIterationService(
 
   /** One bounded line per wakeup, however many handoffs are pending. */
   function supervisorWakeupSummary(pendingHandoffs: readonly HandoffIdempotencyKey[]): string {
-    const listed = pendingHandoffs.slice(0, 8).map(reviewLabel);
+    const listed = pendingHandoffs.slice(0, WAKEUP_HANDOFF_BATCH_LIMIT).map(reviewLabel);
     const rest = pendingHandoffs.length - listed.length;
     return (
       `Workbench auto-iteration: ${pendingHandoffs.length} worker handoff` +
@@ -1104,6 +1254,11 @@ function createBackendAutoIterationService(
       });
       options.workbenchBindings.associate(idempotencyKey, sessionId);
       reviewSessionIdsByHandoff.set(dedupeKey, sessionId);
+      // Issue #8 M4 (w353 unsettled): durable counterpart of the map above,
+      // so a Project reopen while this review is still in flight can
+      // re-establish the binding (see resumeBindings). Best-effort, same as
+      // the in-memory map it mirrors.
+      await authority.bindReviewSession({ handoff, sessionId }).catch(() => undefined);
     } finally {
       reviewSessionStarts.delete(dedupeKey);
     }
@@ -1291,7 +1446,11 @@ function createBackendAutoIterationService(
             void drainPendingOutbox().catch(() => undefined);
             return;
           }
-          for (const handoff of pendingHandoffs) {
+          // Issue #8 M4: only the batch actually named in the summary text
+          // is sealed as delivered; a handoff beyond the cap keeps its
+          // inbox-wakeup entry pending and is carried again (with an
+          // accurate "and N more" count) at the next wakeup.
+          for (const handoff of pendingHandoffs.slice(0, WAKEUP_HANDOFF_BATCH_LIMIT)) {
             try {
               await authority.markHandoffIncluded({
                 handoff,
@@ -1305,6 +1464,10 @@ function createBackendAutoIterationService(
               );
             }
           }
+          // A handoff left pending past the cap keeps its own inbox-wakeup
+          // outbox entry, so the system's existing "any committed update
+          // re-drains" mechanism (not a new retry path) carries it forward;
+          // `markHandoffIncluded`'s own transaction above already commits.
         } catch (error) {
           options.workbenchBindings.release(wakeupKey);
           console.warn(
@@ -1849,6 +2012,10 @@ function createBackend(
   autoIterationManagedWorkspaceRoot: string,
   annualReportCapability?: WorkbenchAnnualReportCapability,
   onAnnualReportJobActivityChange?: (delta: 1 | -1) => void,
+  /** Issue #8 M4: overridable for tests; see `AutoIterationServiceOptions`. */
+  scanWorkspaceProcesses?: (
+    workspacePath: string,
+  ) => Promise<readonly WorkspaceProcessRecord[]>,
 ): WorkbenchBackend {
   let closePromise: Promise<void> | undefined;
   const profileLoadPromises = new Set<
@@ -1896,6 +2063,7 @@ function createBackend(
           managedWorkspaceRoot: autoIterationManagedWorkspaceRoot,
           workbenchBindings,
           serverLookup,
+          scanWorkspaceProcesses,
         });
   return Object.freeze({
     autoIteration,

@@ -382,6 +382,63 @@ export class AutoIterationProjectStore {
     if (Number(changed.changes) !== 1) throw new Error("work-order-version-conflict");
   }
 
+  /**
+   * Issue #8 M4: rides the same `completion_condition_json` column w353 used
+   * for `WorkOrder.review` (no schema bump) — `updateWorkOrder` above never
+   * touches this column, so a later status transition cannot clobber it. Not
+   * part of the `WorkOrder` model-visible version; a work order that no
+   * longer exists is a silent no-op (nothing left to bind a hint onto).
+   */
+  bindReviewSession(handoff: HandoffIdempotencyKey, sessionId: string): void {
+    const row = this.database
+      .prepare(
+        `SELECT completion_condition_json FROM auto_iteration_work_orders
+          WHERE project_id = ? AND work_order_id = ?`,
+      )
+      .get(this.projectId, handoff.workOrderId) as
+      | { completion_condition_json: string }
+      | undefined;
+    if (row === undefined) return;
+    const stored = JSON.parse(row.completion_condition_json) as {
+      readonly reviewSessions?: Record<string, string>;
+    };
+    const reviewSessions = { ...stored.reviewSessions, [handoff.handoffId]: sessionId };
+    this.database
+      .prepare(
+        `UPDATE auto_iteration_work_orders SET completion_condition_json = ?
+          WHERE project_id = ? AND work_order_id = ?`,
+      )
+      .run(
+        JSON.stringify({ ...stored, reviewSessions }),
+        this.projectId,
+        handoff.workOrderId,
+      );
+  }
+
+  reviewSessionId(handoff: HandoffIdempotencyKey): string | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT completion_condition_json FROM auto_iteration_work_orders
+          WHERE project_id = ? AND work_order_id = ?`,
+      )
+      .get(this.projectId, handoff.workOrderId) as
+      | { completion_condition_json: string }
+      | undefined;
+    if (row === undefined) return undefined;
+    const stored = JSON.parse(row.completion_condition_json) as {
+      readonly reviewSessions?: Record<string, string>;
+    };
+    return stored.reviewSessions?.[handoff.handoffId];
+  }
+
+  /** Read-only cross-read of the channel's own `sessions` table (same database, different owner). */
+  sessionLifecycleStatus(sessionId: string): string | undefined {
+    const row = this.database
+      .prepare(`SELECT lifecycle_status FROM sessions WHERE session_id = ?`)
+      .get(sessionId) as { readonly lifecycle_status: string } | undefined;
+    return row?.lifecycle_status;
+  }
+
   attempts(workOrderId: string): readonly ExecutionAttempt[] {
     const rows = this.database
       .prepare(

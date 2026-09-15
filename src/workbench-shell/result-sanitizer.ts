@@ -4134,7 +4134,27 @@ const autoIterationWaitingFor: readonly NonNullable<WorkbenchAutoIterationWorkOr
   "supervisor-review",
   "integration",
   "quota",
+  "supervisor-busy",
+  "supervisor-recovering",
+  "queued-limit",
+  "review-pending",
+  "integration-running",
+  "ready-to-publish",
 ];
+
+/**
+ * Issue #8 M4: `quota:<pool>` and `integration-blocked:<reason>` carry an
+ * open-ended suffix (a pool id / outcome reason), so they cannot live in the
+ * fixed `autoIterationWaitingFor` list above; this checks the prefix shape
+ * instead, still refusing anything that is not a bounded plain string.
+ */
+function isAutoIterationWaitingForPrefixed(value: unknown): boolean {
+  if (typeof value !== "string" || value.length > 200) return false;
+  for (const prefix of ["quota:", "integration-blocked:"]) {
+    if (value.startsWith(prefix) && value.length > prefix.length) return true;
+  }
+  return false;
+}
 
 const autoIterationTenureStatuses: readonly WorkbenchAutoIterationSupervisorView["tenureStatus"][] = [
   "active",
@@ -4219,7 +4239,8 @@ function sanitizeAutoIterationView(
       (waitingFor !== null &&
         !autoIterationWaitingFor.includes(
           waitingFor as NonNullable<WorkbenchAutoIterationWorkOrderView["waitingFor"]>,
-        ))
+        ) &&
+        !isAutoIterationWaitingForPrefixed(waitingFor))
     ) {
       throw new Error("invalid-auto-iteration-work-order");
     }
