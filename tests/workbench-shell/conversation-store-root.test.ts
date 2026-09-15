@@ -134,8 +134,13 @@ test("production wires every conversation-store consumer through the resolved ro
   );
   assert.match(
     source,
-    /readAppDataDirectory: \(\) =>\s+process\.platform === "win32" && explicitUserDataDirectory === undefined\s+\? dirname\(recoveryUserDataDirectory\)\s+: app\.getPath\("appData"\),\s+currentUserDataDirectory: recoveryUserDataDirectory,/u,
+    /explicitUserDataDirectory === undefined\s+\? createDeferredProductionHistoryRecoverySourceDiscovery\(\{\s+readAppDataDirectory: \(\) => dirname\(recoveryUserDataDirectory\),\s+currentUserDataDirectory: recoveryUserDataDirectory,/u,
     "ordinary Windows recovery must find historical siblings in physical Roaming, not redirected Electron appData",
+  );
+  assert.doesNotMatch(
+    source,
+    /readAppDataDirectory: \(\) =>[^\n]*app\.getPath\("appData"\)/u,
+    "historical recovery discovery must not read Electron appData",
   );
   assert.match(
     source,

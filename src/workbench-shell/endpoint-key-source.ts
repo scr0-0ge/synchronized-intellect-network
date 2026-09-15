@@ -87,12 +87,25 @@ export interface WorkbenchEndpointKeySourceOptions {
   readonly envContract: WorkbenchEndpointKeyEnvContract;
   readonly probeRequest: WorkbenchEndpointProbeRequest;
   /**
-   * Optional probe base URL derivation. Default: the endpoint contract's env
-   * override, else its default base URL. DeepSeek overrides this because its
-   * zero-inference probe lives on the platform face (`.../models`), not the
-   * Anthropic face the sessions use.
+   * Lazy read of the saved per-endpoint Base URL override (the main-process
+   * mirror of the preference store, w309). Read at probe time — the mirror is
+   * hydrated after the key sources are constructed — so the probe resolves
+   * its target from the same source the sessions use: saved override first,
+   * then the env contract's override variable, then the contract default.
    */
-  readonly probeBaseUrl?: (environment: NodeJS.ProcessEnv) => string;
+  readonly resolveBaseUrlOverride?: () => string;
+  /**
+   * Optional probe base URL derivation. Default: the saved Base URL override,
+   * then the endpoint contract's env override, else its default base URL.
+   * DeepSeek overrides this because its zero-inference probe lives on the
+   * platform face (`.../models`), not the Anthropic face the sessions use;
+   * it receives the saved override so the same precedence applies before its
+   * `/anthropic` strip.
+   */
+  readonly probeBaseUrl?: (
+    environment: NodeJS.ProcessEnv,
+    savedOverrideBaseUrl: string,
+  ) => string;
   /** Environment the fallback token/base URL are read from. */
   readonly environment?: NodeJS.ProcessEnv;
   readonly fetch?: typeof fetch;
@@ -139,11 +152,16 @@ export function createWorkbenchEndpointKeySource(
           reason: "token-missing",
         });
       }
+      // Same URL source the sessions consume (w309): the saved override wins
+      // whenever it is non-blank; an override that fails the endpoint's URL
+      // validation surfaces as the probe's `invalid-base-url` failure rather
+      // than silently probing the official default with the user's key.
+      const savedOverride = options.resolveBaseUrlOverride?.() ?? "";
       return options.probeRequest({
         baseUrl:
           options.probeBaseUrl === undefined
-            ? defaultProbeBaseUrl(environment)
-            : options.probeBaseUrl(environment),
+            ? defaultProbeBaseUrl(environment, savedOverride)
+            : options.probeBaseUrl(environment, savedOverride),
         authToken,
         ...(options.fetch === undefined
           ? {}
@@ -169,7 +187,13 @@ export function createWorkbenchEndpointKeySource(
       : undefined;
   }
 
-  function defaultProbeBaseUrl(source: NodeJS.ProcessEnv): string {
+  function defaultProbeBaseUrl(
+    source: NodeJS.ProcessEnv,
+    savedOverride: string,
+  ): string {
+    if (typeof savedOverride === "string" && savedOverride.trim().length > 0) {
+      return savedOverride;
+    }
     const explicit = source[options.envContract.baseUrlEnvVar];
     return typeof explicit === "string" && explicit.trim().length > 0
       ? explicit

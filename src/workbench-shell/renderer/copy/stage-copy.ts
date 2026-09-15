@@ -21,12 +21,8 @@ const englishCopy = {
     emptyProjectTitle: "Start the first Agent Session",
     emptyProjectBody:
       "This Project is registered and empty. Whatever you send first starts a new Agent Session on the endpoint you pick below.",
-    /* w283: the packaged bootstrap Home project registers itself the same
-       way an ordinary empty Project does, but its runtime adapter refuses
-       every inspect/start/resume by design (`bootstrap-runtime-adapter.ts`).
-       `projectRunsNoAgentSessions` in `composer.tsx` detects that from the
-       uniform not-inspected catalog shape once a load completes, and
-       `stage.tsx` swaps this pair in for the two above. */
+    /* The packaged bootstrap Home project cannot run Sessions. Its explicit
+       projection is available on the first renderer frame. */
     bootstrapProjectTitle: "This Project doesn't run Agent Sessions",
     bootstrapProjectBody:
       "This is the Workbench's own starting Project, not a place to run work. Choose Create Project… above, then pick a directory to start an Agent Session.",

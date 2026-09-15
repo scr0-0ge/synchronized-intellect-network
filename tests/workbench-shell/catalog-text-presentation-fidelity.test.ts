@@ -97,7 +97,7 @@ const recordedCommand = Object.freeze({
 }) satisfies WorkbenchCommandView;
 
 const recordedView = Object.freeze({
-  project: Object.freeze({ label: "Catalog fidelity" }),
+  project: Object.freeze({ label: "Catalog fidelity", packagedBootstrap: false }),
   observation: Object.freeze({ cursor: 1, live: true as const }),
   commands: Object.freeze([recordedCommand]),
   initialSelectionKey: recordedCommand.key,

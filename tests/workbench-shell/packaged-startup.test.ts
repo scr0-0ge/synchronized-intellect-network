@@ -38,6 +38,7 @@ test("development startup preserves the current-directory fallback without touch
 
   assert.equal(createCalls, 1);
   assert.equal(result.fallbackProjectDirectory, currentWorkingDirectory);
+  assert.equal(result.packagedBootstrapProjectDirectory, undefined);
   assert.equal(result.startupProjectDirectory, undefined);
   assert.equal(result.dataDirectory, join(userDataDirectory, "workbench-project-host"));
   assert.equal(
@@ -78,6 +79,7 @@ test("an explicit packaged startup Project bypasses bootstrap inference and keep
   assert.equal(fileSystemCalls, 0);
   assert.equal(result.startupProjectDirectory, explicitProjectDirectory);
   assert.equal(result.fallbackProjectDirectory, explicitProjectDirectory);
+  assert.equal(result.packagedBootstrapProjectDirectory, undefined);
 });
 
 test("packaged startup creates one exact empty Workbench Home child and keeps private stores outside it", async (t) => {
@@ -98,6 +100,7 @@ test("packaged startup creates one exact empty Workbench Home child and keeps pr
   const expectedBootstrap = join(userDataDirectory, "Workbench Home");
   const bootstrapStatus = await lstat(expectedBootstrap);
   assert.equal(result.fallbackProjectDirectory, expectedBootstrap);
+  assert.equal(result.packagedBootstrapProjectDirectory, expectedBootstrap);
   assert.equal(bootstrapStatus.isDirectory(), true);
   assert.equal(bootstrapStatus.isSymbolicLink(), false);
   assert.deepEqual(await readdir(expectedBootstrap), []);
@@ -132,6 +135,7 @@ test("packaged startup reuses an existing safe Workbench Home without recreating
   });
 
   assert.equal(result.fallbackProjectDirectory, bootstrapDirectory);
+  assert.equal(result.packagedBootstrapProjectDirectory, bootstrapDirectory);
   assert.equal(mkdirCalls, 0);
 });
 

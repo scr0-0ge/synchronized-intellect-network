@@ -50,16 +50,30 @@ test("production owns one userData-scoped envelope store file per subject, the s
   );
   assert.match(
     source,
-    /glmEndpointKeySource = createWorkbenchGlmEndpointKeySource\(\{\s+store: glmEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+\}\);/u,
+    /glmEndpointKeySource = createWorkbenchGlmEndpointKeySource\(\{\s+store: glmEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+resolveBaseUrlOverride: \(\) => baseUrlOverrides\["glm-coding-plan"\],\s+\}\);/u,
   );
   assert.match(
     source,
-    /kimiEndpointKeySource = createWorkbenchKimiEndpointKeySource\(\{\s+store: kimiEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+\}\);/u,
+    /kimiEndpointKeySource = createWorkbenchKimiEndpointKeySource\(\{\s+store: kimiEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+resolveBaseUrlOverride: \(\) => baseUrlOverrides\["kimi-code"\],\s+\}\);/u,
   );
   assert.match(
     source,
-    /deepseekEndpointKeySource = createWorkbenchDeepseekEndpointKeySource\(\{\s+store: deepseekEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+\}\);/u,
+    /deepseekEndpointKeySource = createWorkbenchDeepseekEndpointKeySource\(\{\s+store: deepseekEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+resolveBaseUrlOverride: \(\) => baseUrlOverrides\["deepseek-api"\],\s+\}\);/u,
   );
+  // w309: every endpoint with a saved-Base-URL surface wires its probe to the
+  // same source the sessions use (the lazy mirror read); claude-api and
+  // codex-api use the shared option too -- no per-endpoint resolver may come
+  // back. kimi-platform has no override surface and stays on the env
+  // contract.
+  assert.match(
+    source,
+    /claudeApiEndpointKeySource = createWorkbenchClaudeApiEndpointKeySource\(\{\s+store: claudeApiEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+resolveBaseUrlOverride: \(\) => baseUrlOverrides\["claude-api"\],\s+\}\);/u,
+  );
+  assert.match(
+    source,
+    /codexApiEndpointKeySource = createWorkbenchCodexApiEndpointKeySource\(\{\s+store: codexApiEndpointSecretEnvelopeStore,\s+environment: process\.env,\s+resolveBaseUrlOverride: \(\) => baseUrlOverrides\["codex-api"\],\s+\}\);/u,
+  );
+  assert.doesNotMatch(source, /probeBaseUrl:/u);
   assert.match(
     source,
     /resolveGlmAuthToken: \(\) => glmEndpointKeySource\?\.resolve\(\),/u,

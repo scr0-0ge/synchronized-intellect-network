@@ -3394,7 +3394,7 @@ function twoProjectView(
   const firstKey = String(keySeed).padStart(12, "0");
   const secondKey = String(keySeed + 1).padStart(12, "0");
   return {
-    project: { label: "Shared Name" },
+    project: { label: "Shared Name", packagedBootstrap: false },
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,
@@ -3425,7 +3425,7 @@ function createdProjectView(
 ): WorkbenchHostedProjectView {
   const baseline = twoProjectView(cursor, [], null, 0, "available", 601);
   return {
-    project: { label: "New Project" },
+    project: { label: "New Project", packagedBootstrap: false },
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,
@@ -3454,7 +3454,7 @@ function view(
   initialSelectionKey: string | null,
 ): WorkbenchHostedProjectView {
   return {
-    project: { label: "Atlas Fieldnotes" },
+    project: { label: "Atlas Fieldnotes", packagedBootstrap: false },
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,

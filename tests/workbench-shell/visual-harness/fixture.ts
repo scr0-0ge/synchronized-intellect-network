@@ -112,7 +112,7 @@ const openedProjectSelection = Object.freeze({
 });
 
 export const visualFixture: WorkbenchHostedProjectView = Object.freeze({
-  project: Object.freeze({ label: "Atlas Fieldnotes" }),
+  project: Object.freeze({ label: "Atlas Fieldnotes", packagedBootstrap: false }),
   observation: Object.freeze({ cursor: 11, live: true }),
   commands: Object.freeze([
     Object.freeze({
@@ -305,7 +305,7 @@ export const codeBlockCopyVisualFixture: WorkbenchHostedProjectView =
   });
 
 export const emptyVisualFixture: WorkbenchHostedProjectView = Object.freeze({
-  project: Object.freeze({ label: "Atlas Fieldnotes" }),
+  project: Object.freeze({ label: "Atlas Fieldnotes", packagedBootstrap: false }),
   observation: Object.freeze({ cursor: 0, live: true }),
   commands: Object.freeze([]),
   initialSelectionKey: null,
@@ -315,7 +315,7 @@ export const emptyVisualFixture: WorkbenchHostedProjectView = Object.freeze({
 
 export const unavailableVisualFixture: WorkbenchHostedProjectView =
   Object.freeze({
-    project: Object.freeze({ label: "Archive Notes" }),
+    project: Object.freeze({ label: "Archive Notes", packagedBootstrap: false }),
     observation: Object.freeze({ cursor: 0, live: true }),
     commands: Object.freeze([]),
     initialSelectionKey: null,
@@ -325,7 +325,7 @@ export const unavailableVisualFixture: WorkbenchHostedProjectView =
 
 export const openedProjectVisualFixture: WorkbenchHostedProjectView =
   Object.freeze({
-    project: Object.freeze({ label: "Northstar Lab" }),
+    project: Object.freeze({ label: "Northstar Lab", packagedBootstrap: false }),
     observation: Object.freeze({ cursor: 0, live: true }),
     commands: Object.freeze([]),
     initialSelectionKey: null,
@@ -334,7 +334,7 @@ export const openedProjectVisualFixture: WorkbenchHostedProjectView =
   });
 
 export const secondSessionVisualFixture: WorkbenchHostedProjectView = Object.freeze({
-  project: Object.freeze({ label: "Atlas Fieldnotes" }),
+  project: Object.freeze({ label: "Atlas Fieldnotes", packagedBootstrap: false }),
   observation: Object.freeze({ cursor: 18, live: true }),
   commands: Object.freeze([
     Object.freeze({

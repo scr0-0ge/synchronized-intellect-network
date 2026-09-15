@@ -5,9 +5,26 @@ import { locale } from "./locale.ts";
 import { settingsUsageCopy as copy } from "./copy/settings-usage-copy.ts";
 
 /** Row identity for the usage template. Order is fixed by `ROW_ORDER`, not by data. */
-export type UsageEndpointRowKey = "codex" | "claude" | "glm" | "deepseek" | "kimi";
+export type UsageEndpointRowKey =
+  | "codex"
+  | "claude"
+  | "glm"
+  | "deepseek"
+  | "kimi"
+  | "kimi-platform"
+  | "claude-api"
+  | "codex-api";
 
-const ROW_ORDER: readonly UsageEndpointRowKey[] = ["codex", "claude", "glm", "deepseek", "kimi"];
+const ROW_ORDER: readonly UsageEndpointRowKey[] = [
+  "codex",
+  "claude",
+  "glm",
+  "deepseek",
+  "kimi",
+  "kimi-platform",
+  "claude-api",
+  "codex-api",
+];
 
 /**
  * Providers whose CLI never reports usage. Distinct from "not yet observed".

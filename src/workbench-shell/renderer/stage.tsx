@@ -490,12 +490,12 @@ const EmptyProjectState: Component<{
         ◇
       </span>
       <h1>
-        {projectRunsNoAgentSessions(props.profile)
+        {projectRunsNoAgentSessions(props.view)
           ? stageCopy.bootstrapProjectTitle
           : stageCopy.emptyProjectTitle}
       </h1>
       <p>
-        {projectRunsNoAgentSessions(props.profile)
+        {projectRunsNoAgentSessions(props.view)
           ? stageCopy.bootstrapProjectBody
           : stageCopy.emptyProjectBody}
       </p>

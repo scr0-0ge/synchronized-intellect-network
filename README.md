@@ -93,6 +93,8 @@ Arguments go straight through to Electron, so a throwaway profile is one flag aw
 .\start.bat --user-data-dir=C:\throwaway
 ```
 
+A custom profile keeps its own sessions but does not search sibling profiles for historical recovery.
+
 ## What it does
 
 - **Real conversations, both runtimes.** Start a session, send a turn, send another, get the reply

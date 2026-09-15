@@ -988,7 +988,7 @@ test("Project sanitization admits only exact interruption controls and stopped e
   const resultFor = (command: Record<string, unknown>) => ({
     ok: true,
     view: {
-      project: { label: "Interrupt Project" },
+      project: { label: "Interrupt Project", packagedBootstrap: false },
       observation: { cursor: 13, live: true },
       commands: [command],
       initialSelectionKey: "command-1", autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
@@ -2648,7 +2648,7 @@ test("hosted Project sanitization preserves duplicate labels only for exact publ
   const incoming = {
     ok: true,
     view: {
-      project: { label: "Shared Name" },
+      project: { label: "Shared Name", packagedBootstrap: false },
       observation: { cursor: 3, live: true },
       commands: [],
       initialSelectionKey: null, autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
@@ -2700,11 +2700,45 @@ test("hosted Project sanitization preserves duplicate labels only for exact publ
   );
   assert.equal(Object.isFrozen(hostedProjectView(sanitized).projectSelection.projects), true);
 
+  const packagedBootstrap = sanitizeWorkbenchHostedProjectResult({
+    ...incoming,
+    view: {
+      ...incoming.view,
+      project: { ...incoming.view.project, packagedBootstrap: true },
+    },
+  });
+  assert.equal(packagedBootstrap.ok, true);
+  if (!packagedBootstrap.ok || "empty" in packagedBootstrap) {
+    assert.fail("Expected the packaged bootstrap marker to cross the projection.");
+  }
+  assert.equal(packagedBootstrap.view.project.packagedBootstrap, true);
+
   for (const widened of [
     { ...incoming, privateRegistry: "PRIVATE_REGISTRY" },
     {
       ...incoming,
       view: { ...incoming.view, projectId: "PRIVATE_PROJECT" },
+    },
+    {
+      ...incoming,
+      view: {
+        ...incoming.view,
+        project: { label: "Shared Name" },
+      },
+    },
+    {
+      ...incoming,
+      view: {
+        ...incoming.view,
+        project: { ...incoming.view.project, packagedBootstrap: "true" },
+      },
+    },
+    {
+      ...incoming,
+      view: {
+        ...incoming.view,
+        project: { ...incoming.view.project, extra: true },
+      },
     },
     {
       ...incoming,
@@ -2755,7 +2789,7 @@ test("hosted Project sanitization uses the Host's 80-code-point label boundary",
   const sanitized = sanitizeWorkbenchHostedProjectResult({
     ok: true,
     view: {
-      project: { label },
+      project: { label, packagedBootstrap: false },
       observation: { cursor: 4, live: true },
       commands: [],
       initialSelectionKey: null, autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
@@ -2786,7 +2820,7 @@ test("hosted Project sanitization fails closed for ambiguous, path-bearing, and 
   const base = {
     ok: true,
     view: {
-      project: { label: "Visible Project" },
+      project: { label: "Visible Project", packagedBootstrap: false },
       observation: { cursor: 0, live: true },
       commands: [],
       initialSelectionKey: null, autoIteration: UNAVAILABLE_AUTO_ITERATION_VIEW,
@@ -2858,7 +2892,7 @@ test("hosted Project sanitization fails closed for ambiguous, path-bearing, and 
       ...base,
       view: {
         ...base.view,
-        project: { label: "Different Project" },
+        project: { label: "Different Project", packagedBootstrap: false },
       },
     },
   ];
@@ -3022,7 +3056,7 @@ test("Project sanitization retains only an exact opaque Session removal capabili
   const resultFor = (session: Record<string, unknown>) => ({
     ok: true,
     view: {
-      project: { label: "Removal Project" },
+      project: { label: "Removal Project", packagedBootstrap: false },
       observation: { cursor: 8, live: true },
       commands: [
         {
@@ -3078,7 +3112,7 @@ test("Project profile projection sanitization accepts one exact display shape an
   const valid = {
     ok: true,
     view: {
-      project: { label: "Projection Project" },
+      project: { label: "Projection Project", packagedBootstrap: false },
       observation: { cursor: 4, live: true },
       commands: [
         {
@@ -3208,7 +3242,7 @@ test("Project turn attribution sanitization preserves exact aligned profiles and
   const valid = {
     ok: true,
     view: {
-      project: { label: "Turn Project" },
+      project: { label: "Turn Project", packagedBootstrap: false },
       observation: { cursor: 9, live: true },
       commands: [
         {
@@ -3329,7 +3363,7 @@ test("Project context sanitization carries one exact frozen pair and rejects eac
   const valid = {
     ok: true,
     view: {
-      project: { label: "Context Project" },
+      project: { label: "Context Project", packagedBootstrap: false },
       observation: { cursor: 5, live: true },
       commands: [
         {
@@ -3421,7 +3455,7 @@ test("Project prompt suggestions cross the renderer boundary exactly or reject t
   const resultWith = (event: unknown) => ({
     ok: true,
     view: {
-      project: { label: "Suggestion Project" },
+      project: { label: "Suggestion Project", packagedBootstrap: false },
       observation: { cursor: 6, live: true },
       commands: [
         {
@@ -3489,7 +3523,7 @@ test("Project user-message sanitization preserves one exact frozen event and fai
   const projectResult = (event: unknown) => ({
     ok: true,
     view: {
-      project: { label: "Message Project" },
+      project: { label: "Message Project", packagedBootstrap: false },
       observation: { cursor: 6, live: true },
       commands: [
         {
@@ -3793,7 +3827,7 @@ test("timeline sanitization keeps code comments readable while still redacting r
   const result = sanitizeWorkbenchProjectResult({
     ok: true,
     view: {
-      project: { label: "Turn Project" },
+      project: { label: "Turn Project", packagedBootstrap: false },
       observation: { cursor: 9, live: true },
       commands: [
         {

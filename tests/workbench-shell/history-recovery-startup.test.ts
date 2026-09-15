@@ -266,6 +266,29 @@ test("main composition keeps recovery before every mutation-capable Project Host
   assert.equal(source.includes("recovery.sourceDiscovery"), false);
 });
 
+test("an explicit user-data profile skips historical sibling discovery", async () => {
+  const source = await readFile(
+    new URL("../../src/workbench-shell/electron/main.ts", import.meta.url),
+    "utf8",
+  );
+  const recovery = source.slice(
+    source.indexOf("const recovery = createHistoricalRecoveryLibrary({"),
+    source.indexOf("historyRecovery = recovery;"),
+  );
+  assert.match(
+    recovery,
+    /explicitUserDataDirectory === undefined\s*\? createDeferredProductionHistoryRecoverySourceDiscovery\(/u,
+  );
+  assert.match(
+    recovery,
+    /:\s*Object\.freeze\(\{\s*async discover\(\)\s*\{\s*return Object\.freeze\(\[\]\);\s*\},\s*\}\)/u,
+  );
+  assert.doesNotMatch(
+    recovery,
+    /explicitUserDataDirectory === undefined\s*\?[^:]*:\s*app\.getPath\("appData"\)/u,
+  );
+});
+
 test("the window is on screen before the recovery barrier, not behind it", async () => {
   const source = await readFile(
     new URL("../../src/workbench-shell/electron/main.ts", import.meta.url),

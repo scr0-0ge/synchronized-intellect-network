@@ -231,6 +231,7 @@ class RecordingBackendFactory {
           view: {
             project: {
               label,
+              packagedBootstrap: options.packagedBootstrap === true,
             },
             observation: { cursor: 0, live: true },
             commands: [],
@@ -2419,7 +2420,7 @@ test("removing the selected Project supersedes a stalled prior projection before
   backendListener?.({
     ok: true,
     view: {
-      project: { label: "Only Project" },
+      project: { label: "Only Project", packagedBootstrap: false },
       observation: { cursor: 1, live: true },
       commands: [],
       initialSelectionKey: null,

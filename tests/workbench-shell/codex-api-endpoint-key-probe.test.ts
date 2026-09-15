@@ -21,8 +21,10 @@ import { CODEX_API_ENDPOINT_ENV_CONTRACT } from "../../src/agent-runtime/codex/e
  * Base URL override (main.ts's `baseUrlOverrides["codex-api"]` mirror, one
  * slot of the w232-generalized per-endpoint record), the same precedence
  * `prepareEndpoint()` uses -- otherwise a user pointed at their own gateway
- * would still get probed against the OpenAI default. This reproduces
- * main.ts's exact `probeBaseUrl` resolver in isolation (no Electron); every
+ * would still get probed against the OpenAI default. Since w309 the override
+ * reaches the probe through the shared key-source option
+ * (`resolveBaseUrlOverride`, the exact wiring main.ts uses for every
+ * base-URL endpoint) instead of a per-endpoint resolver mirrored here; every
  * network path is a fake fetch, no real network call.
  */
 
@@ -82,12 +84,8 @@ test("Test connection probes the saved base URL override, and falls back to the 
     store: createStore(),
     environment: { CODEX_API_BASE_URL: "https://env-configured.example.com/v1" },
     fetch: fetchStub,
-    // The exact resolver main.ts wires (mirrored here in isolation).
-    probeBaseUrl: (environment) =>
-      override.trim().length > 0
-        ? override
-        : environment[CODEX_API_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar]?.trim() ||
-          CODEX_API_ENDPOINT_ENV_CONTRACT.defaultBaseUrl,
+    // The lazy mirror read main.ts wires (w309's shared key-source option).
+    resolveBaseUrlOverride: () => override,
   });
   source.save("test-secret-codex-api");
 
@@ -116,9 +114,7 @@ test("with no override and no env var, the probe falls back to the contract defa
       seen.push(String(input));
       return Promise.resolve(new Response("{}", { status: 200 }));
     }) as typeof fetch,
-    probeBaseUrl: (environment) =>
-      environment[CODEX_API_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar]?.trim() ||
-      CODEX_API_ENDPOINT_ENV_CONTRACT.defaultBaseUrl,
+    resolveBaseUrlOverride: () => "",
   });
   source.save("test-secret-codex-api");
   await source.probe();
