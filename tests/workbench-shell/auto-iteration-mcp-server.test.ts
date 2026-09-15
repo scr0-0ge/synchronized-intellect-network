@@ -5,6 +5,8 @@ import test from "node:test";
 import type {
   AutoIterationCoordinatorPort,
   HostBoundToolActor,
+  ReviewerToolRequest,
+  ReviewerToolResponse,
   SupervisorToolRequest,
   SupervisorToolResponse,
   WorkerToolRequest,
@@ -26,9 +28,13 @@ class InboxPort implements AutoIterationCoordinatorPort {
     request: WorkerToolRequest,
   ): Promise<WorkerToolResponse>;
   async request(
+    actor: Extract<HostBoundToolActor, { readonly kind: "reviewer" }>,
+    request: ReviewerToolRequest,
+  ): Promise<ReviewerToolResponse>;
+  async request(
     _actor: HostBoundToolActor,
-    request: SupervisorToolRequest | WorkerToolRequest,
-  ): Promise<SupervisorToolResponse | WorkerToolResponse> {
+    request: SupervisorToolRequest | WorkerToolRequest | ReviewerToolRequest,
+  ): Promise<SupervisorToolResponse | WorkerToolResponse | ReviewerToolResponse> {
     return {
       kind: "inbox-read",
       requestIdempotencyKey: request.requestIdempotencyKey,
@@ -126,10 +132,12 @@ test("MCP tools/list exposes only the host-bound worker subset and no identity i
     "read_inbox",
     "submit_review_decision",
     "request_supervisor_rotation",
+    "publish_candidate",
   ]);
   assert.deepEqual(
     [...new Set([...tools.map((tool) => tool.name), ...supervisorTools])].sort(),
     [
+      "publish_candidate",
       "read_inbox",
       "read_work_order_status",
       "request_supervisor_rotation",

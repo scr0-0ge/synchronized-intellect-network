@@ -292,6 +292,7 @@ test("the product-created worker Session gets workbenchMcp through the productio
   assert.deepEqual(
     tools.map((tool) => tool.name).sort(),
     [
+      "publish_candidate",
       "read_inbox",
       "read_work_order_status",
       "request_supervisor_rotation",

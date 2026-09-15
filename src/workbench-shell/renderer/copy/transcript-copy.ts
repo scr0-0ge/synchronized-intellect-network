@@ -60,6 +60,10 @@ const englishCopy = {
       "rate-limited": "provider rate limit reached, waiting",
       status: "runtime status update",
     },
+    retryProgressCopy: (status: string, detail: string): string =>
+      status === "429"
+        ? `Endpoint rate-limited; retry ${detail}`
+        : `Endpoint error ${status}; retry ${detail}`,
     unknownToolName: "Unknown tool",
     toolParameterTruncated: "(truncated)",
     unknownToolType: (sourceType: string): string =>
@@ -195,6 +199,10 @@ const simplifiedChineseCopy = {
       "rate-limited": "已到达提供方速率限制，等待中",
       status: "运行时状态更新",
     },
+    retryProgressCopy: (status: string, detail: string): string =>
+      status === "429"
+        ? `端点被限流；重试 ${detail}`
+        : `端点错误 ${status}；重试 ${detail}`,
     unknownToolName: "未知工具",
     toolParameterTruncated: "（已截断）",
     unknownToolType: (sourceType: string): string =>
@@ -281,6 +289,19 @@ export const copyLocaleDictionaries = defineCopyLocaleDictionaries(
 const localizedCopy = createLocaleCopy(copyLocaleDictionaries);
 
 export const transcriptCopy = localizedCopy.transcriptCopy;
+
+/**
+ * w355: the per-attempt retry row's sentence. `detail` is the numeric
+ * content the runtime composed from the api_retry frame ("4/10 · 8s");
+ * `status` selects the rate-limited wording for 429 and the raw code
+ * otherwise.
+ */
+export function retryProgressCopy(status: string, detail: string): string {
+  return currentLocaleCopy(copyLocaleDictionaries).transcriptCopy.retryProgressCopy(
+    status,
+    detail,
+  );
+}
 
 export function turnRecoveryBodyCopy(recovery: NonNullable<WorkbenchTurnView["recovery"]>): string {
   const copy = currentLocaleCopy(copyLocaleDictionaries);

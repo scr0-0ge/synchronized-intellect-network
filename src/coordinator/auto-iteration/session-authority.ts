@@ -11,12 +11,25 @@ export const SUPERVISOR_TOOL_OPERATIONS = Object.freeze([
   "read-inbox",
   "submit-review-decision",
   "request-supervisor-rotation",
+  "publish-candidate",
 ] as const satisfies readonly AutoIterationToolOperation[]);
 
 export const WORKER_TOOL_OPERATIONS = Object.freeze([
   "read-work-order-status",
   "submit-handoff",
   "read-inbox",
+] as const satisfies readonly AutoIterationToolOperation[]);
+
+/**
+ * Issue #8 M3: deliberately narrower than the worker's three. Granting
+ * `read-work-order-status`/`read-inbox` would carry every Handoff `body`
+ * (the worker's own reasoning) into an independent reviewer's context,
+ * which is exactly what the "no worker reasoning" principle (#8 §3.6)
+ * forbids — see the same note in contract.ts's `ReadHandoffArtifactRequest`.
+ */
+export const REVIEWER_TOOL_OPERATIONS = Object.freeze([
+  "read-handoff-artifact",
+  "submit-review",
 ] as const satisfies readonly AutoIterationToolOperation[]);
 
 export interface HostSessionToolBinding {
@@ -45,9 +58,9 @@ interface StoredBinding {
 function operationsForActor(
   actor: HostBoundToolActor,
 ): readonly AutoIterationToolOperation[] {
-  return actor.kind === "supervisor"
-    ? SUPERVISOR_TOOL_OPERATIONS
-    : WORKER_TOOL_OPERATIONS;
+  if (actor.kind === "supervisor") return SUPERVISOR_TOOL_OPERATIONS;
+  if (actor.kind === "worker") return WORKER_TOOL_OPERATIONS;
+  return REVIEWER_TOOL_OPERATIONS;
 }
 
 function cloneActor(actor: HostBoundToolActor): HostBoundToolActor {
@@ -61,11 +74,18 @@ function cloneActor(actor: HostBoundToolActor): HostBoundToolActor {
       }),
     });
   }
+  if (actor.kind === "worker") {
+    return Object.freeze({
+      kind: "worker",
+      sessionId: actor.sessionId,
+      workOrderId: actor.workOrderId,
+      attemptId: actor.attemptId,
+    });
+  }
   return Object.freeze({
-    kind: "worker",
+    kind: "reviewer",
     sessionId: actor.sessionId,
-    workOrderId: actor.workOrderId,
-    attemptId: actor.attemptId,
+    handoff: Object.freeze({ ...actor.handoff }),
   });
 }
 

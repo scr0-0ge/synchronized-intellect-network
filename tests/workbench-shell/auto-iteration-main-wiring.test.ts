@@ -288,6 +288,10 @@ function workOrderSubmission(
       endpointId: "codex-desktop",
       profile: workerProfile,
     },
+    // These cases exercise M0-M2 attempt/integration/recovery mechanics, not
+    // issue #8 M3 independent review; opt out so submit-review-decision
+    // isn't refused and no Review Attempt Session starts underneath them.
+    review: "none" as const,
   };
 }
 
@@ -2108,4 +2112,419 @@ test("a wakeup whose continue lands in recovery-required does not falsely seal a
     workOrderId,
   );
   assert.equal(finalOrder?.status, "awaiting-review");
+});
+
+test("issue #8 M3: an independent Review Attempt Session starts through the production seam, reads a real diff, and gates disposition until it submits", async (t) => {
+  let workerCommitSha: string | undefined;
+  const adapter = new ScriptedLoopAdapter(async (request) => {
+    if (request.projectDirectory.endsWith("Project")) return; // supervisor / reviewer
+    await writeFile(
+      join(request.projectDirectory, "reviewed-delivery.txt"),
+      "content the independent reviewer must see in the diff\n",
+      "utf8",
+    );
+    await git(request.projectDirectory, "add", "reviewed-delivery.txt");
+    await git(request.projectDirectory, "commit", "-m", "feat: worker delivery for review");
+    workerCommitSha = await git(request.projectDirectory, "rev-parse", "HEAD");
+  });
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-review-"));
+  const projectDirectory = join(root, "Project");
+  await mkdir(projectDirectory);
+  await git(projectDirectory, "init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await git(projectDirectory, "add", "baseline.txt");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+  const backend = await createWorkbenchBackend({
+    projectDirectory,
+    databasePath: join(root, "workbench.sqlite"),
+    adapter,
+  });
+  t.after(async () => {
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "review supervisor opening turn");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+
+  // Deliberately omits `review`: the default independent policy applies.
+  const submitted = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "review-submit-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: {
+      objective: "Add the reviewed delivery file.",
+      acceptanceCriteria: ["reviewed-delivery.txt exists with the expected content"],
+      baselineCommitSha,
+      territory: { writePaths: ["reviewed-delivery.txt"], readOnlyPaths: [] },
+      responsibleRoleSlotId: "project-supervisor",
+      completionCondition: { gitIntegration: "not-required" },
+      workerSession: { endpointId: "codex-desktop", profile },
+    },
+  });
+  assert.equal(submitted.kind, "work-order-submitted");
+  const workOrderId = (submitted.workOrder as Record<string, unknown>).workOrderId as string;
+  const attemptId = (submitted.attempt as Record<string, unknown>).attemptId as string;
+
+  // The resolved default policy differs the reviewer's endpoint from the worker's.
+  const resolvedOrder = service.authority.readWorkOrder(workOrderId);
+  assert.equal(resolvedOrder?.review?.kind, "independent");
+  if (resolvedOrder?.review?.kind === "independent") {
+    assert.equal(resolvedOrder.review.reviewerSession.endpointId, "claude-code-desktop");
+    assert.equal(resolvedOrder.review.sameEndpointAsWorker, false);
+  }
+
+  const workerSessionId = await waitFor("worker Session binding", () => {
+    const order = findWorkOrder(service.authority.readAutoIterationOverview(), workOrderId);
+    return order?.workerSessionBound && workerCommitSha !== undefined
+      ? order.workerSessionId ?? undefined
+      : undefined;
+  });
+
+  const handoffKey: HandoffIdempotencyKey = {
+    workOrderId,
+    attemptId,
+    handoffId: "handoff-review-1",
+  };
+  const handoff = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "review-handoff-1",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: handoffKey,
+        body: "The worker's own reasoning: never sent to the reviewer.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(handoff.kind, "handoff-submitted");
+
+  // The bounded wakeup summary carries the review's status (still pending
+  // at this point: the reviewer Session races the supervisor's own wakeup).
+  await waitFor("the supervisor wakeup summary mentioning the pending review", () =>
+    adapter.sentInputs.some((text) => /await.*your review/u.test(text))
+      ? adapter.sentInputs.find((text) => /await.*your review/u.test(text))
+      : undefined,
+  );
+  const wakeupText = adapter.sentInputs.find((text) => /await.*your review/u.test(text))!;
+  assert.match(wakeupText, /\(review: pending\)/u);
+
+  // Disposition is refused before the independent review lands.
+  const tooEarly = await callTool(supervisorServer, "submit_review_decision", {
+    requestIdempotencyKey: "review-decide-too-early",
+    expectedVersion: 2,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    decision: {
+      handoff: handoffKey,
+      handoffVersion: 1,
+      decision: "approve",
+      reason: "looks fine",
+    },
+  });
+  assert.equal(tooEarly.kind, "rejected");
+  assert.equal(
+    (tooEarly as unknown as CoordinatorToolRejectedResponse).category,
+    "review-required",
+  );
+
+  const reviewerSessionId = await waitFor("the independent Review Attempt Session", () =>
+    service.reviewSessionIdFor(handoffKey),
+  );
+  assert.notEqual(reviewerSessionId, workerSessionId);
+  assert.notEqual(reviewerSessionId, supervisorSessionId);
+  const reviewerServer = service.mcpServerForSession(reviewerSessionId);
+
+  const artifact = await callTool(reviewerServer, "read_handoff_artifact", {
+    requestIdempotencyKey: "review-artifact-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    handoff: handoffKey,
+  });
+  assert.equal(artifact.kind, "handoff-artifact");
+  assert.equal(artifact.workOrderObjective, "Add the reviewed delivery file.");
+  assert.deepEqual(artifact.acceptanceCriteria, [
+    "reviewed-delivery.txt exists with the expected content",
+  ]);
+  assert.equal(artifact.commitSha, workerCommitSha);
+  assert.match(artifact.diff as string, /reviewed-delivery\.txt/u);
+  assert.match(
+    artifact.diff as string,
+    /content the independent reviewer must see in the diff/u,
+  );
+  assert.equal(
+    "body" in artifact,
+    false,
+    "the worker's own Handoff body never reaches the reviewer",
+  );
+
+  // A reviewer Session may not read/submit for a Handoff it is not bound to.
+  const wrongHandoff = await callTool(reviewerServer, "read_handoff_artifact", {
+    requestIdempotencyKey: "review-artifact-wrong",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    handoff: { ...handoffKey, handoffId: "not-mine" },
+  });
+  assert.equal(wrongHandoff.kind, "rejected");
+
+  const submittedReview = await callTool(reviewerServer, "submit_review", {
+    requestIdempotencyKey: "review-submit-verdict-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    review: {
+      handoff: handoffKey,
+      verdict: "agree",
+      problems: [],
+    },
+  });
+  assert.equal(submittedReview.kind, "review-submitted");
+
+  const decided = await callTool(supervisorServer, "submit_review_decision", {
+    requestIdempotencyKey: "review-decide-now",
+    expectedVersion: 2,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    decision: {
+      handoff: handoffKey,
+      handoffVersion: 1,
+      decision: "approve",
+      reason: "the independent reviewer agreed",
+    },
+  });
+  assert.equal(decided.kind, "review-decision-submitted");
+
+  const status = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "review-final-status",
+    expectedVersion: 3,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrderId,
+  });
+  const independentReviews = status.independentReviews as Array<Record<string, unknown>>;
+  assert.equal(independentReviews.length, 1);
+  assert.equal(independentReviews[0]!.verdict, "agree");
+  assert.equal(independentReviews[0]!.reviewerSessionId, reviewerSessionId);
+});
+
+test("issue #8 M3 publish policy: integrated stays un-pushed until publish_candidate, which really pushes and detects a moved remote", async (t) => {
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-publish-"));
+  const remoteDirectory = join(root, "remote.git");
+  const projectDirectory = join(root, "Project");
+  const databasePath = join(root, "workbench.sqlite");
+  await git(root, "init", "--bare", "--initial-branch=demo", remoteDirectory);
+  await git(root, "clone", remoteDirectory, projectDirectory);
+  await git(projectDirectory, "config", "user.name", "Auto Iteration Test");
+  await git(projectDirectory, "config", "user.email", "auto-iteration@example.invalid");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await writeFile(
+    join(projectDirectory, "pnpm.bat"),
+    "@echo off\r\necho %1 gate passed\r\nexit /b 0\r\n",
+    "utf8",
+  );
+  await git(projectDirectory, "add", "baseline.txt", "pnpm.bat");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  await git(projectDirectory, "push", "-u", "origin", "demo");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+
+  let deliveryCounter = 0;
+  const adapter = new ScriptedLoopAdapter(async (request) => {
+    if (request.projectDirectory === projectDirectory) return;
+    deliveryCounter += 1;
+    await writeFile(
+      join(request.projectDirectory, `publish-delivery-${deliveryCounter}.txt`),
+      `delivered ${deliveryCounter}\n`,
+      "utf8",
+    );
+    await git(request.projectDirectory, "add", `publish-delivery-${deliveryCounter}.txt`);
+    await git(request.projectDirectory, "commit", "-m", `feat: delivery ${deliveryCounter}`);
+  });
+  const backend = await createWorkbenchBackend({ projectDirectory, databasePath, adapter });
+  t.after(async () => {
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "publish supervisor opening turn");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+  const supervisorTenure = { roleSlotId: "project-supervisor", generation: 1 };
+
+  async function deliverAndIntegrate(
+    keyPrefix: string,
+    baseline: string,
+  ): Promise<{ readonly workOrderId: string; readonly mergeCommitSha: string }> {
+    const submitted = await callTool(supervisorServer, "submit_work_order", {
+      requestIdempotencyKey: `${keyPrefix}-submit`,
+      expectedVersion: 1,
+      observedTenure: supervisorTenure,
+      workOrder: {
+        ...workOrderSubmission(profile),
+        baselineCommitSha: baseline,
+        completionCondition: { gitIntegration: "required" },
+      },
+    });
+    assert.equal(submitted.kind, "work-order-submitted");
+    const workOrderId = (submitted.workOrder as Record<string, unknown>).workOrderId as string;
+    const attemptId = (submitted.attempt as Record<string, unknown>).attemptId as string;
+    const workerSessionId = await waitFor(`${keyPrefix} worker Session`, () => {
+      const order = findWorkOrder(service!.authority.readAutoIterationOverview(), workOrderId);
+      return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+    });
+    const handoffKey: HandoffIdempotencyKey = {
+      workOrderId,
+      attemptId,
+      handoffId: `${keyPrefix}-handoff`,
+    };
+    const handoff = await callTool(service!.mcpServerForSession(workerSessionId), "submit_handoff", {
+      requestIdempotencyKey: `${keyPrefix}-handoff-submit`,
+      expectedVersion: 1,
+      observedTenure: supervisorTenure,
+      handoff: { idempotencyKey: handoffKey, body: "ready", artifactIds: [] },
+    });
+    assert.equal(handoff.kind, "handoff-submitted");
+    const decided = await callTool(supervisorServer, "submit_review_decision", {
+      requestIdempotencyKey: `${keyPrefix}-decide`,
+      expectedVersion: 2,
+      observedTenure: supervisorTenure,
+      decision: { handoff: handoffKey, handoffVersion: 1, decision: "approve", reason: "accepted" },
+    });
+    assert.equal(decided.kind, "review-decision-submitted");
+    const integrated = await waitFor(`${keyPrefix} integration`, () => {
+      const order = findWorkOrder(service!.authority.readAutoIterationOverview(), workOrderId);
+      return order?.status === "integrated" ? order : undefined;
+    });
+    assert.ok(integrated);
+    const finalStatus = await callTool(supervisorServer, "read_work_order_status", {
+      requestIdempotencyKey: `${keyPrefix}-read`,
+      expectedVersion: 4,
+      observedTenure: supervisorTenure,
+      workOrderId,
+    });
+    const candidate = (finalStatus.candidates as Array<Record<string, unknown>>)[0]!;
+    const outcome = candidate.outcome as Record<string, unknown>;
+    assert.equal(outcome.status, "integrated");
+    return {
+      workOrderId,
+      mergeCommitSha: outcome.mergeCommitSha as string,
+    };
+  }
+
+  const first = await deliverAndIntegrate("publish-a", baselineCommitSha);
+  const beforePublish = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "publish-a-preread",
+    expectedVersion: 4,
+    observedTenure: supervisorTenure,
+    workOrderId: first.workOrderId,
+  });
+  const candidateAId = (
+    (beforePublish.candidates as Array<Record<string, unknown>>)[0]!
+  ).integrationCandidateId as string;
+  assert.equal(
+    await git(remoteDirectory, "rev-parse", "refs/heads/demo"),
+    baselineCommitSha,
+    "not yet published: the remote is untouched",
+  );
+
+  const published = await callTool(supervisorServer, "publish_candidate", {
+    requestIdempotencyKey: "publish-a-publish",
+    expectedVersion: 1,
+    observedTenure: supervisorTenure,
+    integrationCandidateId: candidateAId,
+  });
+  assert.equal(published.kind, "publish-candidate-result");
+  const publishedOutcome = published.outcome as Record<string, unknown>;
+  assert.equal(publishedOutcome.status, "published");
+  assert.equal(publishedOutcome.remoteCommitSha, first.mergeCommitSha);
+  assert.equal(
+    await git(remoteDirectory, "rev-parse", "refs/heads/demo"),
+    first.mergeCommitSha,
+    "publish_candidate really pushed the local target branch",
+  );
+
+  // Idempotent replay: no second push is attempted, same outcome comes back.
+  const republished = await callTool(supervisorServer, "publish_candidate", {
+    requestIdempotencyKey: "publish-a-republish",
+    expectedVersion: 1,
+    observedTenure: supervisorTenure,
+    integrationCandidateId: candidateAId,
+  });
+  assert.equal(republished.kind, "publish-candidate-result");
+  assert.deepEqual(republished.outcome, published.outcome);
+
+  // Second work order, integrated locally on top of the published tip.
+  const second = await deliverAndIntegrate("publish-b", first.mergeCommitSha);
+  const beforeSecondPublish = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "publish-b-preread",
+    expectedVersion: 4,
+    observedTenure: supervisorTenure,
+    workOrderId: second.workOrderId,
+  });
+  const candidateBId = (
+    (beforeSecondPublish.candidates as Array<Record<string, unknown>>)[0]!
+  ).integrationCandidateId as string;
+
+  // An external actor publishes directly to the bare remote, bypassing this
+  // Project entirely -- exactly the race publish_candidate must catch.
+  const externalClone = join(root, "external-clone");
+  await git(root, "clone", remoteDirectory, externalClone);
+  await git(externalClone, "config", "user.name", "External Publisher");
+  await git(externalClone, "config", "user.email", "external@example.invalid");
+  await writeFile(join(externalClone, "external-change.txt"), "from elsewhere\n", "utf8");
+  await git(externalClone, "add", "external-change.txt");
+  await git(externalClone, "commit", "-m", "external: unrelated publish");
+  await git(externalClone, "push", "origin", "demo");
+  const externalCommitSha = await git(externalClone, "rev-parse", "HEAD");
+  assert.notEqual(externalCommitSha, first.mergeCommitSha);
+
+  const blocked = await callTool(supervisorServer, "publish_candidate", {
+    requestIdempotencyKey: "publish-b-publish",
+    expectedVersion: 1,
+    observedTenure: supervisorTenure,
+    integrationCandidateId: candidateBId,
+  });
+  assert.equal(blocked.kind, "publish-candidate-result");
+  const blockedOutcome = blocked.outcome as Record<string, unknown>;
+  assert.equal(blockedOutcome.status, "blocked: target-moved");
+  assert.equal(blockedOutcome.expectedBaselineCommitSha, first.mergeCommitSha);
+  assert.equal(blockedOutcome.observedRemoteCommitSha, externalCommitSha);
+  assert.equal(
+    await git(remoteDirectory, "rev-parse", "refs/heads/demo"),
+    externalCommitSha,
+    "the blocked publish attempt must not have pushed anything",
+  );
+
+  // Only the supervisor may call publish_candidate.
+  const workerAttemptForDenial = await waitFor("a bound worker Session to probe denial", () => {
+    const order = findWorkOrder(service.authority.readAutoIterationOverview(), second.workOrderId);
+    return order?.workerSessionId ?? undefined;
+  });
+  const deniedForWorker = await callTool(
+    service.mcpServerForSession(workerAttemptForDenial),
+    "publish_candidate",
+    {
+      requestIdempotencyKey: "publish-b-worker-denied",
+      expectedVersion: 1,
+      observedTenure: supervisorTenure,
+      integrationCandidateId: candidateBId,
+    },
+  );
+  assert.equal(deniedForWorker.kind, "rejected");
 });

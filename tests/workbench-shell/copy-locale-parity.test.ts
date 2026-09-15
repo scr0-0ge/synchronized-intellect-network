@@ -45,6 +45,7 @@ import { copyLocaleDictionaries as turnNotificationCopyDictionaries } from "../.
 import { copyLocaleDictionaries as stageCopyDictionaries } from "../../src/workbench-shell/renderer/copy/stage-copy.ts";
 import {
   copyLocaleDictionaries as transcriptCopyDictionaries,
+  retryProgressCopy,
   transcriptSearchCountCopy,
 } from "../../src/workbench-shell/renderer/copy/transcript-copy.ts";
 import { setLocale } from "../../src/workbench-shell/renderer/locale.ts";
@@ -144,6 +145,36 @@ test("English copy stays byte-exact and zh-CN selection is immediate", () => {
         "单智能体",
         "设置",
         "显示 2 / 5 个回合",
+      ],
+    );
+  } finally {
+    setLocale("en");
+  }
+});
+
+test("the per-attempt retry sentence names the endpoint state and the numeric detail, in both locales (w355)", () => {
+  setLocale("en");
+  assert.deepEqual(
+    [
+      retryProgressCopy("429", "4/10 · 8s"),
+      retryProgressCopy("503", "3/10 · 2s"),
+    ],
+    [
+      "Endpoint rate-limited; retry 4/10 · 8s",
+      "Endpoint error 503; retry 3/10 · 2s",
+    ],
+  );
+
+  try {
+    setLocale("zh-CN");
+    assert.deepEqual(
+      [
+        retryProgressCopy("429", "4/10 · 8s"),
+        retryProgressCopy("503", "3/10 · 2s"),
+      ],
+      [
+        "端点被限流；重试 4/10 · 8s",
+        "端点错误 503；重试 3/10 · 2s",
       ],
     );
   } finally {

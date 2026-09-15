@@ -2375,13 +2375,18 @@ test("Claude coalesces repeated provider retries into one retrying progress note
   });
   await binding.send({ text: "Reply with exactly UAW_FAKE_RETRY_DONE" });
 
-  // Two api_retry frames arrive; the second is a consecutive repeat of the
-  // same activity and must not produce a second durable row.
+  // Two api_retry frames arrive; these synthetic frames carry no attempt
+  // numbers, so the payload degrades to the source-typed row (w355) and the
+  // second, content-identical frame still coalesces into one durable row.
   const events = await collect(binding.events());
   const retryingNotes = events.filter(
     (event) => event.kind === "progress" && event.activity === "retrying",
   );
-  assert.deepEqual(retryingNotes, [{ kind: "progress", activity: "retrying" }]);
+  assert.deepEqual(retryingNotes, [{
+    kind: "progress",
+    activity: "retrying",
+    tool: { type: "unknown", sourceType: "api_retry", name: "unknown" },
+  }]);
   assert.deepEqual(events.at(-1), { kind: "turn-completed", status: "completed" });
 });
 

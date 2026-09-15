@@ -39,6 +39,10 @@ import type {
   ContextUsageObservation,
   HandoffIdempotencyKey,
   HostBoundToolActor,
+  IntegrationCandidate,
+  PublishOutcome,
+  ReviewerToolRequest,
+  ReviewerToolResponse,
   SessionCreationParameters,
   SubmitHandoffRequest,
   SupervisorToolRequest,
@@ -434,6 +438,13 @@ export interface WorkbenchAutoIterationService {
   }): Promise<string | undefined>;
   /** The same server a CLI bootstrap process would reach through the local bridge. */
   mcpServerForSession(sessionId: string): AutoIterationMcpServer;
+  /**
+   * Issue #8 M3: the Session id of the independent Review Attempt started
+   * for one Handoff, once known. Host-runtime, in-memory, best-effort (no
+   * durable review-session-binding record); undefined before the Session
+   * starts or after a Project reopen loses the in-memory map.
+   */
+  reviewSessionIdFor(handoff: HandoffIdempotencyKey): string | undefined;
   /** Live Workbench MCP bridge registry (w300); guards observe its size. */
   readonly workbenchBindings: AutoIterationBindingRegistry;
   /** Idempotent pass over the durable outbox; safe to call at any turn boundary. */
@@ -501,8 +512,15 @@ function createBackendAutoIterationService(
   // per-order gate selection yet, so the default is build + typecheck; the
   // full test suite is deliberately never a default gate.
   const integrationGatePlan: readonly ApprovedGate[] = ["build", "typecheck"];
-  const integrationLocalBranch = INTEGRATION_TARGET_REF.replace(/^origin\//u, "");
+  const integrationRemoteName = INTEGRATION_TARGET_REF.split("/")[0]!;
+  const integrationLocalBranch = INTEGRATION_TARGET_REF.slice(integrationRemoteName.length + 1);
   const attemptStarts = new Set<string>();
+  // Issue #8 M3: in-process reentrancy guard, mirroring `attemptStarts`.
+  // Cross-reopen duplicate starts are bounded by `channel.act`'s own
+  // idempotency key (`auto-review-<handoff>`) reusing the same Session.
+  const reviewSessionStarts = new Set<string>();
+  /** Issue #8 M3: in-memory only; see `reviewSessionIdFor` on the public service. */
+  const reviewSessionIdsByHandoff = new Map<string, string>();
   const mcpServersBySession = new Map<string, AutoIterationMcpServer>();
   let closed = false;
   // w338 probe wiring: host-known creation parameters of the Sessions this
@@ -621,10 +639,14 @@ function createBackendAutoIterationService(
     actor: Extract<HostBoundToolActor, { readonly kind: "worker" }>,
     request: WorkerToolRequest,
   ): Promise<WorkerToolResponse>;
+  function drainingRequest(
+    actor: Extract<HostBoundToolActor, { readonly kind: "reviewer" }>,
+    request: ReviewerToolRequest,
+  ): Promise<ReviewerToolResponse>;
   async function drainingRequest(
     actor: HostBoundToolActor,
-    request: SupervisorToolRequest | WorkerToolRequest,
-  ): Promise<SupervisorToolResponse | WorkerToolResponse> {
+    request: SupervisorToolRequest | WorkerToolRequest | ReviewerToolRequest,
+  ): Promise<SupervisorToolResponse | WorkerToolResponse | ReviewerToolResponse> {
     let preparedRequest = request;
     if (actor.kind === "worker" && request.kind === "submit-handoff") {
       try {
@@ -656,8 +678,70 @@ function createBackendAutoIterationService(
     const response =
       actor.kind === "supervisor"
         ? authority.request(actor, preparedRequest as SupervisorToolRequest)
-        : authority.request(actor, preparedRequest as WorkerToolRequest);
-    const settled = await response;
+        : actor.kind === "worker"
+          ? authority.request(actor, preparedRequest as WorkerToolRequest)
+          : authority.request(actor, preparedRequest as ReviewerToolRequest);
+    let settled = await response;
+
+    // Issue #8 M3: a fresh live Handoff starts its independent Review
+    // Attempt. Fires for a retried/idempotent submit_handoff too (readReviewResult
+    // and the in-process start guard both make a repeat call a no-op); never
+    // blocks the worker's own turn on the reviewer Session actually starting.
+    if (
+      actor.kind === "worker" &&
+      request.kind === "submit-handoff" &&
+      settled.kind === "handoff-submitted"
+    ) {
+      const handoffKey = request.handoff.idempotencyKey;
+      void ensureReviewSessionStarted(handoffKey).catch((error) => {
+        console.warn(
+          "[auto-iteration] review session start deferred",
+          handoffKey.handoffId,
+          error instanceof Error ? error.message : error,
+        );
+      });
+    }
+
+    // Issue #8 M3: the coordinator authorized the read but has no git access;
+    // the host fills in the diff before the reviewer ever sees the response.
+    if (
+      actor.kind === "reviewer" &&
+      request.kind === "read-handoff-artifact" &&
+      settled.kind === "handoff-artifact"
+    ) {
+      try {
+        const diff = await computeHandoffDiff(settled.baselineCommitSha, settled.commitSha);
+        settled = { ...settled, diff };
+      } catch (error) {
+        console.warn(
+          "[auto-iteration] handoff diff computation failed",
+          request.handoff.handoffId,
+          error instanceof Error ? error.message : error,
+        );
+      }
+    }
+
+    // Issue #8 M3 publish policy: the coordinator validated eligibility but
+    // cannot push; the host performs the real fetch/compare/push here and
+    // reports the terminal or retriable outcome back in the same turn.
+    if (
+      actor.kind === "supervisor" &&
+      request.kind === "publish-candidate" &&
+      settled.kind === "publish-candidate-accepted"
+    ) {
+      const outcome = await publishIntegratedCandidate(settled.candidate);
+      await authority.completePublish({
+        integrationCandidateId: settled.candidate.integrationCandidateId,
+        outcome,
+      });
+      settled = {
+        kind: "publish-candidate-result",
+        requestIdempotencyKey: settled.requestIdempotencyKey,
+        currentVersion: settled.currentVersion,
+        outcome,
+      };
+    }
+
     void drainPendingOutbox().catch(() => undefined);
     return settled;
   }
@@ -885,13 +969,24 @@ function createBackendAutoIterationService(
     return handoffs;
   }
 
+  /** Issue #8 M3: each entry's independent review status, if any is recorded. */
+  function reviewLabel(handoff: HandoffIdempotencyKey): string {
+    const workOrder = authority.readWorkOrder(handoff.workOrderId);
+    const policy = workOrder?.review ?? { kind: "none" as const };
+    if (policy.kind === "none") return handoff.workOrderId;
+    const result = authority.readReviewResult(handoff);
+    if (result === undefined) return `${handoff.workOrderId} (review: pending)`;
+    const problems = result.problems.length;
+    return `${handoff.workOrderId} (review: ${result.verdict}${problems > 0 ? `, ${problems} problem${problems === 1 ? "" : "s"}` : ""})`;
+  }
+
   /** One bounded line per wakeup, however many handoffs are pending. */
-  function supervisorWakeupSummary(workOrderIds: readonly string[]): string {
-    const listed = workOrderIds.slice(0, 8);
-    const rest = workOrderIds.length - listed.length;
+  function supervisorWakeupSummary(pendingHandoffs: readonly HandoffIdempotencyKey[]): string {
+    const listed = pendingHandoffs.slice(0, 8).map(reviewLabel);
+    const rest = pendingHandoffs.length - listed.length;
     return (
-      `Workbench auto-iteration: ${workOrderIds.length} worker handoff` +
-      `${workOrderIds.length === 1 ? "" : "s"} await${workOrderIds.length === 1 ? "s" : ""} your review ` +
+      `Workbench auto-iteration: ${pendingHandoffs.length} worker handoff` +
+      `${pendingHandoffs.length === 1 ? "" : "s"} await${pendingHandoffs.length === 1 ? "s" : ""} your review ` +
       `(work order${listed.length === 1 ? "" : "s"}: ${listed.join(", ")}` +
       `${rest > 0 ? `; and ${rest} more` : ""}). ` +
       `Use the read_inbox tool, then submit_review_decision.`
@@ -970,6 +1065,88 @@ function createBackendAutoIterationService(
       options.workbenchBindings.release(options_.idempotencyKey);
       return undefined;
     }
+  }
+
+  /**
+   * Issue #8 M3 §3: starts an independent Review Attempt Session for one
+   * live Handoff, through the same production seam as a worker attempt
+   * (`startSessionForAutoIteration`), but with no workspace/worktree of its
+   * own — it never writes, so it only needs read tools. A "none" review
+   * policy, an already-recorded result, or a superseded (reworked-past)
+   * Handoff are all silent no-ops, not errors.
+   */
+  async function ensureReviewSessionStarted(handoff: HandoffIdempotencyKey): Promise<void> {
+    const dedupeKey = `${handoff.workOrderId}:${handoff.attemptId}:${handoff.handoffId}`;
+    if (reviewSessionStarts.has(dedupeKey)) return;
+    const workOrder = authority.readWorkOrder(handoff.workOrderId);
+    if (workOrder === undefined || workOrder.currentAttemptId !== handoff.attemptId) return;
+    const policy = workOrder.review ?? { kind: "none" as const };
+    if (policy.kind !== "independent") return;
+    if (authority.readReviewResult(handoff) !== undefined) return;
+    reviewSessionStarts.add(dedupeKey);
+    try {
+      const idempotencyKey = `auto-review-${dedupeKey}`;
+      const sessionId = await startSessionForAutoIteration({
+        idempotencyKey,
+        endpointId: policy.reviewerSession.endpointId,
+        profile: policy.reviewerSession.profile,
+        input:
+          `Workbench auto-iteration: you are an independent Review Attempt for work ` +
+          `order ${handoff.workOrderId}. Use the read_handoff_artifact tool to see the ` +
+          `diff and the original work order text, then use submit_review with verdict ` +
+          `"agree" or "disagree" and specific problems (a code and a message each). ` +
+          `Report anything you cannot concretely verify with code "cannot-verify" ` +
+          `rather than omitting it or guessing.`,
+      });
+      if (sessionId === undefined) return;
+      sessionAuthority.bindSession({
+        actor: { kind: "reviewer", sessionId, handoff },
+      });
+      options.workbenchBindings.associate(idempotencyKey, sessionId);
+      reviewSessionIdsByHandoff.set(dedupeKey, sessionId);
+    } finally {
+      reviewSessionStarts.delete(dedupeKey);
+    }
+  }
+
+  /** Issue #8 M3: a bounded unified diff for the reviewer; git has no size limit of its own. */
+  const REVIEW_DIFF_MAX_LINES = 4_000;
+
+  async function computeHandoffDiff(
+    baselineCommitSha: string,
+    commitSha: string,
+  ): Promise<string> {
+    const result = await runGitCommand({
+      cwd: projectDirectory,
+      args: ["diff", `${baselineCommitSha}..${commitSha}`],
+    });
+    if (result.exitCode !== 0) {
+      return `(diff unavailable: ${(result.stderr.trim() || result.stdout.trim()).slice(0, 2_000)})`;
+    }
+    const lines = result.stdout.split(/\r?\n/u);
+    if (lines.length <= REVIEW_DIFF_MAX_LINES) return result.stdout;
+    return (
+      `${lines.slice(0, REVIEW_DIFF_MAX_LINES).join("\n")}\n` +
+      `... (truncated, ${lines.length - REVIEW_DIFF_MAX_LINES} more lines)`
+    );
+  }
+
+  /**
+   * Issue #8 M3 publish policy: the candidate is already `integrated`
+   * (merged to the local target branch); this pushes that branch to its
+   * remote. Reuses the exact target-moved detection shape as w340's
+   * integration recheck, this time against the remote.
+   */
+  async function publishIntegratedCandidate(
+    candidate: IntegrationCandidate,
+  ): Promise<PublishOutcome> {
+    return integrationRunner.publish({
+      candidate,
+      repositoryPath: projectDirectory,
+      remoteName: integrationRemoteName,
+      remoteBranch: integrationLocalBranch,
+      localTargetBranch: integrationLocalBranch,
+    });
   }
 
   async function resumeIdentityFor(
@@ -1090,9 +1267,7 @@ function createBackendAutoIterationService(
               ...(mcpBinding === undefined
                 ? {}
                 : { workbenchMcp: mcpBinding.bootstrap }),
-              input: supervisorWakeupSummary(
-                pendingHandoffs.map((handoff) => handoff.workOrderId),
-              ),
+              input: supervisorWakeupSummary(pendingHandoffs),
             }),
             resumeIdentity === undefined
               ? undefined
@@ -1195,6 +1370,8 @@ function createBackendAutoIterationService(
         readonly sessionConfiguration?: {
           readonly requested?: SessionCreationParameters;
         };
+        /** Issue #8 M3 §3: the independent review's problems verbatim, when a rework attempt has one. */
+        readonly reworkFeedback?: string;
       };
       const attemptId = payload?.attemptId;
       const creation =
@@ -1256,7 +1433,10 @@ function createBackendAutoIterationService(
           input:
             `Workbench auto-iteration: work order ${workOrder.workOrderId} is ` +
             `assigned to you. Use the read_work_order_status tool, do the work, ` +
-            `then submit_handoff.`,
+            `then submit_handoff.` +
+            (payload.reworkFeedback === undefined
+              ? ""
+              : `\n\nIndependent reviewer feedback from the previous attempt:\n${payload.reworkFeedback}`),
         });
         if (sessionId === undefined) return false;
         await authority.bindAttemptSession({
@@ -1638,6 +1818,10 @@ function createBackendAutoIterationService(
       return sessionId;
     },
     mcpServerForSession,
+    reviewSessionIdFor: (handoff: HandoffIdempotencyKey) =>
+      reviewSessionIdsByHandoff.get(
+        `${handoff.workOrderId}:${handoff.attemptId}:${handoff.handoffId}`,
+      ),
     workbenchBindings: options.workbenchBindings,
     drainPendingOutbox,
     async close(): Promise<void> {

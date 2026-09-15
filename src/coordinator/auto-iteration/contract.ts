@@ -56,6 +56,20 @@ export type WorkOrderCompletionCondition =
   | { readonly gitIntegration: "required" }
   | { readonly gitIntegration: "not-required" };
 
+/**
+ * Issue #8 M3: resolved at submission time from the Work Order's `review`
+ * field (or its default). `independent` always carries a concrete reviewer
+ * Session; `sameEndpointAsWorker` is true only when no differing default
+ * endpoint exists, so the projection can flag it per §3.
+ */
+export type WorkOrderReviewPolicy =
+  | { readonly kind: "none" }
+  | {
+      readonly kind: "independent";
+      readonly reviewerSession: SessionCreationParameters;
+      readonly sameEndpointAsWorker: boolean;
+    };
+
 export interface WorkOrder {
   readonly workOrderId: string;
   readonly objective: string;
@@ -68,6 +82,13 @@ export interface WorkOrder {
   readonly status: WorkOrderStatus;
   readonly currentAttemptId: string;
   readonly version: number;
+  /**
+   * Absent only for rows persisted before issue #8 M3; such legacy orders
+   * read as `{ kind: "none" }` (no retroactive review requirement) rather
+   * than a permanently un-disposable gate. Every order submitted through
+   * `submitWorkOrder` after this change always carries a resolved value.
+   */
+  readonly review?: WorkOrderReviewPolicy;
 }
 
 /** Endpoint, model, and thinking effort are selected for this Session only. */
@@ -184,6 +205,33 @@ export type ReviewDecisionSubmission =
       readonly targetRoleSlotId: string;
     });
 
+/**
+ * Issue #8 M3: one concrete, checkable objection from an independent Review
+ * Attempt. `code` is a short reviewer-chosen tag; a problem the reviewer
+ * cannot concretely substantiate is reported with `code: "cannot-verify"`
+ * rather than omitted.
+ */
+export interface ReviewProblem {
+  readonly code: string;
+  readonly message: string;
+}
+
+export type ReviewVerdict = "agree" | "disagree";
+
+export interface ReviewSubmission {
+  readonly handoff: HandoffIdempotencyKey;
+  readonly verdict: ReviewVerdict;
+  readonly problems: readonly ReviewProblem[];
+}
+
+/** The independent review's durable outcome, keyed to one Handoff; write-once. */
+export interface ReviewResult {
+  readonly handoff: HandoffIdempotencyKey;
+  readonly verdict: ReviewVerdict;
+  readonly problems: readonly ReviewProblem[];
+  readonly reviewerSessionId: string;
+}
+
 export interface IntegrationCandidate {
   readonly integrationCandidateId: string;
   readonly baselineCommitSha: string;
@@ -206,6 +254,13 @@ export interface IntegrationCandidate {
    * every existing producer of a frozen candidate stays unchanged.
    */
   readonly outcome?: IntegrationOutcome;
+  /**
+   * Issue #8 M3 publish policy: absent while `integrated` (locally merged,
+   * not pushed — the candidate is "ready-to-publish"); set once a
+   * `publish_candidate` attempt runs. `blocked: target-moved` is retriable;
+   * `published` is terminal.
+   */
+  readonly publishOutcome?: PublishOutcome;
 }
 
 /** One fixed gate executed on an integration candidate; tail is its bounded log excerpt. */
@@ -250,6 +305,24 @@ export interface PendingIntegration {
   readonly candidate: IntegrationCandidate;
   readonly reviewDecisionId: string;
 }
+
+/**
+ * Issue #8 M3 publish policy: pushing the target branch to its remote is a
+ * distinct, later, supervisor-triggered step from local integration. Reuses
+ * the exact target-moved detection shape as w340's integration recheck,
+ * against the remote instead of the local branch.
+ */
+export type PublishOutcome =
+  | {
+      readonly status: "published";
+      readonly remoteCommitSha: string;
+      readonly publishedAt: number;
+    }
+  | {
+      readonly status: "blocked: target-moved";
+      readonly expectedBaselineCommitSha: string;
+      readonly observedRemoteCommitSha: string | null;
+    };
 
 /** Outcome of constructing one candidate inside a managed detached worktree. */
 export type IntegrationCandidateBuildResult =
@@ -426,6 +499,14 @@ export interface WorkOrderSubmission {
   readonly responsibleRoleSlotId: string;
   readonly completionCondition: WorkOrderCompletionCondition;
   readonly workerSession: SessionCreationParameters;
+  /**
+   * Issue #8 M3. Omit for the default independent review (a different
+   * endpoint/model than `workerSession` when an obvious complement exists);
+   * pass explicit `SessionCreationParameters` to pick the reviewer Session;
+   * pass `"none"` to skip independent review entirely (only case in which
+   * `submit_review_decision` is not gated on a recorded review result).
+   */
+  readonly review?: "none" | SessionCreationParameters;
 }
 
 export interface SubmitWorkOrderRequest extends CoordinatorToolRequestMetadata {
@@ -460,19 +541,71 @@ export interface RequestSupervisorRotationRequest
   readonly successorSession: SessionCreationParameters;
 }
 
+/** Issue #8 M3: supervisor-only; the host performs the actual remote push. */
+export interface PublishCandidateRequest extends CoordinatorToolRequestMetadata {
+  readonly kind: "publish-candidate";
+  readonly integrationCandidateId: string;
+}
+
 export type SupervisorToolRequest =
   | SubmitWorkOrderRequest
   | ReadWorkOrderStatusRequest
   | ReadInboxRequest
   | SubmitReviewDecisionRequest
-  | RequestSupervisorRotationRequest;
+  | RequestSupervisorRotationRequest
+  | PublishCandidateRequest;
 
 export type WorkerToolRequest =
   | ReadWorkOrderStatusRequest
   | SubmitHandoffRequest
   | ReadInboxRequest;
 
-export type CoordinatorToolRequest = SupervisorToolRequest | WorkerToolRequest;
+/**
+ * Issue #8 M3: a Review Attempt's tool surface. Deliberately narrower than
+ * the worker's three (`read-work-order-status`/`read-inbox` would carry
+ * every Handoff `body`, i.e. the worker's own reasoning, into the reviewer's
+ * context — exactly what §3.6's "no worker reasoning" principle forbids).
+ * See the coordinator/session-authority evidence note for this deviation
+ * from the work order's literal "worker's three plus these two" phrasing.
+ */
+export interface ReadHandoffArtifactRequest extends CoordinatorToolRequestMetadata {
+  readonly kind: "read-handoff-artifact";
+  readonly handoff: HandoffIdempotencyKey;
+}
+
+/** Host-augmented after the coordinator authorizes the read (no git access there). */
+export interface ReadHandoffArtifactResponse
+  extends CoordinatorToolResponseMetadata {
+  readonly kind: "handoff-artifact";
+  readonly workOrderObjective: string;
+  readonly acceptanceCriteria: readonly string[];
+  readonly baselineCommitSha: string;
+  readonly commitSha: string;
+  /** Unified diff baseline..commitSha; filled in by the host after this read. */
+  readonly diff: string;
+}
+
+export interface SubmitReviewRequest extends CoordinatorToolRequestMetadata {
+  readonly kind: "submit-review";
+  readonly review: ReviewSubmission;
+}
+
+export interface ReviewSubmittedResponse
+  extends CoordinatorToolResponseMetadata {
+  readonly kind: "review-submitted";
+  readonly result: ReviewResult;
+}
+
+export type ReviewerToolRequest = ReadHandoffArtifactRequest | SubmitReviewRequest;
+export type ReviewerToolResponse =
+  | ReadHandoffArtifactResponse
+  | ReviewSubmittedResponse
+  | CoordinatorToolRejectedResponse;
+
+export type CoordinatorToolRequest =
+  | SupervisorToolRequest
+  | WorkerToolRequest
+  | ReviewerToolRequest;
 
 export type HostBoundToolActor =
   | {
@@ -485,6 +618,11 @@ export type HostBoundToolActor =
       readonly sessionId: string;
       readonly workOrderId: string;
       readonly attemptId: string;
+    }
+  | {
+      readonly kind: "reviewer";
+      readonly sessionId: string;
+      readonly handoff: HandoffIdempotencyKey;
     };
 
 interface CoordinatorToolResponseMetadata {
@@ -508,6 +646,8 @@ export interface WorkOrderStatusResponse
   readonly reviews: readonly ReviewDecision[];
   readonly candidates: readonly IntegrationCandidate[];
   readonly receipts: readonly HandoffReceipt[];
+  /** Issue #8 M3: independent Review Attempt results recorded for this order's Handoffs. */
+  readonly independentReviews: readonly ReviewResult[];
 }
 
 export interface HandoffSubmittedResponse
@@ -534,6 +674,24 @@ export interface SupervisorRotationRequestedResponse
   readonly tenure: SupervisorTenure;
 }
 
+/**
+ * Issue #8 M3: an internal handoff between the coordinator (which validated
+ * eligibility) and the host (which alone can push). Never returned to the
+ * model — `drainingRequest` always replaces it with a `publish-candidate-result`
+ * after performing (or skipping, if already terminal) the actual push.
+ */
+export interface PublishCandidateAcceptedResponse
+  extends CoordinatorToolResponseMetadata {
+  readonly kind: "publish-candidate-accepted";
+  readonly candidate: IntegrationCandidate;
+}
+
+export interface PublishCandidateResultResponse
+  extends CoordinatorToolResponseMetadata {
+  readonly kind: "publish-candidate-result";
+  readonly outcome: PublishOutcome;
+}
+
 export interface CoordinatorToolRejectedResponse {
   readonly kind: "rejected";
   readonly requestIdempotencyKey: string;
@@ -548,7 +706,13 @@ export interface CoordinatorToolRejectedResponse {
     | "not-found"
     | "stale-generation"
     | "stale-version"
-    | "storage-unavailable";
+    | "storage-unavailable"
+    /** Issue #8 M3: `submit_review_decision` with no recorded review result. */
+    | "review-required"
+    /** Issue #8 M3: `publish_candidate` targets a candidate not yet `integrated`. */
+    | "not-integrated"
+    /** Issue #8 M3: a `rework` decision would exceed the per-order rework cap. */
+    | "rework-limit-reached";
 }
 
 export type CoordinatorToolResponse =
@@ -558,6 +722,10 @@ export type CoordinatorToolResponse =
   | InboxReadResponse
   | ReviewDecisionSubmittedResponse
   | SupervisorRotationRequestedResponse
+  | PublishCandidateAcceptedResponse
+  | PublishCandidateResultResponse
+  | ReadHandoffArtifactResponse
+  | ReviewSubmittedResponse
   | CoordinatorToolRejectedResponse;
 
 export type SupervisorToolResponse =
@@ -566,6 +734,8 @@ export type SupervisorToolResponse =
   | InboxReadResponse
   | ReviewDecisionSubmittedResponse
   | SupervisorRotationRequestedResponse
+  | PublishCandidateAcceptedResponse
+  | PublishCandidateResultResponse
   | CoordinatorToolRejectedResponse;
 
 export type WorkerToolResponse =
@@ -584,6 +754,10 @@ export interface AutoIterationCoordinatorPort {
     actor: Extract<HostBoundToolActor, { readonly kind: "worker" }>,
     request: WorkerToolRequest,
   ): Promise<WorkerToolResponse>;
+  request(
+    actor: Extract<HostBoundToolActor, { readonly kind: "reviewer" }>,
+    request: ReviewerToolRequest,
+  ): Promise<ReviewerToolResponse>;
 }
 
 /*
@@ -725,6 +899,19 @@ export interface AutoIterationHostLifecycle {
   /** Sensor facts land in the Project transaction, not a side file. */
   observeQuota(observation: QuotaObservation): Promise<void>;
   observeContextUsage(observation: ContextUsageObservation): Promise<void>;
+  /** Host-only full read; drives review-Session starting and the wakeup summary. */
+  readWorkOrder(workOrderId: string): WorkOrder | undefined;
+  /** The recorded independent review for one Handoff, if any (gate + wakeup summary). */
+  readReviewResult(handoff: HandoffIdempotencyKey): ReviewResult | undefined;
+  /**
+   * Records the terminal or retriable publish outcome for one already-
+   * `integrated` candidate. Idempotent for the same terminal `published`
+   * outcome; a prior `blocked: target-moved` may be overwritten by a retry.
+   */
+  completePublish(disposition: {
+    readonly integrationCandidateId: string;
+    readonly outcome: PublishOutcome;
+  }): Promise<void>;
 }
 
 /**

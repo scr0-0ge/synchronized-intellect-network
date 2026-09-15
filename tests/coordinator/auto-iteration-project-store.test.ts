@@ -444,6 +444,9 @@ async function submitOrder(
       responsibleRoleSlotId: supervisor.tenure.roleSlotId,
       completionCondition: { gitIntegration },
       workerSession: { endpointId: "codex-desktop", profile },
+      // This file's fixtures exercise the project store, not issue #8 M3
+      // review gating; opt out so submit-review-decision isn't refused.
+      review: "none",
     },
   };
   return authority.request(supervisor, request);

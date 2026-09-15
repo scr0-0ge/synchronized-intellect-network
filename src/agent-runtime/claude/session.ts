@@ -101,7 +101,6 @@ const droppableAssistantBlockTypes = new Set([
 const systemSubtypeProgressActivities: Readonly<
   Record<string, RuntimeProgressActivity>
 > = Object.freeze({
-  api_retry: "retrying",
   status: "status",
   thinking_tokens: "thinking",
   task_started: "tool",
@@ -564,6 +563,20 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
               (message.error_status === 401 || message.error_status === 403)
             ) {
               throw new RuntimeAdapterError("authentication-required");
+            }
+            if (message.subtype === "api_retry") {
+              // w355: every retry frame carries its own attempt counter, so
+              // the row changes content per attempt and the user watches the
+              // CLI's retry budget drain instead of one static note for the
+              // whole wait. The facts ride the existing tool payload slot;
+              // yieldableProgress keys on that content, so consecutive
+              // frames pass the dedup exactly when their content changed.
+              const progress = yieldableProgress(
+                "retrying",
+                apiRetryToolActivity(message),
+              );
+              if (progress !== undefined) yield progress;
+              continue;
             }
             if (
               message.subtype === "status" &&
@@ -1715,6 +1728,47 @@ function unknownToolActivity(
     sourceType,
     name: isSafeIdentity(name) ? name : unknownToolName,
     ...(parameter === undefined ? {} : { parameter }),
+  });
+}
+
+/**
+ * The api_retry wire shape (identical on 2.1.267 and 2.1.270) carries
+ * attempt, max_retries, retry_delay_ms and error_status. They become the
+ * retrying row's payload through the existing tool slot, so the content
+ * changes per attempt without a new contract field; the renderer's copy
+ * table turns them into the localized sentence. A frame without usable
+ * numbers degrades to the same row shape with no numeric detail, and
+ * identical payloads keep coalescing.
+ */
+function apiRetryToolActivity(
+  message: Record<string, unknown>,
+): RuntimeToolActivity {
+  const attempt = message.attempt;
+  const maxRetries = message.max_retries;
+  const delayMilliseconds = message.retry_delay_ms;
+  const detail = [
+    typeof attempt === "number" && typeof maxRetries === "number"
+      ? `${attempt}/${maxRetries}`
+      : undefined,
+    typeof delayMilliseconds === "number" && Number.isFinite(delayMilliseconds)
+      ? `${Math.round(delayMilliseconds / 1000)}s`
+      : undefined,
+  ].filter(part => part !== undefined).join(" · ");
+  return Object.freeze({
+    type: "unknown" as const,
+    sourceType: "api_retry",
+    name: typeof message.error_status === "number"
+      ? String(message.error_status)
+      : "unknown",
+    ...(detail === ""
+      ? {}
+      : {
+          parameter: Object.freeze({
+            kind: "command" as const,
+            value: detail,
+            truncated: false,
+          }),
+        }),
   });
 }
 
