@@ -113,6 +113,18 @@ A custom profile keeps its own sessions but does not search sibling profiles for
 - **A Windows-native shell.** Custom title bar, tray, light and dark acrylic themes, and a CRT skin.
 - **English and Simplified Chinese,** switchable at run time.
 
+### Let a supervisor session run the loop
+
+Type `/` in a Project's input box and pick **`/supervisor`**: the app starts a supervisor Session on
+the endpoint and model selected right there. The supervisor hands out bounded Work Orders through the
+app's own MCP tool, `submit_work_order`, choosing each worker's endpoint, model and effort itself.
+Every worker delivers from its own git worktree and then hands off. An independent reviewer Session
+reads the diff and reports concrete problems, and the supervisor disposes of the handoff — approving
+it or sending it back for rework, at most two reworks per order. A candidate that clears review runs
+the fixed gates (build, typecheck and the rest) and, all green, the app merges it into the local
+target branch. Nothing is pushed: publishing is a separate, explicit `publish_candidate` call.
+Meanwhile a panel in the stage lists every Work Order and what it is waiting for.
+
 ## The eight endpoints
 
 | Endpoint | Sign-in |
@@ -138,6 +150,10 @@ Early, Windows-only, one person's project.
 - The first run needs the network — that is where Node and the dependencies come from.
 - A session pinned to a model the vendor has retired can't be continued. The app points you at a
   new one.
+- Auto-iteration has been exercised end to end with a scripted in-process loop, and the real Claude
+  Code and Codex CLIs have each delivered a handoff through the product's own MCP bridge with their
+  model traffic pointed at a fake HTTP endpoint — zero real inference. A full run against a live
+  provider has not been done yet.
 
 ## Under the hood
 

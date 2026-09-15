@@ -648,6 +648,15 @@ export interface WorkOrderStatusResponse
   readonly receipts: readonly HandoffReceipt[];
   /** Issue #8 M3: independent Review Attempt results recorded for this order's Handoffs. */
   readonly independentReviews: readonly ReviewResult[];
+  /**
+   * Issue #8 M4 (w349 unsettled): the same host projection `read_work_order_status`
+   * used to omit, mirroring `AutoIterationWorkOrderOverview` for this one
+   * order — a model tool caller previously only ever saw the durable
+   * `workOrder.status` (e.g. `executing` even while queued behind the
+   * worker concurrency cap).
+   */
+  readonly projectedStatus: WorkOrderStatus | "queued";
+  readonly waitingFor: AutoIterationWorkOrderOverview["waitingFor"];
 }
 
 export interface HandoffSubmittedResponse
@@ -712,7 +721,9 @@ export interface CoordinatorToolRejectedResponse {
     /** Issue #8 M3: `publish_candidate` targets a candidate not yet `integrated`. */
     | "not-integrated"
     /** Issue #8 M3: a `rework` decision would exceed the per-order rework cap. */
-    | "rework-limit-reached";
+    | "rework-limit-reached"
+    /** Issue #8 M4: `submit_work_order` while the queued backlog is already at its cap. */
+    | "queue-limit-reached";
 }
 
 export type CoordinatorToolResponse =
@@ -779,6 +790,16 @@ export interface InitialSupervisorBinding {
   readonly sessionCreationParameters?: SessionCreationParameters;
 }
 
+/**
+ * Issue #8 M4 (w353 unsettled): durable counterpart of the in-memory
+ * `reviewSessionIdFor`, the same method w344 used for the supervisor's own
+ * creation parameters — a host-only recovery hint, not a business fact.
+ */
+export interface ReviewSessionBinding {
+  readonly handoff: HandoffIdempotencyKey;
+  readonly sessionId: string;
+}
+
 export interface AttemptSessionBinding {
   readonly attemptId: string;
   readonly sessionId: string;
@@ -839,6 +860,24 @@ export interface AutoIterationWorkOrderOverview {
     | "supervisor-review"
     | "integration"
     | "quota"
+    /**
+     * Issue #8 M4: finer-grained reasons the coarser literals above used to
+     * conflate. `supervisor-busy` is the mid-turn default (deferred to the
+     * next turn boundary, including "never attempted yet"); `supervisor-recovering`
+     * is set only once a wakeup attempt is observed landing in
+     * `recovery-required` (read back from the Session's own durable
+     * lifecycle status, not a new persisted flag). `quota:<pool>` and
+     * `integration-blocked:<reason>` carry the pool id / outcome reason
+     * inline in the string rather than adding a field.
+     */
+    | "supervisor-busy"
+    | "supervisor-recovering"
+    | "queued-limit"
+    | `quota:${string}`
+    | "review-pending"
+    | "integration-running"
+    | `integration-blocked:${string}`
+    | "ready-to-publish"
     | null;
 }
 
@@ -903,6 +942,12 @@ export interface AutoIterationHostLifecycle {
   readWorkOrder(workOrderId: string): WorkOrder | undefined;
   /** The recorded independent review for one Handoff, if any (gate + wakeup summary). */
   readReviewResult(handoff: HandoffIdempotencyKey): ReviewResult | undefined;
+  /** Issue #8 M4: persists a Review Attempt's Session id; a best-effort recovery hint, not a business fact. */
+  bindReviewSession(binding: ReviewSessionBinding): Promise<void>;
+  /** Host-only lookup mirroring `readSupervisorSessionCreationParameters`, used to re-bind a Review Attempt's tools after a Project reopen. */
+  readReviewSessionId(handoff: HandoffIdempotencyKey): string | undefined;
+  /** Host-only: the current attempt's Handoff key for a work order, if one has been submitted. */
+  readCurrentHandoff(workOrderId: string): HandoffIdempotencyKey | undefined;
   /**
    * Records the terminal or retriable publish outcome for one already-
    * `integrated` candidate. Idempotent for the same terminal `published`

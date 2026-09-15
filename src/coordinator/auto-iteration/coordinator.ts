@@ -38,6 +38,7 @@ import type {
   ReviewerToolRequest,
   ReviewerToolResponse,
   ReviewResult,
+  ReviewSessionBinding,
   ReviewSubmittedResponse,
   SessionConfigurationState,
   SessionCreationParameters,
@@ -78,6 +79,15 @@ export const WORKER_ATTEMPT_CONCURRENCY_LIMIT = 4;
  * of reworks already spent, not the limit itself.
  */
 export const REWORK_ATTEMPT_LIMIT = 2;
+
+/**
+ * Issue #8 M4: backpressure on the queue itself, not just the worker slots
+ * it feeds. `queued` work orders beyond `WORKER_ATTEMPT_CONCURRENCY_LIMIT`
+ * already wait for a slot; once that backlog also reaches twice the slot
+ * count, a further `submit_work_order` is refused with a reason instead of
+ * silently growing the queue forever.
+ */
+export const QUEUE_REJECTION_LIMIT = WORKER_ATTEMPT_CONCURRENCY_LIMIT * 2;
 
 export type {
   AttemptRuntimeMutation,
@@ -426,6 +436,93 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     return this.store.readTransaction(() => this.store.reviewResult(handoff));
   }
 
+  async bindReviewSession(binding: ReviewSessionBinding): Promise<void> {
+    assertNonEmpty(binding.sessionId);
+    validateHandoffKey(binding.handoff);
+    return this.store.transaction(() => {
+      this.store.bindReviewSession(binding.handoff, binding.sessionId);
+    });
+  }
+
+  readReviewSessionId(handoff: HandoffIdempotencyKey): string | undefined {
+    return this.store.readTransaction(() => this.store.reviewSessionId(handoff));
+  }
+
+  readCurrentHandoff(workOrderId: string): HandoffIdempotencyKey | undefined {
+    return this.store.readTransaction(() => {
+      const workOrder = this.store.workOrder(workOrderId);
+      if (workOrder === undefined) return undefined;
+      return this.store
+        .handoffs(workOrderId)
+        .find((handoff) => handoff.idempotencyKey.attemptId === workOrder.currentAttemptId)
+        ?.idempotencyKey;
+    });
+  }
+
+  /**
+   * Issue #8 M4: the per-order projection, factored out so both the host
+   * overview (renderer) and `read_work_order_status` (model tool) compute
+   * `queued`/`waitingFor` from the exact same logic. Does not open its own
+   * transaction — every caller already holds one (`node:sqlite`'s
+   * `DatabaseSync` does not support nested `BEGIN`).
+   */
+  private buildWorkOrderOverviews(): readonly AutoIterationWorkOrderOverview[] {
+    const supervisorRole = this.store
+      .roleSlots()
+      .find((role) => role.responsibility === "supervisor");
+    const supervisorSessionId =
+      supervisorRole === undefined || supervisorRole.currentTenureId === null
+        ? undefined
+        : this.store.tenure(supervisorRole.currentTenureId)?.sessionId;
+    const workOrders = this.store.workOrders();
+    let occupyingBefore = 0;
+    return workOrders.map((workOrder) => {
+      const attempts = this.store.attempts(workOrder.workOrderId);
+      const current =
+        attempts.find((attempt) => attempt.attemptId === workOrder.currentAttemptId) ??
+        attempts.at(-1);
+      const delivered = this.store.handoffs(workOrder.workOrderId).length > 0;
+      const reviewDecided = this.store.reviews(workOrder.workOrderId).length > 0;
+      // Issue #8 M1 queue projection: an executing order whose worker has
+      // not started while `limit` earlier orders still occupy worker slots
+      // reads as `queued`; its start-attempt outbox entry stays pending.
+      const occupies =
+        workOrder.status === "executing" &&
+        current !== undefined &&
+        !terminalRuntimeLifecycle(current.runtimeLifecycle);
+      const unbound = current === undefined || current.sessionId === null;
+      const queued =
+        workOrder.status === "executing" &&
+        unbound &&
+        occupyingBefore >= WORKER_ATTEMPT_CONCURRENCY_LIMIT;
+      if (occupies) occupyingBefore += 1;
+      const status: AutoIterationWorkOrderOverview["status"] = queued
+        ? "queued"
+        : workOrder.status;
+      return {
+        workOrderId: workOrder.workOrderId,
+        status,
+        currentAttemptId: workOrder.currentAttemptId,
+        attemptCount: attempts.length,
+        workerSessionBound: current?.sessionId !== null && current !== undefined,
+        workerSessionId: current?.sessionId ?? null,
+        workerRuntimeLifecycle:
+          current?.runtimeLifecycle ?? "accepted",
+        delivered,
+        reviewDecided,
+        integrated: workOrder.status === "integrated",
+        waitingFor: queued
+          ? "queued-limit"
+          : this.workOrderWaitingFor(workOrder, current, supervisorSessionId),
+      } satisfies AutoIterationWorkOrderOverview;
+    });
+  }
+
+  /** Count of orders the queue projection currently reads as `queued` (issue #8 M4 backpressure). */
+  private queuedWorkOrderCount(): number {
+    return this.buildWorkOrderOverviews().filter((order) => order.status === "queued").length;
+  }
+
   readAutoIterationOverview(): AutoIterationOverview {
     return this.store.readTransaction(() => {
       const supervisorRole = this.store
@@ -435,48 +532,7 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
         supervisorRole === undefined || supervisorRole.currentTenureId === null
           ? undefined
           : this.store.tenure(supervisorRole.currentTenureId);
-      const workOrders = this.store.workOrders();
-      let occupyingBefore = 0;
-      const workOrderViews = workOrders.map((workOrder) => {
-        const attempts = this.store.attempts(workOrder.workOrderId);
-        const current =
-          attempts.find((attempt) => attempt.attemptId === workOrder.currentAttemptId) ??
-          attempts.at(-1);
-        const delivered = this.store.handoffs(workOrder.workOrderId).length > 0;
-        const reviewDecided = this.store.reviews(workOrder.workOrderId).length > 0;
-        // Issue #8 M1 queue projection: an executing order whose worker has
-        // not started while `limit` earlier orders still occupy worker slots
-        // reads as `queued`; its start-attempt outbox entry stays pending.
-        const occupies =
-          workOrder.status === "executing" &&
-          current !== undefined &&
-          !terminalRuntimeLifecycle(current.runtimeLifecycle);
-        const unbound = current === undefined || current.sessionId === null;
-        const queued =
-          workOrder.status === "executing" &&
-          unbound &&
-          occupyingBefore >= WORKER_ATTEMPT_CONCURRENCY_LIMIT;
-        if (occupies) occupyingBefore += 1;
-        const status: AutoIterationWorkOrderOverview["status"] = queued
-          ? "queued"
-          : workOrder.status;
-        return {
-          workOrderId: workOrder.workOrderId,
-          status,
-          currentAttemptId: workOrder.currentAttemptId,
-          attemptCount: attempts.length,
-          workerSessionBound: current?.sessionId !== null && current !== undefined,
-          workerSessionId: current?.sessionId ?? null,
-          workerRuntimeLifecycle:
-            current?.runtimeLifecycle ?? "accepted",
-          delivered,
-          reviewDecided,
-          integrated: workOrder.status === "integrated",
-          waitingFor: queued
-            ? "worker-start"
-            : workOrderWaitingFor(workOrder.status, current),
-        } satisfies AutoIterationWorkOrderOverview;
-      });
+      const workOrderViews = this.buildWorkOrderOverviews();
       return {
         supervisor:
           supervisorRole === undefined || supervisorTenure === undefined
@@ -596,6 +652,76 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     return this.resolveQuotaPoolId(attempt.sessionConfiguration.requested.endpointId);
   }
 
+  /**
+   * Issue #8 M4: the enumerable reason a work order (not already `queued`)
+   * is not making progress. Each branch reads only fields the store already
+   * persists — no new write path for this method itself, only reads (the
+   * one new signal, `supervisor-recovering`, is backed by the channel's own
+   * existing `sessions.lifecycle_status`, not a field this coordinator owns).
+   */
+  private workOrderWaitingFor(
+    workOrder: WorkOrder,
+    currentAttempt: ExecutionAttempt | undefined,
+    supervisorSessionId: string | undefined,
+  ): AutoIterationWorkOrderOverview["waitingFor"] {
+    const status = workOrder.status;
+    if (status === "awaiting-review") {
+      const policy = workOrder.review ?? { kind: "none" as const };
+      const currentHandoff = this.store
+        .handoffs(workOrder.workOrderId)
+        .find((handoff) => handoff.idempotencyKey.attemptId === workOrder.currentAttemptId);
+      const reviewSatisfied =
+        policy.kind !== "independent" ||
+        (currentHandoff !== undefined &&
+          this.store.reviewResult(currentHandoff.idempotencyKey) !== undefined);
+      // Issue #8 §3 M3: an independent review the policy requires but that
+      // has not landed yet blocks `submit_review_decision` outright, so it
+      // is the more fundamentally correct reason regardless of supervisor
+      // health.
+      if (!reviewSatisfied) return "review-pending";
+      // w344 left this distinction undone ("not worth a new mechanism" for
+      // a display-only state); issue #8 M4 asks for it, and it is now free:
+      // `sessions.lifecycle_status` already flips to `recovery-required` and
+      // back on its own (the existing recovery-probe machinery), so this
+      // reads a fact the channel already maintains rather than adding one.
+      const supervisorLifecycle =
+        supervisorSessionId === undefined
+          ? undefined
+          : this.store.sessionLifecycleStatus(supervisorSessionId);
+      return supervisorLifecycle === "recovery-required"
+        ? "supervisor-recovering"
+        : "supervisor-busy";
+    }
+    if (status === "awaiting-integration") return "integration-running";
+    if (status === "waiting-for-quota") {
+      const poolId = this.attemptQuotaPoolId(currentAttempt);
+      return poolId === undefined ? "quota" : `quota:${poolId}`;
+    }
+    if (status === "blocked") {
+      for (const candidate of this.store.candidates(workOrder.workOrderId)) {
+        const outcome = candidate.outcome;
+        if (outcome !== undefined && outcome.status !== "integrated") {
+          return `integration-blocked:${outcome.status.slice("blocked: ".length)}`;
+        }
+      }
+      return null;
+    }
+    if (status === "integrated") {
+      if (workOrder.completionCondition.gitIntegration !== "required") return null;
+      const candidate = this.store.candidates(workOrder.workOrderId).at(-1);
+      return candidate?.publishOutcome?.status === "published" ? null : "ready-to-publish";
+    }
+    if (status === "executing" || status === "delivered") {
+      if (currentAttempt === undefined || currentAttempt.sessionId === null) {
+        return "worker-start";
+      }
+      return terminalRuntimeLifecycle(currentAttempt.runtimeLifecycle)
+        ? null
+        : "worker-execution";
+    }
+    return null;
+  }
+
   request(
     actor: Extract<HostBoundToolActor, { readonly kind: "supervisor" }>,
     request: SupervisorToolRequest,
@@ -709,6 +835,12 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     validateWorkOrderSubmission(request);
     if (this.store.roleSlot(request.workOrder.responsibleRoleSlotId) === undefined) {
       throw new AutoIterationRejection("not-found", null);
+    }
+    // Issue #8 M4 backpressure: refuse rather than let the queue grow
+    // forever once it is already twice the size of the worker concurrency
+    // cap it feeds. The supervisor gets a reason instead of silence.
+    if (this.queuedWorkOrderCount() >= QUEUE_REJECTION_LIMIT) {
+      throw new AutoIterationRejection("queue-limit-reached", role.version);
     }
     const workOrderId = `work-order-${this.createId()}`;
     const attemptId = `attempt-${this.createId()}`;
@@ -1293,6 +1425,12 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       throw new AutoIterationRejection("forbidden", workOrder.version);
     }
     assertExpectedVersion(request.expectedVersion, workOrder.version);
+    // Issue #8 M4 (w342 unsettled): the same host projection the renderer
+    // overview uses, so a model tool caller sees `queued`/the enumerable
+    // `waitingFor` reason instead of only ever the durable `executing` row.
+    const projected = this.buildWorkOrderOverviews().find(
+      (entry) => entry.workOrderId === workOrder.workOrderId,
+    );
     return {
       kind: "work-order-status",
       requestIdempotencyKey: request.requestIdempotencyKey,
@@ -1304,6 +1442,8 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       candidates: this.store.candidates(workOrder.workOrderId),
       receipts: this.store.receipts(workOrder.workOrderId),
       independentReviews: this.store.reviewResultsForWorkOrder(workOrder.workOrderId),
+      projectedStatus: projected?.status ?? workOrder.status,
+      waitingFor: projected?.waitingFor ?? null,
     };
   }
 
@@ -1600,27 +1740,6 @@ function terminalRuntimeLifecycle(
     lifecycle === "interrupted" ||
     lifecycle === "recovery-required"
   );
-}
-
-function workOrderWaitingFor(
-  status: WorkOrderStatus,
-  currentAttempt: ExecutionAttempt | undefined,
-): AutoIterationWorkOrderOverview["waitingFor"] {
-  if (status === "awaiting-review") return "supervisor-review";
-  if (status === "awaiting-integration") return "integration";
-  if (status === "waiting-for-quota") return "quota";
-  if (status === "executing" || status === "delivered") {
-    if (currentAttempt === undefined) return "worker-start";
-    if (currentAttempt.sessionId === null) return "worker-start";
-    const terminal =
-      currentAttempt.runtimeLifecycle === "completed" ||
-      currentAttempt.runtimeLifecycle === "failed" ||
-      currentAttempt.runtimeLifecycle === "cancelled" ||
-      currentAttempt.runtimeLifecycle === "interrupted" ||
-      currentAttempt.runtimeLifecycle === "recovery-required";
-    return terminal ? null : "worker-execution";
-  }
-  return null;
 }
 
 function canonicalJson(value: unknown): string {

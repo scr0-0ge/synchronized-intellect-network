@@ -51,6 +51,15 @@ export interface WorkbenchAutoIterationWorkOrderView {
     | "supervisor-review"
     | "integration"
     | "quota"
+    /** Issue #8 M4: finer-grained reasons; see the same union in coordinator/auto-iteration/contract.ts. */
+    | "supervisor-busy"
+    | "supervisor-recovering"
+    | "queued-limit"
+    | `quota:${string}`
+    | "review-pending"
+    | "integration-running"
+    | `integration-blocked:${string}`
+    | "ready-to-publish"
     | null;
 }
 

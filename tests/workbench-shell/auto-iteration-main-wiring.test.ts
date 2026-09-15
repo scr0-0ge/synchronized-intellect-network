@@ -25,8 +25,11 @@ import {
   emitContextUsageObservation,
   emitQuotaObservation,
 } from "../../src/coordinator/auto-iteration/capability-probe.ts";
-import { createWorkbenchBackend } from "../../src/workbench-shell/backend.ts";
-import type { WorkbenchBackend } from "../../src/workbench-shell/backend.ts";
+import {
+  createWorkbenchBackend,
+  WAKEUP_HANDOFF_BATCH_LIMIT,
+} from "../../src/workbench-shell/backend.ts";
+import type { WorkbenchBackend, WorkspaceProcessRecord } from "../../src/workbench-shell/backend.ts";
 import type {
   AutoIterationMcpServer,
   JsonRpcRequest,
@@ -2527,4 +2530,495 @@ test("issue #8 M3 publish policy: integrated stays un-pushed until publish_candi
     },
   );
   assert.equal(deniedForWorker.kind, "rejected");
+});
+
+test("a handoff is rejected while a worker-started background process still touches the workspace, and accepted once it clears", async (t) => {
+  // Issue #8 M4 (w349 unsettled): a worker backgrounding its own process
+  // (e.g. a test suite it never waited on) leaves no host job record, so the
+  // existing capture-artifact job-status check cannot see it. The injected
+  // scanner stands in for the real Win32_Process scan; the fake adapter/host
+  // wiring is what is under test here, not the real OS scan itself.
+  let survivors: readonly WorkspaceProcessRecord[] = [
+    { pid: 4321, commandLine: "node.exe backgrounded-test-runner.js" },
+  ];
+  const adapter = new ScriptedLoopAdapter();
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-m4-process-"));
+  const projectDirectory = join(root, "Project");
+  await mkdir(projectDirectory);
+  await git(projectDirectory, "init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await git(projectDirectory, "add", "baseline.txt");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+  const backend = await createWorkbenchBackend({
+    projectDirectory,
+    databasePath: join(root, "workbench.sqlite"),
+    adapter,
+    scanWorkspaceProcesses: async () => survivors,
+  });
+  t.after(async () => {
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "m4 process supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+  const submitted = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m4-process-submit-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: workOrderSubmission(profile, baselineCommitSha),
+  });
+  assert.equal(submitted.kind, "work-order-submitted");
+  const workOrderId = (submitted.workOrder as Record<string, unknown>).workOrderId as string;
+  const attemptId = (submitted.attempt as Record<string, unknown>).attemptId as string;
+  const workerSessionId = await waitFor("worker Session binding", () => {
+    const order = findWorkOrder(
+      service.authority.readAutoIterationOverview(),
+      workOrderId,
+    );
+    return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+  });
+
+  const handoffKey = { workOrderId, attemptId, handoffId: "handoff-m4-process-1" };
+  const rejected = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m4-process-handoff-1",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: handoffKey,
+        body: "Submitted while a backgrounded process still touches the workspace.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(rejected.kind, "rejected");
+  assert.equal(
+    (rejected as unknown as CoordinatorToolRejectedResponse).category,
+    "job-still-running",
+    "the refusal must be readable as the same job-still-running category as the host's own job check",
+  );
+  const beforeClear = await callTool(supervisorServer, "read_work_order_status", {
+    requestIdempotencyKey: "m4-process-read-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrderId,
+  });
+  assert.equal(
+    (beforeClear.handoffs as unknown[]).length,
+    0,
+    "a workspace with a running process must not let the handoff land",
+  );
+
+  // The background process clears; the same handoff is then accepted.
+  survivors = [];
+  const accepted = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m4-process-handoff-2",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: handoffKey,
+        body: "Submitted while a backgrounded process still touches the workspace.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(accepted.kind, "handoff-submitted");
+});
+
+test("a Review Attempt Session's binding survives a Project reopen instead of being lost with the in-memory map", async (t) => {
+  // Issue #8 M4 (w353 unsettled): resumeBindings previously only rebuilt
+  // supervisor and worker bindings; a reviewer still awaiting its verdict at
+  // reopen time had no path back to a tool binding, and reviewSessionIdFor
+  // (backed only by an in-memory map) forgot the Session id entirely.
+  let workerCommitSha: string | undefined;
+  const adapter = new ScriptedLoopAdapter(async (request) => {
+    if (request.projectDirectory.endsWith("Project")) return; // supervisor / reviewer
+    await writeFile(
+      join(request.projectDirectory, "reviewed-delivery.txt"),
+      "content for the reopen-survival review\n",
+      "utf8",
+    );
+    await git(request.projectDirectory, "add", "reviewed-delivery.txt");
+    await git(request.projectDirectory, "commit", "-m", "feat: worker delivery for review");
+    workerCommitSha = await git(request.projectDirectory, "rev-parse", "HEAD");
+  });
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-m4-review-reopen-"));
+  const projectDirectory = join(root, "Project");
+  await mkdir(projectDirectory);
+  await git(projectDirectory, "init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await git(projectDirectory, "add", "baseline.txt");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+  const databasePath = join(root, "workbench.sqlite");
+  const backend = await createWorkbenchBackend({ projectDirectory, databasePath, adapter });
+  let reopenedBackend: WorkbenchBackend | undefined;
+  t.after(async () => {
+    await reopenedBackend?.close().catch(() => undefined);
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "m4 review-reopen supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+
+  // Deliberately omits `review`: the default independent policy applies.
+  const submitted = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m4-review-reopen-submit-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: {
+      objective: "Add the reviewed delivery file.",
+      acceptanceCriteria: ["reviewed-delivery.txt exists"],
+      baselineCommitSha,
+      territory: { writePaths: ["reviewed-delivery.txt"], readOnlyPaths: [] },
+      responsibleRoleSlotId: "project-supervisor",
+      completionCondition: { gitIntegration: "not-required" },
+      workerSession: { endpointId: "codex-desktop", profile },
+    },
+  });
+  assert.equal(submitted.kind, "work-order-submitted");
+  const workOrderId = (submitted.workOrder as Record<string, unknown>).workOrderId as string;
+  const attemptId = (submitted.attempt as Record<string, unknown>).attemptId as string;
+
+  const workerSessionId = await waitFor("worker Session binding", () => {
+    const order = findWorkOrder(service.authority.readAutoIterationOverview(), workOrderId);
+    return order?.workerSessionBound && workerCommitSha !== undefined
+      ? order.workerSessionId ?? undefined
+      : undefined;
+  });
+  const handoffKey: HandoffIdempotencyKey = {
+    workOrderId,
+    attemptId,
+    handoffId: "handoff-review-reopen-1",
+  };
+  const handoff = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m4-review-reopen-handoff-1",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: handoffKey,
+        body: "The worker's own reasoning: never sent to the reviewer.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(handoff.kind, "handoff-submitted");
+
+  const reviewerSessionId = await waitFor("the independent Review Attempt Session", () =>
+    service.reviewSessionIdFor(handoffKey),
+  );
+
+  await backend.close();
+  const reopenedAdapter = new ScriptedLoopAdapter();
+  reopenedBackend = await createWorkbenchBackend({
+    projectDirectory,
+    databasePath,
+    adapter: reopenedAdapter,
+  });
+  const reopenedService = reopenedBackend.autoIteration;
+  assert.ok(reopenedService, "the reopened backend exposes the service");
+
+  assert.equal(
+    reopenedService.reviewSessionIdFor(handoffKey),
+    reviewerSessionId,
+    "the reviewer Session id must be recovered from the durable binding, not forgotten",
+  );
+  assert.equal(
+    reopenedAdapter.startRequests.length,
+    0,
+    "reopen must rebind the existing reviewer Session, never start a second one",
+  );
+
+  // The tool binding itself (not just the id bookkeeping) must be live: the
+  // reopened reviewer Session can still submit_review for its own Handoff.
+  const reopenedReviewerServer = reopenedService.mcpServerForSession(reviewerSessionId);
+  const submittedReview = await callTool(reopenedReviewerServer, "submit_review", {
+    requestIdempotencyKey: "m4-review-reopen-verdict-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    review: { handoff: handoffKey, verdict: "agree", problems: [] },
+  });
+  assert.equal(submittedReview.kind, "review-submitted");
+});
+
+test("a wakeup batch beyond the bound is not silently sealed as delivered; the rest wait for a further wakeup", async (t) => {
+  // Issue #8 M4 backpressure (w349 gap): the summary text always capped its
+  // *listing* at 8, but `markHandoffIncluded` used to run over however many
+  // handoffs were actually pending -- sealing a delivery receipt for entries
+  // the supervisor's own turn never actually saw named. This gates the
+  // first wakeup turn open (same technique as the M1 merged-summary test),
+  // piles up WAKEUP_HANDOFF_BATCH_LIMIT + 1 more handoffs behind it, and
+  // checks the boundary wakeup only claims the bounded batch -- the
+  // overflow rides a further, later wakeup instead.
+  let gate: Promise<void> | undefined;
+  let gateResolve!: () => void;
+  const adapter = new ScriptedLoopAdapter(undefined, async () => {
+    if (gate === undefined) {
+      gate = new Promise<void>((resolve) => {
+        gateResolve = resolve;
+      });
+      await gate;
+    }
+  });
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-m4-batch-"));
+  const projectDirectory = join(root, "Project");
+  await mkdir(projectDirectory);
+  await git(projectDirectory, "init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await git(projectDirectory, "add", "baseline.txt");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+  const backend = await createWorkbenchBackend({
+    projectDirectory,
+    databasePath: join(root, "workbench.sqlite"),
+    adapter,
+  });
+  t.after(async () => {
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "m4 batch supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+
+  async function submitAndDeliver(key: string): Promise<string> {
+    const submitted = await callTool(supervisorServer, "submit_work_order", {
+      requestIdempotencyKey: `m4-batch-submit-${key}`,
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      workOrder: workOrderSubmission(profile, baselineCommitSha),
+    });
+    assert.equal(submitted.kind, "work-order-submitted");
+    const workOrderId = (submitted.workOrder as Record<string, unknown>).workOrderId as string;
+    const attemptId = (submitted.attempt as Record<string, unknown>).attemptId as string;
+    const workerSessionId = await waitFor(`worker Session for ${key}`, () => {
+      const order = findWorkOrder(service!.authority.readAutoIterationOverview(), workOrderId);
+      return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+    });
+    const handoff = await callTool(
+      service!.mcpServerForSession(workerSessionId),
+      "submit_handoff",
+      {
+        requestIdempotencyKey: `m4-batch-handoff-${key}`,
+        expectedVersion: 1,
+        observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+        handoff: {
+          idempotencyKey: { workOrderId, attemptId, handoffId: `handoff-m4-batch-${key}` },
+          body: `Delivery ${key} is complete.`,
+          artifactIds: [],
+        },
+      },
+    );
+    assert.equal(handoff.kind, "handoff-submitted");
+    return workOrderId;
+  }
+
+  // The first handoff opens (and holds open) the first wakeup turn.
+  const firstWorkOrderId = await submitAndDeliver("first");
+  await waitFor("the first wakeup turn to open", () =>
+    adapter.trace.length === 1 ? adapter.trace : undefined,
+  );
+
+  // WAKEUP_HANDOFF_BATCH_LIMIT + 1 more arrive while the parent is mid-turn.
+  const overflowCount = WAKEUP_HANDOFF_BATCH_LIMIT + 1;
+  const pendingWorkOrderIds: string[] = [];
+  for (let i = 0; i < overflowCount; i += 1) {
+    pendingWorkOrderIds.push(await submitAndDeliver(`pending-${i}`));
+  }
+  assert.equal(adapter.trace.length, 1, "no second wakeup may start mid-turn");
+  gateResolve();
+
+  await waitFor("every work order awaiting review", () => {
+    const overview = service.authority.readAutoIterationOverview();
+    return [firstWorkOrderId, ...pendingWorkOrderIds].every(
+      (id) => findWorkOrder(overview, id)?.status === "awaiting-review",
+    )
+      ? overview
+      : undefined;
+  });
+  await waitFor("wakeup settle in the ledger", async () => {
+    const pending = (await service.authority.readPendingOutbox()).filter(
+      (entry) => entry.kind === "inbox-wakeup",
+    );
+    return pending.length === 0 ? pending : undefined;
+  });
+
+  // Three separate wakeup turns: the first (the opener), a boundary wakeup
+  // that claims only the bounded batch, and a further wakeup for the single
+  // overflow entry the bound deferred. Had the old unbounded loop still been
+  // in place, exactly two wakeup turns would have delivered all of them.
+  assert.equal(
+    adapter.resumeInputs.length,
+    3,
+    `expected the overflow to need its own further wakeup: ${JSON.stringify(adapter.trace)}`,
+  );
+  const [, boundaryText, laterText] = adapter.sentInputs;
+  assert.match(
+    boundaryText ?? "",
+    /and 1 more/u,
+    "the boundary wakeup's own summary must admit one entry did not fit",
+  );
+  for (const id of pendingWorkOrderIds.slice(0, WAKEUP_HANDOFF_BATCH_LIMIT)) {
+    assert.equal(
+      (boundaryText ?? "").includes(id),
+      true,
+      `boundary wakeup must name ${id}`,
+    );
+  }
+  const overflowWorkOrderId = pendingWorkOrderIds[WAKEUP_HANDOFF_BATCH_LIMIT]!;
+  assert.equal(
+    (boundaryText ?? "").includes(overflowWorkOrderId),
+    false,
+    "the overflow entry must not be named in the batch that could not include it",
+  );
+  assert.equal(
+    (laterText ?? "").includes(overflowWorkOrderId),
+    true,
+    "the overflow entry must ride a later wakeup instead of being dropped",
+  );
+
+  // Every entry -- including the deferred one -- ends up truly delivered.
+  for (const id of [firstWorkOrderId, ...pendingWorkOrderIds]) {
+    const status = await callTool(supervisorServer, "read_work_order_status", {
+      requestIdempotencyKey: `m4-batch-final-read-${id}`,
+      expectedVersion: 2,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      workOrderId: id,
+    });
+    const levels = (status.receipts as Array<Record<string, unknown>>).map(
+      (receipt) => receipt.level,
+    );
+    assert.equal(
+      levels.includes("included-in-parent-input"),
+      true,
+      `${id} must eventually be sealed as delivered, not stuck pending forever`,
+    );
+  }
+});
+
+test("a supervisor Session durably stuck in recovery-required reads supervisor-recovering, not the generic busy default", async (t) => {
+  // Issue #8 M4 (w344 left this undone as "not worth a new mechanism"): the
+  // distinction reads the channel's OWN existing `sessions.lifecycle_status`
+  // (already flipped by the existing recovery-probe machinery) rather than a
+  // new persisted flag. Every resume attempt fails here -- including the
+  // automatic recovery probe -- so the Session lands in a durable
+  // `recovery-required` state instead of self-healing within one poll tick.
+  const adapter = new ScriptedLoopAdapter(undefined, async () => {
+    throw new Error("simulated resume failure that never recovers");
+  });
+  const scratchRoot =
+    process.env.UAW_LANE_SCRATCH ?? process.env.RUNNER_TEMP ?? tmpdir();
+  await mkdir(scratchRoot, { recursive: true });
+  const root = await mkdtemp(join(scratchRoot, "auto-iteration-m4-stuck-recovery-"));
+  const projectDirectory = join(root, "Project");
+  await mkdir(projectDirectory);
+  await git(projectDirectory, "init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await git(projectDirectory, "add", "baseline.txt");
+  await git(projectDirectory, "commit", "-m", "test: baseline");
+  const baselineCommitSha = await git(projectDirectory, "rev-parse", "HEAD");
+  const backend = await createWorkbenchBackend({
+    projectDirectory,
+    databasePath: join(root, "workbench.sqlite"),
+    adapter,
+  });
+  t.after(async () => {
+    await backend.close().catch(() => undefined);
+    await removeTree(root);
+  });
+  const service = backend.autoIteration;
+  assert.ok(service, "the backend must expose the auto-iteration service");
+
+  const supervisorSessionId = await startSupervisor(backend, "m4 stuck-recovery supervisor");
+  await service.bindInitialSupervisor({
+    roleSlotId: "project-supervisor",
+    sessionId: supervisorSessionId,
+  });
+  const supervisorServer = service.mcpServerForSession(supervisorSessionId);
+  const submitted = await callTool(supervisorServer, "submit_work_order", {
+    requestIdempotencyKey: "m4-stuck-recovery-submit-1",
+    expectedVersion: 1,
+    observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+    workOrder: workOrderSubmission(profile, baselineCommitSha),
+  });
+  assert.equal(submitted.kind, "work-order-submitted");
+  const workOrderId = (submitted.workOrder as Record<string, unknown>).workOrderId as string;
+  const attemptId = (submitted.attempt as Record<string, unknown>).attemptId as string;
+  const workerSessionId = await waitFor("worker Session binding", () => {
+    const order = findWorkOrder(service.authority.readAutoIterationOverview(), workOrderId);
+    return order?.workerSessionBound ? order.workerSessionId ?? undefined : undefined;
+  });
+  const handoff = await callTool(
+    service.mcpServerForSession(workerSessionId),
+    "submit_handoff",
+    {
+      requestIdempotencyKey: "m4-stuck-recovery-handoff-1",
+      expectedVersion: 1,
+      observedTenure: { roleSlotId: "project-supervisor", generation: 1 },
+      handoff: {
+        idempotencyKey: {
+          workOrderId,
+          attemptId,
+          handoffId: "handoff-m4-stuck-recovery-1",
+        },
+        body: "Delivered while every wakeup resume fails.",
+        artifactIds: [],
+      },
+    },
+  );
+  assert.equal(handoff.kind, "handoff-submitted");
+
+  // Wait past both the failed wakeup attempt AND its own recovery probe
+  // (a second, independent resume the existing machinery tries automatically)
+  // so the Session's lifecycle_status is durably `recovery-required`, not
+  // transiently mid-retry.
+  await waitFor(
+    "the failed wakeup and its own failed recovery probe",
+    () => (adapter.trace.filter((entry) => entry.startsWith("resume:")).length >= 2
+      ? adapter.trace
+      : undefined),
+  );
+  const stuckOrder = await waitFor("the order reading supervisor-recovering", () => {
+    const order = findWorkOrder(service.authority.readAutoIterationOverview(), workOrderId);
+    return order?.waitingFor === "supervisor-recovering" ? order : undefined;
+  });
+  assert.equal(stuckOrder.status, "awaiting-review");
 });
