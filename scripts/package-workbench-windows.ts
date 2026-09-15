@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const PRODUCTION_MANIFEST = {
   name: "synchronized-intellect-network",
   productName: "Synchronized Intellect Network",
-  version: "0.0.0",
+  version: "0.1.0",
   private: true,
   type: "module",
   main: "main/main.js",
