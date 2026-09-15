@@ -23,6 +23,7 @@ import {
 } from "../coordinator/index.ts";
 import type {
   AutoIterationProjectAuthority,
+  Cursor,
   DurableRuntimeEndpointId,
   PendingAutoIterationOutboxEntry,
   ProjectChannel,
@@ -459,12 +460,25 @@ interface AutoIterationServiceOptions {
   };
 }
 
+class AutoIterationJobStillRunningError extends Error {
+  constructor(jobId: string) {
+    super(`execution job still running: ${jobId}`);
+    this.name = "AutoIterationJobStillRunningError";
+  }
+}
+
 function createBackendAutoIterationService(
   options: AutoIterationServiceOptions,
 ): WorkbenchAutoIterationService {
   const { channel, adapter, projectDirectory } = options;
   const authority: AutoIterationProjectAuthority = channel.autoIteration;
   const sessionAuthority: SessionAuthority = createSessionAuthority();
+  // Issue #8 M2: bridges `startHostSession` to the `bindInitialSupervisor`
+  // call the same caller makes moments later, so the durable tenure record
+  // (not an in-memory table that a reopen would lose) ends up holding the
+  // Session's own creation parameters. Entries live only between the two
+  // calls; once bound, the ledger row is the source of truth.
+  const pendingHostSessionParameters = new Map<string, SessionCreationParameters>();
   const arbiter: SessionTurnArbiter = createSessionTurnArbiter();
   const workspaceManager = createWorkspaceManager({
     repositoryPath: projectDirectory,
@@ -538,6 +552,12 @@ function createBackendAutoIterationService(
     ) {
       throw new Error("artifact-capture-job-mismatch");
     }
+    // Issue #8 M1: a handoff whose execution job has not finished is not a
+    // delivery ("background tests still running" is not done). The durable
+    // job record carries the status signal; refusal stays readable.
+    if (job.status === "queued" || job.status === "running") {
+      throw new AutoIterationJobStillRunningError(jobId);
+    }
     if (
       job.status !== "succeeded" ||
       job.output?.kind !== "captured-artifact"
@@ -610,6 +630,15 @@ function createBackendAutoIterationService(
       try {
         preparedRequest = await captureHandoffArtifacts(request);
       } catch (error) {
+        if (error instanceof AutoIterationJobStillRunningError) {
+          return {
+            kind: "rejected",
+            requestIdempotencyKey: request.requestIdempotencyKey,
+            currentVersion: request.expectedVersion,
+            operation: request.kind,
+            category: "job-still-running",
+          };
+        }
         console.warn(
           "[auto-iteration] handoff artifact capture rejected",
           request.handoff.idempotencyKey.attemptId,
@@ -665,7 +694,9 @@ function createBackendAutoIterationService(
     const supervisor = authority.readAutoIterationOverview().supervisor;
     if (supervisor === null || supervisor.status !== "active") return;
     if (observation.sessionId !== supervisor.sessionId) return;
-    const creation = hostSessionCreationParameters.get(supervisor.sessionId);
+    const creation =
+      hostSessionCreationParameters.get(supervisor.sessionId) ??
+      authority.readSupervisorSessionCreationParameters(supervisor.sessionId);
     if (creation === undefined) {
       // Without host-known creation parameters (e.g. after a Project reopen)
       // the host cannot honestly name a successor Session; the supervisor
@@ -750,10 +781,13 @@ function createBackendAutoIterationService(
     readonly roleSlotId: string;
     readonly sessionId: string;
   }) {
+    const sessionCreationParameters = pendingHostSessionParameters.get(request.sessionId);
+    pendingHostSessionParameters.delete(request.sessionId);
     const binding = await authority.bindInitialSupervisor({
       roleSlotId: request.roleSlotId,
       sessionId: request.sessionId,
       generation: 1,
+      ...(sessionCreationParameters === undefined ? {} : { sessionCreationParameters }),
     });
     sessionAuthority.bindSession({
       actor: {
@@ -825,6 +859,43 @@ function createBackendAutoIterationService(
     } catch {
       return true;
     }
+  }
+
+  /** Every handoff whose wakeup entry is still pending, in delivery order. */
+  async function pendingWakeupHandoffs(
+    roleSlotId: string,
+  ): Promise<HandoffIdempotencyKey[]> {
+    const entries = await authority.readPendingOutbox();
+    const handoffs: HandoffIdempotencyKey[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      if (entry.kind !== "inbox-wakeup") continue;
+      const payload = entry.payload as {
+        readonly roleSlotId?: string;
+        readonly handoff?: HandoffIdempotencyKey;
+      };
+      if (payload?.roleSlotId !== roleSlotId || payload.handoff === undefined) {
+        continue;
+      }
+      const dedupe = `${payload.handoff.workOrderId}\u0000${payload.handoff.attemptId}\u0000${payload.handoff.handoffId}`;
+      if (seen.has(dedupe)) continue;
+      seen.add(dedupe);
+      handoffs.push(payload.handoff);
+    }
+    return handoffs;
+  }
+
+  /** One bounded line per wakeup, however many handoffs are pending. */
+  function supervisorWakeupSummary(workOrderIds: readonly string[]): string {
+    const listed = workOrderIds.slice(0, 8);
+    const rest = workOrderIds.length - listed.length;
+    return (
+      `Workbench auto-iteration: ${workOrderIds.length} worker handoff` +
+      `${workOrderIds.length === 1 ? "" : "s"} await${workOrderIds.length === 1 ? "s" : ""} your review ` +
+      `(work order${listed.length === 1 ? "" : "s"}: ${listed.join(", ")}` +
+      `${rest > 0 ? `; and ${rest} more` : ""}). ` +
+      `Use the read_inbox tool, then submit_review_decision.`
+    );
   }
 
   async function startSessionForAutoIteration(options_: {
@@ -923,6 +994,37 @@ function createBackendAutoIterationService(
     }
   }
 
+  /**
+   * Issue #8 M2: `channel.act` resolves at durable acceptance, before the
+   * Runtime attempt (resume/start/send) is even tried (w342 evidence §7.b).
+   * A wakeup continue whose resume lands in `recovery-required` must not be
+   * treated as delivered, or `markHandoffIncluded` would falsely seal a
+   * receipt for input the parent Session never actually received. Waits on
+   * the command's own durable update stream for its terminal kind.
+   */
+  async function awaitWakeupDelivery(commandId: string, after: Cursor): Promise<boolean> {
+    const iterator = channel.observe({ after })[Symbol.asyncIterator]();
+    try {
+      while (!closed) {
+        const next = await iterator.next();
+        if (next.done) return false;
+        const update = next.value;
+        if (update.commandId !== commandId) continue;
+        if (update.kind === "completed") return true;
+        if (
+          update.kind === "recovery-required" ||
+          update.kind === "failed" ||
+          update.kind === "quota-paused"
+        ) {
+          return false;
+        }
+      }
+      return false;
+    } finally {
+      await iterator.return?.().catch(() => undefined);
+    }
+  }
+
   async function wakeSupervisor(request: {
     readonly roleSlotId: string;
     readonly handoff: {
@@ -934,22 +1036,15 @@ function createBackendAutoIterationService(
     const supervisor = authority.readAutoIterationOverview().supervisor;
     if (supervisor === null || supervisor.status !== "active") return false;
     if (arbiter.busy(supervisor.sessionId)) return false;
-    if (await sessionInFlight(supervisor.sessionId)) return false;
-    const session = await sessionSummary(supervisor.sessionId);
-    if (session === undefined || !session.resumable) return false;
-    const resumeIdentity = await resumeIdentityFor(
-      supervisor.sessionId,
-      session.profile,
-    );
-    // w300: a bound Session's resume re-issues a fresh binding (supervisor
-    // ruling); the Session id is already known so the pipe serves live.
     const wakeupKey = randomUUID();
     const mcpBinding = options.workbenchBindings.reserveForSession(
       wakeupKey,
       supervisor.sessionId,
     );
-    // Same-Session arbitration: the wakeup runs on the per-Session arbiter,
-    // never on a Project-wide submission tail.
+    // Claim the arbiter slot before any await so a second wakeup entry
+    // handled in the same drain pass cannot queue a duplicate turn behind
+    // this one (w267b §3: same-Session arbitration, different Sessions in
+    // parallel).
     void arbiter
       .submit(supervisor.sessionId, "auto-wakeup", async () => {
         if (closed) {
@@ -957,6 +1052,30 @@ function createBackendAutoIterationService(
           return;
         }
         try {
+          if (await sessionInFlight(supervisor.sessionId)) {
+            options.workbenchBindings.release(wakeupKey);
+            return;
+          }
+          const session = await sessionSummary(supervisor.sessionId);
+          if (session === undefined || !session.resumable) {
+            options.workbenchBindings.release(wakeupKey);
+            return;
+          }
+          const resumeIdentity = await resumeIdentityFor(
+            supervisor.sessionId,
+            session.profile,
+          );
+          // Issue #8 §3 wakeup: an idle parent gets ONE bounded summary that
+          // carries every handoff still pending at wake time; arrivals during
+          // the turn stay pending and wake at the next turn boundary.
+          const pendingHandoffs = await pendingWakeupHandoffs(request.roleSlotId);
+          if (pendingHandoffs.length === 0) {
+            options.workbenchBindings.release(wakeupKey);
+            return;
+          }
+          // w300: a bound Session's resume re-issues a fresh binding
+          // (supervisor ruling); the Session id is already known so the pipe
+          // serves live.
           const receipt = await channel.act(
             Object.freeze({
               kind: "direct" as const,
@@ -971,19 +1090,46 @@ function createBackendAutoIterationService(
               ...(mcpBinding === undefined
                 ? {}
                 : { workbenchMcp: mcpBinding.bootstrap }),
-              input:
-                `Workbench auto-iteration: a worker handoff awaits your review ` +
-                `(work order ${request.handoff.workOrderId}). ` +
-                `Use the read_inbox tool, then submit_review_decision.`,
+              input: supervisorWakeupSummary(
+                pendingHandoffs.map((handoff) => handoff.workOrderId),
+              ),
             }),
             resumeIdentity === undefined
               ? undefined
               : Object.freeze({ endpointId: resumeIdentity.endpointId }),
           );
-          await authority.markHandoffIncluded({
-            handoff: request.handoff,
-            parentCommandId: receipt.commandId,
-          });
+          // Issue #8 M2: only a continue that truly became parent input
+          // (the command reached `completed`, not `recovery-required` or
+          // similar) may seal the second-level receipt. A non-delivery
+          // leaves every pending handoff's inbox-wakeup entry pending, so
+          // the next wakeup opportunity carries it again.
+          const delivered = await awaitWakeupDelivery(
+            receipt.commandId,
+            receipt.acceptedCursor,
+          );
+          if (!delivered) {
+            options.workbenchBindings.release(wakeupKey);
+            console.warn(
+              "[auto-iteration] supervisor wakeup did not become parent input; deferred",
+              request.handoff.workOrderId,
+            );
+            void drainPendingOutbox().catch(() => undefined);
+            return;
+          }
+          for (const handoff of pendingHandoffs) {
+            try {
+              await authority.markHandoffIncluded({
+                handoff,
+                parentCommandId: receipt.commandId,
+              });
+            } catch (error) {
+              console.warn(
+                "[auto-iteration] supervisor wakeup inclusion deferred",
+                handoff.workOrderId,
+                error instanceof Error ? error.message : error,
+              );
+            }
+          }
         } catch (error) {
           options.workbenchBindings.release(wakeupKey);
           console.warn(
@@ -1065,13 +1211,20 @@ function createBackendAutoIterationService(
         return false;
       }
       const overview = authority.readAutoIterationOverview();
-      // w338: quota-blocked accounts do not dispatch new workers; the entry
-      // stays pending and a later availability observation re-drains it.
-      if (overview.quotaWaiting) return false;
       const workOrder = overview.workOrders.find(
         (order) => order.currentAttemptId === attemptId,
       );
       if (workOrder === undefined || workOrder.workerSessionBound) return false;
+      // Issue #8 M2: block only when THIS work order's own pool is waiting;
+      // a different pool's exhaustion (overview.quotaWaiting can be true for
+      // any pool) must not stall an attempt whose own pool is fine. The
+      // entry stays pending and the same entry resumes after its pool
+      // releases.
+      if (workOrder.status === "waiting-for-quota") return false;
+      // Issue #8 M1: the per-Project worker concurrency cap. A queued work
+      // order's start-attempt entry is the queue slot; it dispatches at a
+      // drain once an earlier delivery or failure frees a worker.
+      if (workOrder.status === "queued") return false;
       attemptStarts.add(attemptId);
       try {
         const existingWorkspace = await workspaceManager.readWorkspace(attemptId);
@@ -1475,6 +1628,12 @@ function createBackendAutoIterationService(
       // legitimately empty.
       if (sessionId !== undefined) {
         options.workbenchBindings.associate(hostKey, sessionId);
+        // Issue #8 M2: held only until the caller's bindInitialSupervisor
+        // call picks it up and persists it in the tenure record.
+        pendingHostSessionParameters.set(sessionId, {
+          endpointId: request.endpointId,
+          profile: request.profile,
+        });
       }
       return sessionId;
     },

@@ -544,6 +544,7 @@ export interface CoordinatorToolRejectedResponse {
     | "forbidden"
     | "idempotency-conflict"
     | "invalid-request"
+    | "job-still-running"
     | "not-found"
     | "stale-generation"
     | "stale-version"
@@ -595,6 +596,13 @@ export interface InitialSupervisorBinding {
   readonly roleSlotId: string;
   readonly sessionId: string;
   readonly generation: number;
+  /**
+   * Issue #8 M2: the parameters this Session was actually created with
+   * (endpoint/model/effort/mode; never a credential). Persisted into the
+   * tenure record so a later ≥70%-context rotation can mirror them into a
+   * successor even after a Project reopen loses any in-memory copy.
+   */
+  readonly sessionCreationParameters?: SessionCreationParameters;
 }
 
 export interface AttemptSessionBinding {
@@ -636,7 +644,13 @@ export interface SupervisorRotationCompletion {
 /** Host-side read for the sanitized renderer projection; ids stay host-side. */
 export interface AutoIterationWorkOrderOverview {
   readonly workOrderId: string;
-  readonly status: WorkOrderStatus;
+  /**
+   * Durable business state, except `queued`: a work order whose worker has
+   * not started while the per-Project worker concurrency cap holds reads as
+   * `queued`. The durable row stays `executing` (the v7 column CHECK carries
+   * no `queued`); the queue itself is the pending start-attempt outbox entry.
+   */
+  readonly status: WorkOrderStatus | "queued";
   readonly currentAttemptId: string;
   readonly attemptCount: number;
   readonly workerSessionBound: boolean;
@@ -704,6 +718,10 @@ export interface AutoIterationHostLifecycle {
   ): Promise<SupervisorTenure>;
   /** Synchronous like the channel's other snapshot reads; serves the live view. */
   readAutoIterationOverview(): AutoIterationOverview;
+  /** Host-only lookup used to mirror the active supervisor after a Project reopen. */
+  readSupervisorSessionCreationParameters(
+    sessionId: string,
+  ): SessionCreationParameters | undefined;
   /** Sensor facts land in the Project transaction, not a side file. */
   observeQuota(observation: QuotaObservation): Promise<void>;
   observeContextUsage(observation: ContextUsageObservation): Promise<void>;

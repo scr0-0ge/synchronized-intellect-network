@@ -19,6 +19,7 @@ export interface WorkbenchAutoIterationWorkOrderView {
   readonly workOrderId: string;
   readonly status:
     | "executing"
+    | "queued"
     | "delivered"
     | "awaiting-review"
     | "review-approved"

@@ -4103,6 +4103,7 @@ function sanitizeView(
 
 const autoIterationStatuses: readonly WorkbenchAutoIterationWorkOrderView["status"][] = [
   "executing",
+  "queued",
   "delivered",
   "awaiting-review",
   "review-approved",
