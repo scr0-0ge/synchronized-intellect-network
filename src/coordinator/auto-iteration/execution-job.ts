@@ -411,10 +411,21 @@ export function createExecutionJobRunner(options: {
       }
       const resolved = await git(record, log, ["rev-parse", "--verify", "HEAD^{commit}"]);
       if (resolved.code !== 0) return { succeeded: false, output: null, exit: resolved };
+      const clean = await git(record, log, ["status", "--porcelain"]);
+      if (clean.code !== 0 || clean.stdout.trim().length > 0) {
+        return {
+          succeeded: false,
+          output: null,
+          exit:
+            clean.code === 0
+              ? { ...clean, code: 1, stderr: "workspace remained dirty after capture" }
+              : clean,
+        };
+      }
       return {
         succeeded: true,
         output: { kind: "captured-artifact", commitSha: resolved.stdout.trim() },
-        exit: resolved,
+        exit: clean,
       };
     }
 

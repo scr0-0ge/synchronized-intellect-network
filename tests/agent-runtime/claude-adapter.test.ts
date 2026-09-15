@@ -960,7 +960,10 @@ test("Claude start streams one turn through the normalized Runtime seam", async 
   assert.deepEqual(observable.effectiveProfile(), profile);
   assert.deepEqual(
     sessionTransport.sent.map((message) => message.type),
-    ["control_request", "control_request", "user", "control_response"],
+    // w338: the active context probe (get_context_usage) leaves right after
+    // the Stop-hook success reply; an unscripted probe answer degrades
+    // silently and the completed turn is unchanged.
+    ["control_request", "control_request", "user", "control_response", "control_request"],
   );
 });
 

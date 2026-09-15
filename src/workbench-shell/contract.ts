@@ -50,6 +50,8 @@ export const WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL =
   "workbench:read-annual-report-job";
 export const WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL =
   "workbench:open-annual-report-output";
+export const WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL =
+  "workbench:start-auto-iteration-supervisor";
 export const WORKBENCH_SELECT_PROJECT_CHANNEL = "workbench:select-project";
 export const WORKBENCH_REMOVE_SESSION_CHANNEL = "workbench:remove-session";
 export const WORKBENCH_MUTATE_SESSION_METADATA_CHANNEL =
@@ -1642,6 +1644,27 @@ export interface WorkbenchAnnualReportSnapshot {
   readonly records: readonly WorkbenchAnnualReportStoredRecord[] | null;
 }
 
+export interface WorkbenchStartAutoIterationSupervisorRequest
+  extends WorkbenchDirectSessionProfileSelection {
+  /** The current Project's renderer-scoped selection key. */
+  readonly projectId: string;
+}
+
+export type WorkbenchStartAutoIterationSupervisorResult =
+  | Readonly<{ ok: true; status: "started" }>
+  | Readonly<{
+      ok: false;
+      error: Readonly<{
+        category:
+          | "already-active"
+          | "invalid-project"
+          | "invalid-profile-selection"
+          | "start-failed"
+          | "auto-iteration-unavailable";
+        message: string;
+      }>;
+    }>;
+
 export type WorkbenchDesiredDefault =
   | {
       readonly kind: "resolved";
@@ -2148,6 +2171,9 @@ export interface WorkbenchRendererBridge
   openAnnualReportOutput?(
     request: WorkbenchAnnualReportProjectRequest,
   ): Promise<WorkbenchAnnualReportOpenResult>;
+  startAutoIterationSupervisor?(
+    request: WorkbenchStartAutoIterationSupervisorRequest,
+  ): Promise<WorkbenchStartAutoIterationSupervisorResult>;
   interruptActiveTurn?(
     request: WorkbenchInterruptRequest,
   ): Promise<WorkbenchInterruptResult>;

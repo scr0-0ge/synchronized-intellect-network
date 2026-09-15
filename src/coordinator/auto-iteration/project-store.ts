@@ -7,6 +7,7 @@ import type {
   Handoff,
   HandoffIdempotencyKey,
   HandoffReceipt,
+  IntegrationCandidate,
   InboxEntry,
   PendingAutoIterationOutboxEntry,
   QuotaObservation,
@@ -130,6 +131,7 @@ type OutboxRow = {
   outbox_entry_id: string;
   kind: PendingAutoIterationOutboxEntry["kind"];
   payload_json: string;
+  state: "pending" | "completed";
   version: number;
 };
 
@@ -633,6 +635,19 @@ export class AutoIterationProjectStore {
     return rows.map(hydrateReview);
   }
 
+  review(reviewDecisionId: string): ReviewDecision | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT review_decision_id, work_order_id, attempt_id, handoff_id,
+                handoff_version, decided_by_role_slot_id, decided_by_generation,
+                decision, reason, target_role_slot_id, version
+           FROM auto_iteration_review_decisions
+          WHERE review_decision_id = ?`,
+      )
+      .get(reviewDecisionId) as ReviewRow | undefined;
+    return row === undefined ? undefined : hydrateReview(row);
+  }
+
   insertReview(decision: ReviewDecision): void {
     this.database
       .prepare(
@@ -681,10 +696,181 @@ export class AutoIterationProjectStore {
       .run(this.projectId, kind, dedupeKey);
   }
 
+  completeReviewDisposition(
+    reviewDecisionId: string,
+    candidate?: IntegrationCandidate,
+  ): boolean {
+    const row = this.database
+      .prepare(
+        `SELECT outbox_entry_id, kind, payload_json, state, version
+           FROM auto_iteration_outbox
+          WHERE project_id = ? AND kind = 'review-disposed' AND dedupe_key = ?`,
+      )
+      .get(this.projectId, reviewDecisionId) as OutboxRow | undefined;
+    if (row === undefined) throw new Error("review-disposed-outbox-not-found");
+    const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    const existingCandidate = payload.candidate as IntegrationCandidate | undefined;
+    if (row.state === "completed") {
+      if (JSON.stringify(existingCandidate) !== JSON.stringify(candidate)) {
+        throw new Error("review-disposed-outbox-conflict");
+      }
+      return false;
+    }
+    const nextPayload =
+      candidate === undefined
+        ? payload
+        : { ...payload, candidate: structuredClone(candidate) };
+    const changed = this.database
+      .prepare(
+        `UPDATE auto_iteration_outbox
+            SET payload_json = ?, state = 'completed', version = version + 1
+          WHERE outbox_entry_id = ? AND state = 'pending' AND version = ?`,
+      )
+      .run(JSON.stringify(nextPayload), row.outbox_entry_id, row.version);
+    if (Number(changed.changes) !== 1) {
+      throw new Error("review-disposed-outbox-version-conflict");
+    }
+    return true;
+  }
+
+  candidates(workOrderId: string): readonly IntegrationCandidate[] {
+    const rows = this.database
+      .prepare(
+        `SELECT outbox_entry_id, kind, payload_json, state, version
+           FROM auto_iteration_outbox
+          WHERE project_id = ? AND kind = 'review-disposed' AND state = 'completed'
+          ORDER BY rowid`,
+      )
+      .all(this.projectId) as unknown as OutboxRow[];
+    const candidates: IntegrationCandidate[] = [];
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json) as {
+        readonly candidate?: IntegrationCandidate;
+        readonly integrationOutcome?: IntegrationCandidate["outcome"];
+      };
+      if (
+        payload.candidate !== undefined &&
+        payload.candidate.handoffs.some(
+          (handoff) => handoff.workOrderId === workOrderId,
+        )
+      ) {
+        candidates.push(
+          payload.integrationOutcome === undefined
+            ? structuredClone(payload.candidate)
+            : {
+                ...structuredClone(payload.candidate),
+                outcome: structuredClone(payload.integrationOutcome),
+              },
+        );
+      }
+    }
+    return candidates;
+  }
+
+  /**
+   * Writes the terminal integration outcome next to its frozen candidate in
+   * the completed review-disposed payload. Idempotent for the same outcome;
+   * refuses to overwrite a different recorded outcome. No schema change: the
+   * v7 outbox payload carries it.
+   */
+  completeIntegration(
+    integrationCandidateId: string,
+    outcome: IntegrationCandidate["outcome"],
+  ): { applied: boolean; workOrderId: string; reviewDecisionId: string } {
+    const row = this.database
+      .prepare(
+        `SELECT outbox_entry_id, dedupe_key, payload_json, state, version
+           FROM auto_iteration_outbox
+          WHERE project_id = ? AND kind = 'review-disposed'
+            AND json_extract(payload_json, '$.candidate.integrationCandidateId') = ?`,
+      )
+      .get(this.projectId, integrationCandidateId) as
+      | (OutboxRow & { dedupe_key: string })
+      | undefined;
+    if (row === undefined || row.state !== "completed") {
+      throw new Error("integration-candidate-outbox-not-found");
+    }
+    const payload = JSON.parse(row.payload_json) as {
+      readonly candidate?: IntegrationCandidate;
+      readonly integrationOutcome?: IntegrationCandidate["outcome"];
+    };
+    if (payload.candidate === undefined || payload.candidate.handoffs.length === 0) {
+      throw new Error("integration-candidate-outbox-not-found");
+    }
+    if (payload.integrationOutcome !== undefined) {
+      if (
+        JSON.stringify(payload.integrationOutcome) !== JSON.stringify(outcome)
+      ) {
+        throw new Error("integration-outcome-conflict");
+      }
+      return {
+        applied: false,
+        workOrderId: payload.candidate.handoffs[0]!.workOrderId,
+        reviewDecisionId: row.dedupe_key,
+      };
+    }
+    const changed = this.database
+      .prepare(
+        `UPDATE auto_iteration_outbox
+            SET payload_json = ?, version = version + 1
+          WHERE outbox_entry_id = ? AND version = ?`,
+      )
+      .run(
+        JSON.stringify({ ...payload, integrationOutcome: structuredClone(outcome) }),
+        row.outbox_entry_id,
+        row.version,
+      );
+    if (Number(changed.changes) !== 1) {
+      throw new Error("integration-outcome-version-conflict");
+    }
+    return {
+      applied: true,
+      workOrderId: payload.candidate.handoffs[0]!.workOrderId,
+      reviewDecisionId: row.dedupe_key,
+    };
+  }
+
+  /** Frozen candidates that still owe an integration outcome, in rowid order. */
+  integrationBacklog(): readonly {
+    readonly candidate: IntegrationCandidate;
+    readonly reviewDecisionId: string;
+  }[] {
+    const rows = this.database
+      .prepare(
+        `SELECT outbox_entry_id, dedupe_key, payload_json, state, version
+           FROM auto_iteration_outbox
+          WHERE project_id = ? AND kind = 'review-disposed' AND state = 'completed'
+            AND json_extract(payload_json, '$.integrationOutcome') IS NULL
+          ORDER BY rowid`,
+      )
+      .all(this.projectId) as unknown as (OutboxRow & { dedupe_key: string })[];
+    const backlog: {
+      readonly candidate: IntegrationCandidate;
+      readonly reviewDecisionId: string;
+    }[] = [];
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json) as {
+        readonly candidate?: IntegrationCandidate;
+      };
+      if (payload.candidate === undefined || payload.candidate.handoffs.length === 0) {
+        continue;
+      }
+      const workOrder = this.workOrder(payload.candidate.handoffs[0]!.workOrderId);
+      if (workOrder === undefined || workOrder.status !== "awaiting-integration") {
+        continue;
+      }
+      backlog.push({
+        candidate: structuredClone(payload.candidate),
+        reviewDecisionId: row.dedupe_key,
+      });
+    }
+    return backlog;
+  }
+
   pendingOutbox(): readonly PendingAutoIterationOutboxEntry[] {
     const rows = this.database
       .prepare(
-        `SELECT outbox_entry_id, kind, payload_json, version
+        `SELECT outbox_entry_id, kind, payload_json, state, version
            FROM auto_iteration_outbox
           WHERE project_id = ? AND state = 'pending' ORDER BY rowid`,
       )

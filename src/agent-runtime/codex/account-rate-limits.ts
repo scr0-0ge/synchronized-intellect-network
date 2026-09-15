@@ -63,12 +63,49 @@ function unknownObservation(
   options: ObserveCodexAccountRateLimitsOptions,
   observedAt: number,
 ): QuotaObservation {
+  return quotaObservationFromRead({
+    quotaPoolId: options.quotaPoolId,
+    observedAt,
+    value: undefined,
+  });
+}
+
+/**
+ * Maps one already-performed `account/rateLimits/read` response into the
+ * shared-account pool shape. Pure: the read itself happens exactly once at
+ * the caller (w257 start/resume seam), and this only hands the reading over.
+ */
+export function quotaObservationFromRead(options: {
+  readonly quotaPoolId: string;
+  readonly observedAt: number;
+  readonly value: unknown;
+}): QuotaObservation {
+  if (!isRecord(options.value) || !isRecord(options.value.rateLimits)) {
+    return Object.freeze({
+      quotaPoolId: options.quotaPoolId,
+      source: "codex-account:account/rateLimits/read",
+      observedAt: options.observedAt,
+      status: "unknown",
+      windows: Object.freeze([]),
+    });
+  }
+  const primary = readWindow("primary", options.value.rateLimits.primary);
+  const secondary = readWindow("secondary", options.value.rateLimits.secondary);
+  if (primary === undefined || secondary === undefined) {
+    return Object.freeze({
+      quotaPoolId: options.quotaPoolId,
+      source: "codex-account:account/rateLimits/read",
+      observedAt: options.observedAt,
+      status: "unknown",
+      windows: Object.freeze([]),
+    });
+  }
   return Object.freeze({
     quotaPoolId: options.quotaPoolId,
     source: "codex-account:account/rateLimits/read",
-    observedAt,
-    status: "unknown",
-    windows: Object.freeze([]),
+    observedAt: options.observedAt,
+    status: "observed",
+    windows: Object.freeze([primary, secondary]),
   });
 }
 
@@ -82,20 +119,9 @@ export async function observeCodexAccountRateLimits(
   } catch {
     return unknownObservation(options, options.clock.now());
   }
-  const observedAt = options.clock.now();
-  if (!isRecord(value) || !isRecord(value.rateLimits)) {
-    return unknownObservation(options, observedAt);
-  }
-  const primary = readWindow("primary", value.rateLimits.primary);
-  const secondary = readWindow("secondary", value.rateLimits.secondary);
-  if (primary === undefined || secondary === undefined) {
-    return unknownObservation(options, observedAt);
-  }
-  return Object.freeze({
+  return quotaObservationFromRead({
     quotaPoolId: options.quotaPoolId,
-    source: "codex-account:account/rateLimits/read",
-    observedAt,
-    status: "observed",
-    windows: Object.freeze([primary, secondary]),
+    observedAt: options.clock.now(),
+    value,
   });
 }

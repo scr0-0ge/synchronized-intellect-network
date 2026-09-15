@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { connect } from "node:net";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import type {
   NormalizedRuntimeEvent,
@@ -69,6 +71,28 @@ const turnEvents: readonly NormalizedRuntimeEvent[] = Object.freeze([
   Object.freeze({ kind: "agent-message" as const, text: "FIXTURE_TURN_BODY" }),
   Object.freeze({ kind: "turn-completed" as const, status: "completed" as const }),
 ]);
+
+const execFileAsync = promisify(execFile);
+
+async function initializeGitProject(projectDirectory: string): Promise<string> {
+  const run = (...args: string[]) =>
+    execFileAsync("git", args, {
+      cwd: projectDirectory,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "Auto Iteration Test",
+        GIT_AUTHOR_EMAIL: "auto-iteration@example.invalid",
+        GIT_COMMITTER_NAME: "Auto Iteration Test",
+        GIT_COMMITTER_EMAIL: "auto-iteration@example.invalid",
+      },
+      windowsHide: true,
+    });
+  await run("init", "--initial-branch=demo");
+  await writeFile(join(projectDirectory, "baseline.txt"), "baseline\n", "utf8");
+  await run("add", "baseline.txt");
+  await run("commit", "-m", "test: baseline");
+  return (await run("rev-parse", "HEAD")).stdout.trim();
+}
 
 class RecordingBinding implements ResumableRuntimeBinding {
   readonly profile = profile;
@@ -198,6 +222,7 @@ test("the product-created worker Session gets workbenchMcp through the productio
   const root = await mkdtemp(join(tmpdir(), "w300-wiring-"));
   const projectDirectory = join(root, "Project");
   await mkdir(projectDirectory);
+  const baselineCommitSha = await initializeGitProject(projectDirectory);
   const databasePath = join(root, "workbench.sqlite");
   const adapter = new RecordingLoopAdapter();
   const backend = await createWorkbenchBackend({
@@ -286,7 +311,7 @@ test("the product-created worker Session gets workbenchMcp through the productio
     workOrder: {
       objective: "Fixture objective",
       acceptanceCriteria: ["fixture criterion"],
-      baselineCommitSha: "0123456789abcdef0123456789abcdef01234567",
+      baselineCommitSha,
       territory: { writePaths: ["src/"], readOnlyPaths: ["docs/"] },
       responsibleRoleSlotId: "project-supervisor",
       completionCondition: { gitIntegration: "not-required" },
@@ -300,6 +325,11 @@ test("the product-created worker Session gets workbenchMcp through the productio
     .attemptId as string;
   const workerStart = await waitFor("worker start request", () =>
     adapter.startRequests[1],
+  );
+  assert.notEqual(
+    workerStart.projectDirectory,
+    projectDirectory,
+    "the worker runtime must start in its attempt worktree",
   );
   const workerSpec = workerStart.workbenchMcp;
   assert.ok(workerSpec, "the worker start must carry a Workbench binding");

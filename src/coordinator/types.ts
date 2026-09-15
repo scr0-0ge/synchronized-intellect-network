@@ -161,6 +161,8 @@ export type DirectProjectCommand =
 /** Workbench-private authority resolved before durable command acceptance. */
 export interface ProjectCommandRuntimeContext {
   readonly endpointId: DurableRuntimeEndpointId;
+  /** Runtime-only cwd for a product-managed attempt; never written to the command envelope. */
+  readonly executionDirectory?: string;
 }
 
 /** One durable selection-to-native route recovered from a Session's commands. */

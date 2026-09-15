@@ -10,15 +10,27 @@ import type {
   RuntimeUsageObserver,
   RuntimeUsageWindow,
   RuntimeInput,
+  RuntimeInputImage,
   RuntimeProgressActivity,
   RuntimeToolActivity,
   RuntimeSteerAvailability,
   SessionProfile,
 } from "../index.ts";
-import { RuntimeAdapterError } from "../index.ts";
+import {
+  RuntimeAdapterError,
+  RUNTIME_INPUT_IMAGE_MAX_BYTES,
+  RUNTIME_INPUT_IMAGE_MAX_COUNT,
+} from "../index.ts";
 import { redactToolActivityCredentials } from "../tool-activity-redaction.ts";
 import { isVendorRecord } from "../vendor-wire.ts";
+import {
+  emitContextUsageObservation,
+} from "../../coordinator/auto-iteration/capability-probe.ts";
+import type { ContextUsageObservation } from "../../coordinator/auto-iteration/contract.ts";
 import { productionClaudeDiagnosticObserver } from "./diagnostics.ts";
+import {
+  observeClaudeContextUsage,
+} from "./context-capability.ts";
 import type { ProviderRequestBudget } from "../provider-request-budget.ts";
 import {
   readClaudeAppliedSettings,
@@ -251,6 +263,12 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
         readonly reject: (error: RuntimeAdapterError) => void;
       }
     | undefined;
+  // Issue #8 Lane C: one active `get_context_usage` probe per completed turn,
+  // issued at the validated Stop-hook boundary. The response may arrive
+  // before the terminal `result` (2.1.267) or after it (2.1.270); either way
+  // it degrades to an unknown observation, never a throw.
+  #contextUsageProbeRequestId: string | undefined;
+  #contextUsageProbeDiagnosticReported = false;
 
   constructor(input: {
     readonly transport: ClaudeCatalogTransport;
@@ -300,7 +318,7 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
   }
 
   async send(input: RuntimeInput): Promise<void> {
-    if (this.#sentInput !== undefined || !isRuntimeInput(input)) {
+    if (this.#sentInput !== undefined || !isRuntimeSendInput(input)) {
       await this.#stopAndThrow("invalid-input");
     }
     this.#sentInput = input.text;
@@ -311,7 +329,17 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
         session_id: "",
         message: {
           role: "user",
-          content: [{ type: "text", text: input.text }],
+          content: [
+            { type: "text", text: input.text },
+            ...(input.images ?? []).map((image) => ({
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: image.mediaType,
+                data: image.base64,
+              },
+            })),
+          ],
         },
         parent_tool_use_id: null,
       });
@@ -740,9 +768,28 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
               response: {},
             },
           });
+          // Issue #8 Lane C: the active context probe leaves right after the
+          // validated Stop-hook reply. No response (an older CLI, or the
+          // subtype absent) degrades silently — a missing probe is never a
+          // turn failure and never produces a synthesized observation.
+          this.#contextUsageProbeDiagnosticReported = false;
+          this.#contextUsageProbeRequestId = `context-usage-${randomUUID()}`;
+          await write(this.#transport, {
+            type: "control_request",
+            request_id: this.#contextUsageProbeRequestId,
+            request: { subtype: "get_context_usage" },
+          });
           continue;
         }
         if (message.type === "control_response") {
+          // Issue #8 Lane C: a reply to the active context probe is consumed
+          // by the probe handler — degrade + diagnostic, never a throw —
+          // before the strict interrupt matching below.
+          if (
+            await this.#handleContextUsageResponse(message, sessionIdentity)
+          ) {
+            continue;
+          }
           const pending = this.#interruptPending;
           const response = record(message.response, "protocol-invalid");
           // The CLI can replay our replies to its Stop/permission callbacks.
@@ -907,7 +954,12 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
             this.#transport,
             sessionIdentity,
             promptSuggestions,
+            (message) => this.#handleContextUsageResponse(message, sessionIdentity),
           );
+          // A CLI that never answered the probe (subtype absent) leaves the
+          // turn untouched: the pending probe is dropped silently, with no
+          // observation and no diagnostic noise per turn.
+          this.#contextUsageProbeRequestId = undefined;
           await this.#transport.stop();
           terminal = true;
           this.#terminal = true;
@@ -1070,6 +1122,58 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
     if (pending === undefined) return;
     this.#interruptPending = undefined;
     pending.reject(error);
+  }
+
+  /**
+   * Consumes the control response that answers this turn's active context
+   * probe (issue #8 Lane C). Returns false for every other response so the
+   * strict interrupt matching stays untouched. A malformed or mismatched
+   * payload degrades to an unknown observation with one per-turn diagnostic —
+   * it never throws and never fails the turn that carried it.
+   */
+  async #handleContextUsageResponse(
+    message: Record<string, unknown>,
+    sessionIdentity: string | undefined,
+  ): Promise<boolean> {
+    const requestId = this.#contextUsageProbeRequestId;
+    if (requestId === undefined) return false;
+    const response = isPlainRecord(message.response) ? message.response : undefined;
+    if (response === undefined || response.request_id !== requestId) {
+      return false;
+    }
+    // Consumed either way; the probe is one-shot per turn.
+    this.#contextUsageProbeRequestId = undefined;
+    const observation = await this.#contextUsageObservation(
+      response,
+      sessionIdentity,
+    );
+    await emitContextUsageObservation(observation);
+    return true;
+  }
+
+  async #contextUsageObservation(
+    response: Record<string, unknown>,
+    sessionIdentity: string | undefined,
+  ): Promise<ContextUsageObservation> {
+    const observation = await observeClaudeContextUsage({
+      sessionId: sessionIdentity ?? "unknown",
+      model: this.#expectedModel,
+      clock: { now: () => Date.now() },
+      // The response has already arrived; no second control request is made.
+      request: async () => response.response,
+    });
+    if (observation.quality !== "authoritative" && !this.#contextUsageProbeDiagnosticReported) {
+      this.#contextUsageProbeDiagnosticReported = true;
+      productionClaudeDiagnosticObserver({
+        kind: "optional-data-unavailable",
+        category: "protocol-invalid",
+        // Same optional-context-usage gate as the passive w257 path; the
+        // active probe's degrade is diagnostics, not a turn failure.
+        gate: "context-usage",
+        row: null,
+      });
+    }
+    return observation;
   }
 
   async #handleToolPermissionRequest(
@@ -1325,6 +1429,8 @@ async function collectPostResultPromptSuggestions(
   transport: ClaudeCatalogTransport,
   sessionIdentity: string | undefined,
   suggestions: string[],
+  /** Issue #8 Lane C: consumes the context probe reply arriving post-result. */
+  onControlResponse?: (message: Record<string, unknown>) => Promise<boolean>,
 ): Promise<void> {
   const finishInput = transport.finishInput;
   if (finishInput === undefined) return;
@@ -1340,7 +1446,11 @@ async function collectPostResultPromptSuggestions(
     const line = await receiveOptionalPostResultLine(transport, remaining);
     if (line === null) return;
     const message = parseOptionalPostResultLine(line);
-    if (message === undefined || message.type !== "prompt_suggestion") continue;
+    if (message === undefined) continue;
+    if (onControlResponse !== undefined && (await onControlResponse(message))) {
+      continue;
+    }
+    if (message.type !== "prompt_suggestion") continue;
     appendPromptSuggestion(
       suggestions,
       readPromptSuggestion(message, sessionIdentity),
@@ -1812,6 +1922,46 @@ function isRuntimeInput(value: RuntimeInput): value is RuntimeInput {
     Object.prototype.hasOwnProperty.call(value, "text") &&
     typeof value.text === "string" &&
     value.text.trim().length > 0
+  );
+}
+
+const runtimeInputImageMediaTypes = new Set<string>(["image/png", "image/jpeg"]);
+
+function isRuntimeInputImage(value: unknown): value is RuntimeInputImage {
+  return (
+    isPlainRecord(value) &&
+    hasExactKeys(value, ["mediaType", "base64"]) &&
+    typeof value.mediaType === "string" &&
+    runtimeInputImageMediaTypes.has(value.mediaType) &&
+    typeof value.base64 === "string" &&
+    value.base64.length > 0 &&
+    Buffer.byteLength(value.base64, "base64") <= RUNTIME_INPUT_IMAGE_MAX_BYTES
+  );
+}
+
+/**
+ * `send`'s own contract: `text` required, plus an optional bounded `images`
+ * array. `steer` deliberately keeps using the stricter `isRuntimeInput` above
+ * unchanged -- mid-turn steering with images is not this lane's scope.
+ */
+function isRuntimeSendInput(value: RuntimeInput): value is RuntimeInput {
+  if (!isPlainRecord(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length === 0 ||
+    keys.length > 2 ||
+    !Object.prototype.hasOwnProperty.call(value, "text") ||
+    typeof value.text !== "string" ||
+    value.text.trim().length === 0
+  ) {
+    return false;
+  }
+  if (keys.length === 1) return true;
+  return (
+    Object.prototype.hasOwnProperty.call(value, "images") &&
+    Array.isArray(value.images) &&
+    value.images.length <= RUNTIME_INPUT_IMAGE_MAX_COUNT &&
+    value.images.every(isRuntimeInputImage)
   );
 }
 

@@ -47,6 +47,8 @@ import {
 } from "./copy/stage-copy.ts";
 import { AnnualReportPanel } from "./annual-report-panel.tsx";
 import { annualReportCopy } from "./copy/annual-report-copy.ts";
+import { AutoIterationPanel } from "./auto-iteration-panel.tsx";
+import { autoIterationCopy } from "./copy/auto-iteration-copy.ts";
 
 export const WorkbenchStage: Component<{
   readonly active: boolean;
@@ -127,6 +129,8 @@ export const WorkbenchStage: Component<{
     setAnnualReportSnapshot(null);
     setAnnualReportStarting(false);
     setAnnualReportError(null);
+    setAutoIterationSupervisorStarting(false);
+    setAutoIterationSupervisorError(null);
     if (selectedProjectId !== null) void readAnnualReport(selectedProjectId, generation);
   });
   onCleanup(clearAnnualReportTimer);
@@ -176,6 +180,41 @@ export const WorkbenchStage: Component<{
     setAnnualReportOpening(false);
     if (!result.ok) setAnnualReportError(result.error.message);
   };
+  const [autoIterationSupervisorStarting, setAutoIterationSupervisorStarting] = createSignal(false);
+  const [autoIterationSupervisorError, setAutoIterationSupervisorError] = createSignal<string | null>(null);
+  const startAutoIterationSupervisor = async (): Promise<void> => {
+    if (autoIterationSupervisorStarting()) return;
+    const selectedProjectId = projectId();
+    const profile = props.profile;
+    if (selectedProjectId === null || rendererBridge?.startAutoIterationSupervisor === undefined) {
+      setAutoIterationSupervisorError(autoIterationCopy.unavailable);
+      return;
+    }
+    const loaded = profile.result;
+    if (
+      profile.phase !== "ready" || loaded?.ok !== true ||
+      profile.selectedEndpointKey === null || profile.selectedModelKey === null ||
+      profile.selectedWorkIntensityKey === null || profile.selectedExecutionModeKey === null ||
+      profile.selectedAccessModeKey === null
+    ) {
+      props.onLoadProfile();
+      setAutoIterationSupervisorError(autoIterationCopy.chooseProfile);
+      return;
+    }
+    setAutoIterationSupervisorStarting(true);
+    setAutoIterationSupervisorError(null);
+    const result = await rendererBridge.startAutoIterationSupervisor({
+      projectId: selectedProjectId,
+      snapshotKey: loaded.profile.snapshotKey,
+      endpointKey: profile.selectedEndpointKey,
+      modelKey: profile.selectedModelKey,
+      workIntensityKey: profile.selectedWorkIntensityKey,
+      executionModeKey: profile.selectedExecutionModeKey,
+      accessModeKey: profile.selectedAccessModeKey,
+    });
+    setAutoIterationSupervisorStarting(false);
+    if (!result.ok) setAutoIterationSupervisorError(result.error.message);
+  };
   const rendererState = () => ({
     result: { ok: true as const, view: props.view },
     selectedKey: props.selected?.key ?? null,
@@ -211,7 +250,16 @@ export const WorkbenchStage: Component<{
         canOpenProject={props.canOpenProject}
         onOpenProject={props.onOpenProject}
         projectOpen={props.projectOpen}
+        autoIterationSupervisorError={autoIterationSupervisorError()}
       />
+      <Show
+        when={
+          props.view.autoIteration.status === "active" &&
+          props.view.autoIteration.supervisor !== null
+        }
+      >
+        <AutoIterationPanel view={props.view.autoIteration} />
+      </Show>
       <Show when={annualReportStarting() || annualReportSnapshot() !== null || annualReportError() !== null}>
         <AnnualReportPanel
           snapshot={annualReportSnapshot()}
@@ -259,6 +307,7 @@ export const WorkbenchStage: Component<{
               onUseAsDefault={props.onUseAsDefault}
               onSubmit={props.onSubmit}
               onStartAnnualReport={() => void startAnnualReport()}
+              onStartAutoIterationSupervisor={() => void startAutoIterationSupervisor()}
               endpointPreferences={props.endpointPreferences}
               subscriptionAuthentication={props.subscriptionAuthentication}
             />
@@ -357,6 +406,7 @@ export const WorkbenchStage: Component<{
                     onSteer={props.onSteer}
                     onSubmit={props.onSubmit}
                     onStartAnnualReport={() => void startAnnualReport()}
+              onStartAutoIterationSupervisor={() => void startAutoIterationSupervisor()}
                     endpointPreferences={props.endpointPreferences}
                     subscriptionAuthentication={props.subscriptionAuthentication}
                   />
@@ -402,6 +452,7 @@ export const WorkbenchStage: Component<{
                 onUseAsDefault={props.onUseAsDefault}
                 onSubmit={props.onSubmit}
                 onStartAnnualReport={() => void startAnnualReport()}
+              onStartAutoIterationSupervisor={() => void startAutoIterationSupervisor()}
                 endpointPreferences={props.endpointPreferences}
                 subscriptionAuthentication={props.subscriptionAuthentication}
               />
@@ -440,10 +491,12 @@ const StageHeader: Component<{
   readonly canOpenProject: () => boolean;
   readonly onOpenProject: () => void;
   readonly projectOpen: WorkbenchProjectOpenState;
+  readonly autoIterationSupervisorError: string | null;
 }> = (props) => (
   <div class="stage-head" classList={{
     "has-continuation-stop": !props.freshStart && props.command?.continuationStop !== undefined,
     "has-continuation-progress": !props.freshStart && props.command?.continuationProgress !== undefined,
+    "has-auto-iteration-error": props.autoIterationSupervisorError !== null,
   }}>
     <div class="stage-title">
       <Show when={!props.freshStart && props.command}>
@@ -527,6 +580,9 @@ const StageHeader: Component<{
         </div>
       )}
     </Show>
+    <Show when={props.autoIterationSupervisorError !== null}>
+      <p class="auto-iteration-start-error" role="alert">{props.autoIterationSupervisorError}</p>
+    </Show>
   </div>
 );
 
@@ -585,6 +641,7 @@ const EmptyProjectState: Component<{
   readonly onUseAsDefault: () => void;
   readonly onSubmit: () => void;
   readonly onStartAnnualReport: () => void;
+  readonly onStartAutoIterationSupervisor: () => void;
   readonly endpointPreferences?: WorkbenchFamilyEndpointPreferences;
   readonly subscriptionAuthentication?: WorkbenchFacadeSubscriptionAuthenticationInput;
 }> = (props) => (
@@ -625,6 +682,7 @@ const EmptyProjectState: Component<{
         onUseAsDefault={props.onUseAsDefault}
         onSubmit={props.onSubmit}
         onStartAnnualReport={props.onStartAnnualReport}
+        onStartAutoIterationSupervisor={props.onStartAutoIterationSupervisor}
         endpointPreferences={props.endpointPreferences}
         subscriptionAuthentication={props.subscriptionAuthentication}
       />

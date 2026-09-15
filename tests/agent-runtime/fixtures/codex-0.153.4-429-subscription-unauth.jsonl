@@ -1,0 +1,3 @@
+{"id":1,"result":{"userAgent":"synchronized-intellect-network/0.153.4 (Windows 10.0.26100; x86_64) unknown (synchronized-intellect-network; 0.1.0)","codexHome":"C:\\synthetic-home","platformFamily":"windows","platformOs":"windows"}}
+{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"SANITIZED-HOST","installationId":"00000000-0000-4000-8000-000000000000","environmentId":null},"emittedAtMs":1789439894384}
+{"id":2,"result":{"account":null,"requiresOpenaiAuth":true}}

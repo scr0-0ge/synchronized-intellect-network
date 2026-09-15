@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { types as nodeUtilTypes } from "node:util";
 
@@ -455,6 +455,7 @@ class SqliteProjectChannel implements ProjectChannel {
             accepted.receipt.commandId,
             executionStart.promise,
             commandSnapshot.workbenchMcp,
+            runtimeContextSnapshot?.executionDirectory,
           );
           receiptController.resolve(accepted.receipt);
           queueMicrotask(() => executionStart.resolve(undefined));
@@ -1077,13 +1078,14 @@ class SqliteProjectChannel implements ProjectChannel {
     commandId: string,
     executionStart: Promise<void>,
     workbenchMcp?: RuntimeWorkbenchMcpServer,
+    executionDirectory?: string,
   ): void {
     const execution = this.executionTail.then(async () => {
       await executionStart;
       try {
-        await this.performExecution(commandId, workbenchMcp);
+        await this.performExecution(commandId, workbenchMcp, executionDirectory);
       } catch {
-        await this.containExecutionFailure(commandId, workbenchMcp);
+        await this.containExecutionFailure(commandId, workbenchMcp, executionDirectory);
       } finally {
         this.executionBinding = undefined;
       }
@@ -1097,6 +1099,7 @@ class SqliteProjectChannel implements ProjectChannel {
   private async containExecutionFailure(
     commandId: string,
     workbenchMcp?: RuntimeWorkbenchMcpServer,
+    executionDirectory?: string,
   ): Promise<void> {
     try {
       const row = this.database
@@ -1125,6 +1128,7 @@ class SqliteProjectChannel implements ProjectChannel {
           this.executionBinding,
           undefined,
           workbenchMcp,
+          executionDirectory,
         );
         return;
       }
@@ -1139,7 +1143,9 @@ class SqliteProjectChannel implements ProjectChannel {
   private async performExecution(
     commandId: string,
     workbenchMcp?: RuntimeWorkbenchMcpServer,
+    requestedExecutionDirectory?: string,
   ): Promise<void> {
+    const executionDirectory = requestedExecutionDirectory ?? this.projectDirectory;
     if (this.closed) return;
     // Timers may run late; a queued resume still has the original absolute deadline.
     this.refreshQuotaPauses();
@@ -1256,7 +1262,7 @@ class SqliteProjectChannel implements ProjectChannel {
     ) {
       let catalog: RuntimeCatalog;
       try {
-        catalog = await this.adapter.inspect(this.projectDirectory);
+        catalog = await this.adapter.inspect(executionDirectory);
       } catch (error) {
         this.recordFailure(
           commandId,
@@ -1304,12 +1310,12 @@ class SqliteProjectChannel implements ProjectChannel {
       binding =
         command.commandKind === "start" && existingReference === null
           ? await this.adapter.start({
-              projectDirectory: this.projectDirectory,
+              projectDirectory: executionDirectory,
               profile: cloneProfile(command.profile),
               ...(workbenchMcp === undefined ? {} : { workbenchMcp }),
             })
           : await this.adapter.resume({
-              projectDirectory: this.projectDirectory,
+              projectDirectory: executionDirectory,
               profile: cloneProfile(command.profile),
               opaqueSessionReference: existingReference ?? "",
               ...(workbenchMcp === undefined ? {} : { workbenchMcp }),
@@ -1329,11 +1335,18 @@ class SqliteProjectChannel implements ProjectChannel {
         existingReference !== null && error instanceof RuntimeAdapterError &&
           ["protocol-rejected", "runtime-not-located", "authentication-required", "unsupported-selection"].includes(error.category) ? {
           resume: "unconfirmed", reason: recoveryFailureCategory(error) ?? "resume-unconfirmed",
-        } : undefined, workbenchMcp);
+        } : undefined, workbenchMcp, executionDirectory);
       return;
     }
     if (!this.commitBinding(commandId, session.session_id, binding)) {
-      await this.recordRecoveryRequired(commandId, undefined, binding, undefined, workbenchMcp);
+      await this.recordRecoveryRequired(
+        commandId,
+        undefined,
+        binding,
+        undefined,
+        workbenchMcp,
+        executionDirectory,
+      );
       return;
     }
     if (this.closed) {
@@ -1347,11 +1360,25 @@ class SqliteProjectChannel implements ProjectChannel {
     try {
       await binding.send({ text: command.input });
     } catch (error) {
-      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding, undefined, workbenchMcp);
+      await this.recordRecoveryRequired(
+        commandId,
+        recoveryFailureCategory(error),
+        binding,
+        undefined,
+        workbenchMcp,
+        executionDirectory,
+      );
       return;
     }
     if (this.closed) {
-      await this.recordRecoveryRequired(commandId, undefined, binding, undefined, workbenchMcp);
+      await this.recordRecoveryRequired(
+        commandId,
+        undefined,
+        binding,
+        undefined,
+        workbenchMcp,
+        executionDirectory,
+      );
       return;
     }
     this.database
@@ -1370,7 +1397,14 @@ class SqliteProjectChannel implements ProjectChannel {
         done: false,
       };
     } catch (error) {
-      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding, undefined, workbenchMcp);
+      await this.recordRecoveryRequired(
+        commandId,
+        recoveryFailureCategory(error),
+        binding,
+        undefined,
+        workbenchMcp,
+        executionDirectory,
+      );
       return;
     }
     this.activeRuntimeIterator = iteratorState;
@@ -1423,7 +1457,14 @@ class SqliteProjectChannel implements ProjectChannel {
         }
       }
     } catch (error) {
-      await this.recordRecoveryRequired(commandId, recoveryFailureCategory(error), binding, undefined, workbenchMcp);
+      await this.recordRecoveryRequired(
+        commandId,
+        recoveryFailureCategory(error),
+        binding,
+        undefined,
+        workbenchMcp,
+        executionDirectory,
+      );
       return;
     } finally {
       if (!iteratorState.done) await this.cancelRuntimeIterator(iteratorState);
@@ -1463,7 +1504,14 @@ class SqliteProjectChannel implements ProjectChannel {
       return;
     }
     // The iterator above was already drained or cancelled exactly once.
-    await this.recordRecoveryRequired(commandId, undefined, undefined, undefined, workbenchMcp);
+    await this.recordRecoveryRequired(
+      commandId,
+      undefined,
+      undefined,
+      undefined,
+      workbenchMcp,
+      executionDirectory,
+    );
   }
 
   readUserInput(sessionId: string): readonly ProjectUserInputView[] {
@@ -1925,6 +1973,7 @@ class SqliteProjectChannel implements ProjectChannel {
     commandId: string,
     binding?: ResumableRuntimeBinding,
     workbenchMcp?: RuntimeWorkbenchMcpServer,
+    requestedExecutionDirectory?: string,
   ): Promise<ProjectCommandRecovery> {
     if (binding !== undefined) {
       // Stop the old transport before establishing a fresh one-input binding.
@@ -1948,7 +1997,7 @@ class SqliteProjectChannel implements ProjectChannel {
     try {
       resumed = await Promise.race([
         this.adapter.resume({
-          projectDirectory: this.projectDirectory,
+          projectDirectory: requestedExecutionDirectory ?? this.projectDirectory,
           profile: cloneProfile(command.profile),
           opaqueSessionReference: reference,
           ...(workbenchMcp === undefined ? {} : { workbenchMcp }),
@@ -1983,11 +2032,13 @@ class SqliteProjectChannel implements ProjectChannel {
     binding?: ResumableRuntimeBinding,
     observed?: ProjectCommandRecovery,
     workbenchMcp?: RuntimeWorkbenchMcpServer,
+    executionDirectory?: string,
   ): Promise<void> {
     const recovery = observed ?? await this.probeRecoveryResume(
       commandId,
       binding,
       workbenchMcp,
+      executionDirectory,
     );
     const committed = transaction(this.database, () => {
       const row = this.database
@@ -4513,14 +4564,34 @@ function validateRuntimeContext(
     if (required) throw new CoordinatorError("invalid-command");
     return undefined;
   }
+  const hasExecutionDirectory = Object.prototype.hasOwnProperty.call(
+    value,
+    "executionDirectory",
+  );
   if (
-    !isExactDataRecord(value, ["endpointId"]) ||
+    !isExactDataRecord(
+      value,
+      hasExecutionDirectory
+        ? ["endpointId", "executionDirectory"]
+        : ["endpointId"],
+    ) ||
     !isDurableRuntimeEndpointId(value.endpointId) ||
-    !endpointIds.includes(value.endpointId)
+    !endpointIds.includes(value.endpointId) ||
+    (hasExecutionDirectory &&
+      (typeof value.executionDirectory !== "string" ||
+        value.executionDirectory.length === 0 ||
+        value.executionDirectory.length > 32_768 ||
+        value.executionDirectory.includes("\0") ||
+        !isAbsolute(value.executionDirectory)))
   ) {
     throw new CoordinatorError("invalid-command");
   }
-  return Object.freeze({ endpointId: value.endpointId });
+  return Object.freeze({
+    endpointId: value.endpointId,
+    ...(hasExecutionDirectory
+      ? { executionDirectory: value.executionDirectory }
+      : {}),
+  });
 }
 
 function validateSessionRemovalRequest(request: ProjectSessionRemovalRequest): {

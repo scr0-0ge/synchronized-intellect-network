@@ -154,8 +154,22 @@ export type RuntimeContinuationProfileCompatibility =
   | "compatible"
   | "incompatible";
 
+export type RuntimeInputImageMediaType = "image/png" | "image/jpeg";
+
+export interface RuntimeInputImage {
+  readonly mediaType: RuntimeInputImageMediaType;
+  readonly base64: string;
+}
+
+/** Per-image decoded-byte cap; a bounded constant, not a per-endpoint setting. */
+export const RUNTIME_INPUT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** Per-turn image count cap. */
+export const RUNTIME_INPUT_IMAGE_MAX_COUNT = 4;
+
 export interface RuntimeInput {
   readonly text: string;
+  /** Turn-input image attachments. Only the Claude Runtime's `send` accepts them today. */
+  readonly images?: readonly RuntimeInputImage[];
 }
 
 export type RuntimeFailureCategory =

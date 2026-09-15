@@ -111,6 +111,22 @@ test("a candidate binds the merge tree and invalidates when origin/demo moves", 
     await git(candidateWorkspace?.path ?? "", "rev-parse", "HEAD^{commit}"),
     result.candidate.mergeCommitSha,
   );
+  const replay = await builder.build({
+    integrationCandidateId: "candidate-1",
+    expectedTargetBaselineCommitSha: baselineCommitSha,
+    orderedCommitShas: [firstCommit, secondCommit],
+    gateDefinitionVersion: "uaw-gates-v1",
+    environment: "Windows fixture; repository-local git config",
+    handoffs: [],
+    reviewDecisionIds: [],
+    version: 1,
+    inputVersion: 11,
+  });
+  assert.deepEqual(
+    replay,
+    result,
+    "a retry after candidate construction reuses the same workspace and job",
+  );
 
   await git(repositoryPath, "switch", "worker/a");
   await writeFile(join(repositoryPath, "worker-a-more.txt"), "more a\n", "utf8");

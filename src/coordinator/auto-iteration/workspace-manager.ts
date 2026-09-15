@@ -91,6 +91,16 @@ export interface WorkspaceManager {
     readonly candidateId: string;
     readonly baselineRef: string;
   }): Promise<ManagedWorkspaceRecord>;
+  /**
+   * Managed worktree for integrating one candidate into its target branch;
+   * lives at `<managedRoot>/integrations/<candidateId>` under the same root as
+   * attempt workspaces, on its own `branch` starting at `startRef`.
+   */
+  createIntegrationWorkspace(input: {
+    readonly candidateId: string;
+    readonly branch: string;
+    readonly startRef: string;
+  }): Promise<ManagedWorkspaceRecord>;
   verifyWorkspaceCwd(workspaceId: string): Promise<string>;
   reclaimWorkspace(workspaceId: string): Promise<ManagedWorkspaceRecord>;
   readWorkspace(workspaceId: string): Promise<ManagedWorkspaceRecord | null>;
@@ -179,7 +189,23 @@ export function createWorkspaceManager(options: {
       `${JSON.stringify(record, null, 2)}\n`,
       "utf8",
     );
-    await rename(pendingPath, path);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rename(pendingPath, path);
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (
+          attempt >= 10 ||
+          (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")
+        ) {
+          throw error;
+        }
+        await new Promise<void>((resolveRetry) =>
+          setTimeout(resolveRetry, 20 * (attempt + 1)),
+        );
+      }
+    }
   }
 
   async function loadWorkspace(
@@ -213,6 +239,8 @@ export function createWorkspaceManager(options: {
     readonly candidateId: string | null;
     readonly branch: string | null;
     readonly baselineRef: string;
+    readonly subdirectory?: string;
+    readonly pathName?: string;
   }): Promise<ManagedWorkspaceRecord> {
     requireIdentifier(input.workspaceId, "workspaceId");
     const roots = await initialize();
@@ -229,7 +257,13 @@ export function createWorkspaceManager(options: {
       }
     }
     const baselineCommitSha = await resolveCommit(input.baselineRef);
-    const workspacePath = join(roots.managedRoot, "workspaces", input.workspaceId);
+    const subdirectory = input.subdirectory ?? "workspaces";
+    const workspacePath = join(
+      roots.managedRoot,
+      subdirectory,
+      input.pathName ?? input.workspaceId,
+    );
+    await mkdir(join(roots.managedRoot, subdirectory), { recursive: true });
     const now = new Date().toISOString();
     const record: MutableWorkspaceRecord = {
       schemaVersion: 1,
@@ -312,6 +346,18 @@ export function createWorkspaceManager(options: {
         candidateId: input.candidateId,
         branch: null,
         baselineRef: input.baselineRef,
+      });
+    },
+
+    createIntegrationWorkspace(input) {
+      return createWorkspace({
+        workspaceId: `integration-${input.candidateId}`,
+        attemptId: null,
+        candidateId: input.candidateId,
+        branch: input.branch,
+        baselineRef: input.startRef,
+        subdirectory: "integrations",
+        pathName: input.candidateId,
       });
     },
 

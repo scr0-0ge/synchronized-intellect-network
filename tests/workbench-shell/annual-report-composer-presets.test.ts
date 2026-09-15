@@ -16,7 +16,7 @@ mkdirSync(scratchRoot, { recursive: true });
 process.env.TEMP = scratchRoot;
 process.env.TMP = scratchRoot;
 
-test("slash presets render exactly annual-report and help; Enter starts and Escape closes", async () => {
+test("slash presets render exactly annual-report, supervisor, and help; Enter starts and Escape closes", async () => {
   const probeUrl = "/__annual_report_composer_probe";
   const moduleId = "/__annual_report_composer_probe.tsx";
   const plugin: Plugin = {
@@ -39,7 +39,9 @@ test("slash presets render exactly annual-report and help; Enter starts and Esca
         import { visualFixture } from "/tests/workbench-shell/visual-harness/fixture.ts";
         const [draft, setDraft] = createSignal("");
         let starts = 0;
+        let supervisorStarts = 0;
         window.annualReportStarts = () => starts;
+        window.autoIterationSupervisorStarts = () => supervisorStarts;
         const state = initialRendererState;
         const composer = { ...state.composer, get draft() { return draft(); } };
         const noOp = () => undefined;
@@ -52,6 +54,7 @@ test("slash presets render exactly annual-report and help; Enter starts and Esca
           onModel: noOp, onWorkIntensity: noOp, onExecutionMode: noOp,
           onAccessMode: noOp, onUseAsDefault: noOp, onSubmit: noOp,
           onStartAnnualReport: () => { starts += 1; },
+          onStartAutoIterationSupervisor: () => { supervisorStarts += 1; },
         }), document.querySelector("#probe"));
       `;
     },
@@ -75,10 +78,12 @@ test("slash presets render exactly annual-report and help; Enter starts and Esca
     await menu.waitFor();
     assert.deepEqual(await menu.getByRole("option").allTextContents(), [
       "/annual-reportExtract the default annual-report fields from every PDF in this folder and build the report",
+      "/supervisorStart an auto-iteration supervisor for this Project with the endpoint and model selected here",
       "/helpList the available composer presets",
     ]);
     await input.press("Enter");
     assert.equal(await page.evaluate(() => (window as any).annualReportStarts()), 1);
+    assert.equal(await page.evaluate(() => (window as any).autoIterationSupervisorStarts()), 0);
     assert.equal(await menu.count(), 0);
 
     await input.fill("/");
@@ -87,6 +92,19 @@ test("slash presets render exactly annual-report and help; Enter starts and Esca
     assert.equal(await menu.count(), 0);
     assert.equal(await input.inputValue(), "/");
 
+    // Arrow down once selects /supervisor; Enter runs it, not /annual-report.
+    await input.fill("");
+    await input.fill("/");
+    await menu.waitFor();
+    await input.press("ArrowDown");
+    await input.press("Enter");
+    assert.equal(await page.evaluate(() => (window as any).autoIterationSupervisorStarts()), 1);
+    assert.equal(await page.evaluate(() => (window as any).annualReportStarts()), 1);
+    assert.equal(await menu.count(), 0);
+
+    // Highlight carries over from the previous open (now on /supervisor), so
+    // one more ArrowDown reaches /help, which only fills the draft and shows
+    // the heading -- it never calls either start callback.
     await input.fill("");
     await input.fill("/");
     await menu.waitFor();
@@ -95,6 +113,16 @@ test("slash presets render exactly annual-report and help; Enter starts and Esca
     assert.equal(await input.inputValue(), "/help");
     assert.equal(await menu.getByText("Available presets").count(), 1);
     assert.equal(await page.evaluate(() => (window as any).annualReportStarts()), 1);
+    assert.equal(await page.evaluate(() => (window as any).autoIterationSupervisorStarts()), 1);
+
+    // Selecting /help reset the highlight to index 0, so arrow up now wraps
+    // from /annual-report to /help (the last item).
+    await input.fill("");
+    await input.fill("/");
+    await menu.waitFor();
+    await input.press("ArrowUp");
+    await input.press("Enter");
+    assert.equal(await input.inputValue(), "/help");
   } finally {
     await browser?.close();
     await server.close();
