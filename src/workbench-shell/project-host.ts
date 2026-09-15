@@ -40,6 +40,8 @@ import {
   type WorkbenchAnnualReportProjectRequest,
   type WorkbenchAnnualReportSnapshot,
   type WorkbenchAnnualReportStartResult,
+  type WorkbenchStartAutoIterationSupervisorRequest,
+  type WorkbenchStartAutoIterationSupervisorResult,
   type WorkbenchDirectSessionProfileDefaultRequest,
   type WorkbenchDirectSessionProfileDefaultResult,
   type WorkbenchDirectSessionProfileLoadRequest,
@@ -227,6 +229,9 @@ export interface WorkbenchProjectHost extends WorkbenchUserInputBridge {
   resolveAnnualReportOutputDirectory(
     request: WorkbenchAnnualReportProjectRequest,
   ): Promise<string | null>;
+  startAutoIterationSupervisor(
+    request: WorkbenchStartAutoIterationSupervisorRequest,
+  ): Promise<WorkbenchStartAutoIterationSupervisorResult>;
   interruptActiveTurn(
     request: WorkbenchInterruptRequest,
   ): Promise<WorkbenchInterruptResult>;
@@ -1594,6 +1599,24 @@ function createHostController(options: {
       if (resolveOutput === undefined) return Promise.resolve(null);
       return trackAction(() => resolveOutput.call(active!.backend), null);
     },
+    startAutoIterationSupervisor(
+      request: WorkbenchStartAutoIterationSupervisorRequest,
+    ): Promise<WorkbenchStartAutoIterationSupervisorResult> {
+      const selected = selectionRecords.get(request.projectId);
+      if (
+        closed || switching || teardownBlocked || active === undefined ||
+        selected?.recordKey !== active.record.recordKey
+      ) {
+        return Promise.resolve(autoIterationSupervisorProjectFailure());
+      }
+      const start = active.backend.startAutoIterationSupervisor;
+      if (start === undefined) return Promise.resolve(autoIterationSupervisorProjectFailure());
+      const { projectId: _projectId, ...selection } = request;
+      return trackAction(
+        () => start.call(active!.backend, selection),
+        autoIterationSupervisorProjectFailure(),
+      );
+    },
     interruptActiveTurn(
       request: WorkbenchInterruptRequest,
     ): Promise<WorkbenchInterruptResult> {
@@ -1671,6 +1694,16 @@ function createHostController(options: {
 }
 
 function annualReportProjectFailure(): WorkbenchAnnualReportStartResult {
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({
+      category: "invalid-project" as const,
+      message: "This Project selection expired. Keep the current Project open and try again.",
+    }),
+  });
+}
+
+function autoIterationSupervisorProjectFailure(): WorkbenchStartAutoIterationSupervisorResult {
   return Object.freeze({
     ok: false,
     error: Object.freeze({

@@ -108,6 +108,7 @@ const expectedWorkbenchPreloadBridgeKeys = Object.freeze([
   "saveRuntimeExecutable",
   "selectProject",
   "startAnnualReportJob",
+  "startAutoIterationSupervisor",
   "steerActiveTurn",
   "submitDirectInput",
   "useDirectSessionProfileAsDefault",

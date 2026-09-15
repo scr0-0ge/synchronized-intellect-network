@@ -43,6 +43,12 @@ import type {
   OfficialRuntimeTransportFactory,
 } from "./codex/transport.ts";
 import type { ProviderRequestBudget } from "./provider-request-budget.ts";
+import {
+  emitQuotaObservation,
+} from "../coordinator/auto-iteration/capability-probe.ts";
+import {
+  quotaObservationFromRead,
+} from "./codex/account-rate-limits.ts";
 
 
 /**
@@ -371,26 +377,34 @@ export class CodexAdapter implements ResumableAgentRuntimeAdapter {
    * is configured; a rejected or malformed read is optional telemetry and
    * never fails the session, so both the request and the observer callback
    * are swallowed here rather than left to the caller.
+   *
+   * w338: that same single read is also handed to the coordinator quota
+   * seam (issue #8 Lane C) as a `QuotaObservation` — never a second
+   * `account/rateLimits/read`.
    */
   private async observeAccountRateLimits(peer: CodexJsonlPeer): Promise<void> {
     if (this.#observeUsage === undefined || this.#usageEndpointKey === undefined) {
       return;
     }
-    let observation: RuntimeUsageObservation | undefined;
+    let value: unknown;
     try {
-      observation = readCodexRateLimitObservation(
-        await peer.request("account/rateLimits/read", null),
-        this.#usageEndpointKey,
-      );
+      value = await peer.request("account/rateLimits/read", null);
     } catch {
       return;
     }
-    if (observation === undefined) return;
     try {
-      await this.#observeUsage(observation);
+      const observation = readCodexRateLimitObservation(value, this.#usageEndpointKey);
+      if (observation !== undefined) await this.#observeUsage(observation);
     } catch {
       // An observer failure must not affect session start.
     }
+    await emitQuotaObservation(
+      quotaObservationFromRead({
+        quotaPoolId: `codex-account:${this.#usageEndpointKey}`,
+        observedAt: Date.now(),
+        value,
+      }),
+    );
   }
 
   /**

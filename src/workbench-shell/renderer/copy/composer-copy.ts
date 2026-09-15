@@ -194,6 +194,9 @@ const englishCopy = {
     annualReportCommand: "/annual-report",
     annualReportDescription:
       "Extract the default annual-report fields from every PDF in this folder and build the report",
+    supervisorCommand: "/supervisor",
+    supervisorDescription:
+      "Start an auto-iteration supervisor for this Project with the endpoint and model selected here",
     helpCommand: "/help",
     helpDescription: "List the available composer presets",
   },
@@ -457,6 +460,8 @@ const simplifiedChineseCopy = {
     helpHeading: "可用预设",
     annualReportCommand: "/annual-report",
     annualReportDescription: "从此文件夹内每份 PDF 提取默认年报字段并生成报告",
+    supervisorCommand: "/supervisor",
+    supervisorDescription: "用此处选定的端点和模型，为此 Project 启动一个自动迭代主管",
     helpCommand: "/help",
     helpDescription: "列出可用的输入区预设",
   },

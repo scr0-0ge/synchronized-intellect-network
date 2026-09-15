@@ -18,7 +18,11 @@ import type {
   HostBoundToolActor,
   InboxReadResponse,
   InitialSupervisorBinding,
+  IntegrationCandidate,
+  IntegrationOutcome,
+  InboxEntry,
   PendingAutoIterationOutboxEntry,
+  PendingIntegration,
   QuotaObservation,
   ReadInboxRequest,
   ReadWorkOrderStatusRequest,
@@ -199,6 +203,58 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     });
   }
 
+  async completeReviewDisposition(disposition: {
+    readonly reviewDecisionId: string;
+    readonly candidate?: IntegrationCandidate;
+  }): Promise<void> {
+    assertNonEmpty(disposition.reviewDecisionId);
+    this.store.transaction(() => {
+      const review = this.store.review(disposition.reviewDecisionId);
+      if (review === undefined) throw new Error("review-decision-not-found");
+      const handoff = this.store.handoff(review.handoff);
+      const workOrder = this.store.workOrder(review.handoff.workOrderId);
+      if (handoff === undefined || workOrder === undefined) {
+        throw new Error("review-disposition-target-not-found");
+      }
+      const candidateRequired =
+        review.decision === "approve" &&
+        workOrder.currentAttemptId === review.handoff.attemptId &&
+        workOrder.completionCondition.gitIntegration === "required";
+      if (candidateRequired !== (disposition.candidate !== undefined)) {
+        throw new Error("review-disposition-candidate-mismatch");
+      }
+      if (disposition.candidate !== undefined) {
+        const expectedCommits = handoff.handoff.artifacts
+          .filter((artifact) => artifact.kind === "git-commit")
+          .map((artifact) => artifact.commitSha);
+        if (
+          workOrder.status !== "awaiting-integration" ||
+          disposition.candidate.baselineCommitSha !== workOrder.baselineCommitSha ||
+          canonicalJson(disposition.candidate.orderedCommitShas) !==
+            canonicalJson(expectedCommits) ||
+          canonicalJson(disposition.candidate.handoffs) !==
+            canonicalJson([review.handoff]) ||
+          canonicalJson(disposition.candidate.reviewDecisionIds) !==
+            canonicalJson([review.reviewDecisionId])
+        ) {
+          throw new Error("integration-candidate-does-not-match-review");
+        }
+      }
+      const completed = this.store.completeReviewDisposition(
+        review.reviewDecisionId,
+        disposition.candidate,
+      );
+      if (!completed) return;
+      this.store.appendEvent(
+        disposition.candidate === undefined
+          ? "review-disposition-completed"
+          : "integration-candidate-recorded",
+        disposition.candidate?.integrationCandidateId ?? review.reviewDecisionId,
+        { reviewDecisionId: review.reviewDecisionId },
+      );
+    });
+  }
+
   async markHandoffIncluded(
     mutation: HandoffIncludedMutation,
   ): Promise<Extract<HandoffReceipt, { readonly level: "included-in-parent-input" }>> {
@@ -238,6 +294,63 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
 
   async readPendingOutbox(): Promise<readonly PendingAutoIterationOutboxEntry[]> {
     return this.store.readTransaction(() => this.store.pendingOutbox());
+  }
+
+  async readIntegrationBacklog(): Promise<readonly PendingIntegration[]> {
+    return this.store.readTransaction(() => this.store.integrationBacklog());
+  }
+
+  async completeIntegration(disposition: {
+    readonly integrationCandidateId: string;
+    readonly outcome: IntegrationOutcome;
+  }): Promise<void> {
+    assertNonEmpty(disposition.integrationCandidateId);
+    return this.store.transaction(() => {
+      const recorded = this.store.completeIntegration(
+        disposition.integrationCandidateId,
+        disposition.outcome,
+      );
+      if (!recorded.applied) return;
+      const workOrder = this.store.workOrder(recorded.workOrderId);
+      if (workOrder === undefined) {
+        throw new Error("integration-work-order-not-found");
+      }
+      const nextStatus = disposition.outcome.status === "integrated"
+        ? "integrated"
+        : "blocked";
+      const status = assertWorkOrderTransition(workOrder.status, nextStatus);
+      this.store.updateWorkOrder(
+        { ...workOrder, status, version: workOrder.version + 1 },
+        workOrder.version,
+      );
+      if (disposition.outcome.status === "blocked: target-moved") {
+        // The supervisor decides whether to re-freeze a candidate or accept
+        // the moved target; this inbox entry is the durable wake-up trace.
+        const inboxEntry: InboxEntry = {
+          inboxEntryId: `inbox-${this.createId()}`,
+          roleSlotId: workOrder.responsibleRoleSlotId,
+          state: "pending",
+          kind: "blocked",
+          workOrderId: workOrder.workOrderId,
+          summary:
+            `integration candidate ${disposition.integrationCandidateId} blocked: ` +
+            `target branch moved (expected ${disposition.outcome.expectedBaselineCommitSha}, ` +
+            `observed ${disposition.outcome.observedLocalBranchCommitSha ?? "unknown"})`,
+          version: 1,
+        };
+        this.store.insertInbox(inboxEntry);
+      }
+      this.store.appendEvent(
+        disposition.outcome.status === "integrated"
+          ? "integration-completed"
+          : "integration-blocked",
+        disposition.integrationCandidateId,
+        {
+          reviewDecisionId: recorded.reviewDecisionId,
+          status: disposition.outcome.status,
+        },
+      );
+    });
   }
 
   readAutoIterationOverview(): AutoIterationOverview {
@@ -303,7 +416,56 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     }
     this.store.transaction(() => {
       this.store.recordQuotaObservation(observation);
+      this.applyQuotaBlocking(observation);
     });
+  }
+
+  /**
+   * Issue #8 §3: a quota observation that positively establishes exhaustion
+   * parks executing Work Orders at `waiting-for-quota`; a fresh read that
+   * positively establishes availability is what releases them. An unknown
+   * read can never establish either state.
+   */
+  private applyQuotaBlocking(observation: QuotaObservation): void {
+    if (observation.status !== "observed") return;
+    const windows = observation.windows;
+    const exhausted = windows.some(
+      (window) => window.usedFraction !== null && window.usedFraction >= 1,
+    );
+    for (const workOrder of this.store.workOrders()) {
+      if (exhausted) {
+        if (workOrder.status !== "executing") continue;
+        this.store.updateWorkOrder(
+          {
+            ...workOrder,
+            status: assertWorkOrderTransition(
+              workOrder.status,
+              "waiting-for-quota",
+            ),
+            version: workOrder.version + 1,
+          },
+          workOrder.version,
+        );
+        this.store.appendEvent("work-order-waiting-for-quota", workOrder.workOrderId, {
+          quotaPoolId: observation.quotaPoolId,
+          observedAt: observation.observedAt,
+        });
+      } else {
+        if (workOrder.status !== "waiting-for-quota") continue;
+        this.store.updateWorkOrder(
+          {
+            ...workOrder,
+            status: assertWorkOrderTransition(workOrder.status, "executing"),
+            version: workOrder.version + 1,
+          },
+          workOrder.version,
+        );
+        this.store.appendEvent("work-order-quota-available", workOrder.workOrderId, {
+          quotaPoolId: observation.quotaPoolId,
+          observedAt: observation.observedAt,
+        });
+      }
+    }
   }
 
   async observeContextUsage(observation: ContextUsageObservation): Promise<void> {
@@ -454,7 +616,13 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       `outbox-${this.createId()}`,
       "start-attempt",
       attemptId,
-      { attemptId, workerSession: request.workOrder.workerSession },
+      {
+        attemptId,
+        attemptNumber: attempt.attemptNumber,
+        workOrderId,
+        baselineCommitSha: workOrder.baselineCommitSha,
+        workerSession: request.workOrder.workerSession,
+      },
     );
     this.store.appendEvent("work-order-submitted", workOrderId, { attemptId });
     return {
@@ -646,7 +814,13 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
           `outbox-${this.createId()}`,
           "start-attempt",
           nextAttempt.attemptId,
-          { attemptId: nextAttempt.attemptId, sessionConfiguration: nextAttempt.sessionConfiguration },
+          {
+            attemptId: nextAttempt.attemptId,
+            attemptNumber: nextAttempt.attemptNumber,
+            workOrderId: workOrder.workOrderId,
+            baselineCommitSha: workOrder.baselineCommitSha,
+            sessionConfiguration: nextAttempt.sessionConfiguration,
+          },
         );
         updatedWorkOrder = {
           ...workOrder,
@@ -674,7 +848,25 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       `outbox-${this.createId()}`,
       "review-disposed",
       decision.reviewDecisionId,
-      { decision: decision.reviewDecisionId, handoff: request.decision.handoff },
+      {
+        decision: decision.reviewDecisionId,
+        handoff: request.decision.handoff,
+        workspaceId: this.store.attempt(request.decision.handoff.attemptId)?.workspaceId ?? null,
+        ...(isCurrentAttempt &&
+        decision.decision === "approve" &&
+        workOrder.completionCondition.gitIntegration === "required"
+          ? {
+              integration: {
+                integrationCandidateId: `candidate-${this.createId()}`,
+                expectedTargetBaselineCommitSha: workOrder.baselineCommitSha,
+                orderedCommitShas: handoff.handoff.artifacts
+                  .filter((artifact) => artifact.kind === "git-commit")
+                  .map((artifact) => artifact.commitSha),
+                inputVersion: updatedWorkOrder.version,
+              },
+            }
+          : {}),
+      },
     );
     this.store.appendEvent("handoff-disposed", decision.reviewDecisionId, {
       decision: decision.decision,
@@ -802,7 +994,7 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       attempts: this.store.attempts(workOrder.workOrderId),
       handoffs: this.store.handoffs(workOrder.workOrderId),
       reviews: this.store.reviews(workOrder.workOrderId),
-      candidates: [],
+      candidates: this.store.candidates(workOrder.workOrderId),
       receipts: this.store.receipts(workOrder.workOrderId),
     };
   }

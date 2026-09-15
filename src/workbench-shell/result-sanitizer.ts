@@ -97,6 +97,8 @@ import {
   type WorkbenchAnnualReportProjectRequest,
   type WorkbenchAnnualReportSnapshot,
   type WorkbenchAnnualReportStartResult,
+  type WorkbenchStartAutoIterationSupervisorRequest,
+  type WorkbenchStartAutoIterationSupervisorResult,
   type WorkbenchAppearancePreferenceLoadResult,
   type WorkbenchAppearancePreferenceSaveResult,
   type WorkbenchClaudePermissionHandling,
@@ -2398,6 +2400,91 @@ export function sanitizeWorkbenchAnnualReportStartResult(
     // Malformed values collapse to one actionable public failure.
   }
   return annualReportUnavailable();
+}
+
+export type WorkbenchStartAutoIterationSupervisorRequestReconstruction =
+  | { readonly ok: true; readonly request: WorkbenchStartAutoIterationSupervisorRequest }
+  | { readonly ok: false };
+
+export function reconstructWorkbenchStartAutoIterationSupervisorRequest(
+  value: unknown,
+): WorkbenchStartAutoIterationSupervisorRequestReconstruction {
+  try {
+    if (
+      !isStrictDataRecord(value, [
+        "accessModeKey",
+        "endpointKey",
+        "executionModeKey",
+        "modelKey",
+        "projectId",
+        "snapshotKey",
+        "workIntensityKey",
+      ]) ||
+      typeof value.projectId !== "string" ||
+      !projectSelectionKeyPattern.test(value.projectId)
+    ) {
+      return Object.freeze({ ok: false });
+    }
+    const selection = reconstructWorkbenchDirectSessionProfileDefaultRequest({
+      snapshotKey: value.snapshotKey,
+      endpointKey: value.endpointKey,
+      modelKey: value.modelKey,
+      workIntensityKey: value.workIntensityKey,
+      executionModeKey: value.executionModeKey,
+      accessModeKey: value.accessModeKey,
+    });
+    if (!selection.ok) return Object.freeze({ ok: false });
+    return Object.freeze({
+      ok: true,
+      request: Object.freeze({ projectId: value.projectId, ...selection.request }),
+    });
+  } catch {
+    return Object.freeze({ ok: false });
+  }
+}
+
+const autoIterationSupervisorUnavailable = (): WorkbenchStartAutoIterationSupervisorResult => Object.freeze({
+  ok: false,
+  error: Object.freeze({
+    category: "auto-iteration-unavailable" as const,
+    message: "The auto-iteration supervisor could not be started. Keep the Project open and try again.",
+  }),
+});
+
+export function sanitizeWorkbenchStartAutoIterationSupervisorResult(
+  value: unknown,
+): WorkbenchStartAutoIterationSupervisorResult {
+  try {
+    if (isStrictDataRecord(value, ["ok", "status"]) && value.ok === true && value.status === "started") {
+      return Object.freeze({ ok: true, status: "started" });
+    }
+    if (
+      isStrictDataRecord(value, ["error", "ok"]) &&
+      value.ok === false &&
+      isStrictDataRecord(value.error, ["category", "message"]) &&
+      [
+        "already-active",
+        "invalid-project",
+        "invalid-profile-selection",
+        "start-failed",
+        "auto-iteration-unavailable",
+      ].includes(String(value.error.category)) &&
+      typeof value.error.message === "string" &&
+      value.error.message.length > 0 &&
+      value.error.message.length <= 500
+    ) {
+      return deepFreeze({
+        ok: false,
+        error: {
+          category: value.error.category,
+          message: sanitizeDisplayString(value.error.message),
+        },
+      }) as WorkbenchStartAutoIterationSupervisorResult;
+    }
+  } catch {
+    // Malformed values collapse to one actionable public failure.
+  }
+  return autoIterationSupervisorUnavailable();
 }
 
 const annualReportOpenUnavailable = (): WorkbenchAnnualReportOpenResult => Object.freeze({

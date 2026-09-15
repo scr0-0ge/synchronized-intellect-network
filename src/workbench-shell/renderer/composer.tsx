@@ -425,6 +425,7 @@ export const DirectInputComposer: Component<{
   readonly onSteer?: () => void;
   readonly onSubmit: () => void;
   readonly onStartAnnualReport?: () => void;
+  readonly onStartAutoIterationSupervisor?: () => void;
   /**
    * The family facades' persisted backend preferences (tickets 20/25). The
    * endpoint picker presents each family's two endpoints as one entry
@@ -597,6 +598,13 @@ export const DirectInputComposer: Component<{
       setSlashMenuDismissed(true);
       setSlashHelp(false);
       props.onStartAnnualReport?.();
+      return;
+    }
+    if (index === 1) {
+      props.onDraft("");
+      setSlashMenuDismissed(true);
+      setSlashHelp(false);
+      props.onStartAutoIterationSupervisor?.();
       return;
     }
     props.onDraft(annualReportPresetsCopy.helpCommand);
@@ -940,6 +948,17 @@ export const DirectInputComposer: Component<{
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => chooseSlashPreset(1)}
           >
+            <code>{annualReportPresetsCopy.supervisorCommand}</code>
+            <span>{annualReportPresetsCopy.supervisorDescription}</span>
+          </button>
+          <button
+            type="button"
+            role="option"
+            aria-selected={slashSelection() === 2}
+            classList={{ selected: slashSelection() === 2 }}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => chooseSlashPreset(2)}
+          >
             <code>{annualReportPresetsCopy.helpCommand}</code>
             <span>{annualReportPresetsCopy.helpDescription}</span>
           </button>
@@ -1003,9 +1022,14 @@ export const DirectInputComposer: Component<{
           }}
           onKeyDown={(event) => {
             if (slashMenuVisible()) {
-              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              if (event.key === "ArrowDown") {
                 event.preventDefault();
-                setSlashSelection((current) => current === 0 ? 1 : 0);
+                setSlashSelection((current) => (current + 1) % 3);
+                return;
+              }
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                setSlashSelection((current) => (current + 2) % 3);
                 return;
               }
               if (event.key === "Escape") {

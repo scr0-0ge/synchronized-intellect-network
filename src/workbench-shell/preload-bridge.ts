@@ -47,6 +47,7 @@ import {
   WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
   WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
   WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
+  WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL,
   WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   publicInvalidProfileDefaultSelection,
   publicAppearancePreferenceUnavailable,
@@ -77,6 +78,8 @@ import {
   type WorkbenchAnnualReportProjectRequest,
   type WorkbenchAnnualReportSnapshot,
   type WorkbenchAnnualReportStartResult,
+  type WorkbenchStartAutoIterationSupervisorRequest,
+  type WorkbenchStartAutoIterationSupervisorResult,
   type WorkbenchAppearancePreference,
   type WorkbenchAppearancePreferenceLoadResult,
   type WorkbenchAppearancePreferenceSaveResult,
@@ -187,6 +190,8 @@ import {
   sanitizeWorkbenchAnnualReportOpenResult,
   sanitizeWorkbenchAnnualReportSnapshot,
   sanitizeWorkbenchAnnualReportStartResult,
+  reconstructWorkbenchStartAutoIterationSupervisorRequest,
+  sanitizeWorkbenchStartAutoIterationSupervisorResult,
   sanitizeSubscriptionAuthenticationPublicRequest,
   sanitizeSubscriptionAuthenticationPublicResponse,
 } from "./result-sanitizer.ts";
@@ -310,6 +315,7 @@ export interface FixedProjectViewIpc {
       | typeof WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL
       | typeof WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL
       | typeof WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL
+      | typeof WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL
       | typeof WORKBENCH_WRITE_CLIPBOARD_TEXT_CHANNEL
       | typeof WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
     ...values: unknown[]
@@ -367,6 +373,7 @@ export type WorkbenchPreloadBridge = WorkbenchRendererTransferBridge &
       | "startAnnualReportJob"
       | "readAnnualReportJob"
       | "openAnnualReportOutput"
+      | "startAutoIterationSupervisor"
     >
   > &
   // CLI update surface (ticket 18): declared on its own contract module —
@@ -1214,6 +1221,19 @@ export function createWorkbenchPreloadBridge(
         );
       } catch {
         return sanitizeWorkbenchAnnualReportOpenResult(undefined);
+      }
+    },
+    async startAutoIterationSupervisor(
+      request: WorkbenchStartAutoIterationSupervisorRequest,
+    ): Promise<WorkbenchStartAutoIterationSupervisorResult> {
+      const reconstructed = reconstructWorkbenchStartAutoIterationSupervisorRequest(request);
+      if (!reconstructed.ok) return sanitizeWorkbenchStartAutoIterationSupervisorResult(undefined);
+      try {
+        return sanitizeWorkbenchStartAutoIterationSupervisorResult(
+          await ipc.invoke(WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL, reconstructed.request),
+        );
+      } catch {
+        return sanitizeWorkbenchStartAutoIterationSupervisorResult(undefined);
       }
     },
     observeUserInput(listener: () => void): () => void {

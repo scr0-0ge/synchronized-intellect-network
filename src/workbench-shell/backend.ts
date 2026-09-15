@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type {
@@ -34,14 +34,31 @@ import type {
 import type { WorkLedgerAuthGenerationModule } from "../coordinator/index.ts";
 import type {
   AutoIterationCoordinatorPort,
+  ArtifactReference,
+  ContextUsageObservation,
   HandoffIdempotencyKey,
   HostBoundToolActor,
   SessionCreationParameters,
+  SubmitHandoffRequest,
   SupervisorToolRequest,
   SupervisorToolResponse,
   WorkerToolRequest,
   WorkerToolResponse,
 } from "../coordinator/auto-iteration/contract.ts";
+import { createExecutionJobRunner } from "../coordinator/auto-iteration/execution-job.ts";
+import type { ApprovedGate } from "../coordinator/auto-iteration/execution-job.ts";
+import {
+  createIntegrationCandidateBuilder,
+  INTEGRATION_TARGET_REF,
+} from "../coordinator/auto-iteration/integration-candidate.ts";
+import { createIntegrationRunner } from "../coordinator/auto-iteration/integration-runner.ts";
+import {
+  createWorkspaceManager,
+  runGitCommand,
+} from "../coordinator/auto-iteration/workspace-manager.ts";
+import {
+  setCapabilityProbeSinks,
+} from "../coordinator/auto-iteration/capability-probe.ts";
 import { resolveSessionProfile } from "../session-profile/index.ts";
 import { createSessionAuthority } from "../coordinator/auto-iteration/session-authority.ts";
 import type { SessionAuthority } from "../coordinator/auto-iteration/session-authority.ts";
@@ -90,6 +107,8 @@ import {
   type WorkbenchAnnualReportJobRequest,
   type WorkbenchAnnualReportSnapshot,
   type WorkbenchAnnualReportStartResult,
+  type WorkbenchStartAutoIterationSupervisorRequest,
+  type WorkbenchStartAutoIterationSupervisorResult,
   type WorkbenchDirectInputRequest,
   type WorkbenchBackendDirectSessionProfile,
   type WorkbenchBackendContinuationDirectSessionProfile,
@@ -183,6 +202,9 @@ export interface WorkbenchBackend extends Partial<WorkbenchUserInputBridge> {
   ): Promise<WorkbenchAnnualReportStartResult>;
   readAnnualReportJob?(): Promise<WorkbenchAnnualReportSnapshot | null>;
   resolveAnnualReportOutputDirectory?(): Promise<string | null>;
+  startAutoIterationSupervisor?(
+    request: Omit<WorkbenchStartAutoIterationSupervisorRequest, "projectId">,
+  ): Promise<WorkbenchStartAutoIterationSupervisorResult>;
   close(): Promise<void>;
 }
 
@@ -263,6 +285,17 @@ function autoIterationBootstrapEntry(): string {
   );
 }
 
+/**
+ * The single v1 supervisor role (issue #8 §3: "one supervisor role"). A
+ * second `startAutoIterationSupervisor` call for the same Project always
+ * finds this slot already bound and is refused before a Session starts.
+ */
+const AUTO_ITERATION_SUPERVISOR_ROLE_SLOT_ID = "project-supervisor";
+
+const AUTO_ITERATION_INITIAL_SUPERVISOR_OPENING_INPUT =
+  "Workbench auto-iteration: you are the supervisor for this Project. Wait " +
+  "for the objective, then use the submit_work_order tool to dispatch it.";
+
 export async function createWorkbenchBackend(options: {
   readonly projectDirectory: string;
   readonly databasePath: string;
@@ -328,6 +361,13 @@ export async function createWorkbenchBackend(options: {
       options.directEndpointPresentation ?? productionEndpointPresentation,
       workbenchBindings,
       serverLookup,
+      join(
+        options.preferencePath === undefined
+          ? dirname(options.databasePath)
+          : dirname(options.preferencePath),
+        "attempts",
+        basename(options.databasePath, extname(options.databasePath)),
+      ),
       options.annualReportCapability,
       options.onAnnualReportJobActivityChange,
     );
@@ -406,6 +446,7 @@ interface AutoIterationServiceOptions {
   };
   readonly adapter: ResumableAgentRuntimeAdapter;
   readonly projectDirectory: string;
+  readonly managedWorkspaceRoot: string;
   /**
    * Workbench MCP bridge bindings (w300). The service retains each host pipe,
    * attaches its spec to the exact coordinator command, and resolves the
@@ -425,8 +466,40 @@ function createBackendAutoIterationService(
   const authority: AutoIterationProjectAuthority = channel.autoIteration;
   const sessionAuthority: SessionAuthority = createSessionAuthority();
   const arbiter: SessionTurnArbiter = createSessionTurnArbiter();
+  const workspaceManager = createWorkspaceManager({
+    repositoryPath: projectDirectory,
+    managedRoot: options.managedWorkspaceRoot,
+  });
+  const executionJobs = createExecutionJobRunner({
+    recordsRoot: join(options.managedWorkspaceRoot, "jobs"),
+  });
+  const candidateBuilder = createIntegrationCandidateBuilder({
+    repositoryPath: projectDirectory,
+    workspaceManager,
+    jobs: executionJobs,
+  });
+  const integrationRunner = createIntegrationRunner({
+    workspaceManager,
+    jobs: executionJobs,
+  });
+  // Gate plan for gateDefinitionVersion "issue-8-m3-v1" (frozen into every
+  // candidate w337 records). The product WorkOrder contract carries no
+  // per-order gate selection yet, so the default is build + typecheck; the
+  // full test suite is deliberately never a default gate.
+  const integrationGatePlan: readonly ApprovedGate[] = ["build", "typecheck"];
+  const integrationLocalBranch = INTEGRATION_TARGET_REF.replace(/^origin\//u, "");
+  const attemptStarts = new Set<string>();
   const mcpServersBySession = new Map<string, AutoIterationMcpServer>();
   let closed = false;
+  // w338 probe wiring: host-known creation parameters of the Sessions this
+  // service started. The context-rotation trigger mirrors the incumbent
+  // supervisor's own endpoint/profile for its successor — the host never
+  // invents session parameters, so without a recorded creation the trigger
+  // degrades to a diagnostic and leaves the rotation to the supervisor tool.
+  const hostSessionCreationParameters = new Map<
+    string,
+    { readonly endpointId: DurableRuntimeEndpointId; readonly profile: SessionProfile }
+  >();
   // The registry is constructed before this service exists (it must wrap the
   // adapter handed to the coordinator); association only ever happens after
   // this assignment, so the indirection is safe.
@@ -436,6 +509,90 @@ function createBackendAutoIterationService(
   // The bridge never sees model-supplied identity: each server is bound to one
   // host-known Session, and every request re-drains the durable outbox so a
   // single model turn advances the loop.
+  async function captureHandoffArtifacts(
+    request: SubmitHandoffRequest,
+  ): Promise<SubmitHandoffRequest> {
+    const attemptId = request.handoff.idempotencyKey.attemptId;
+    const jobId = `capture-${attemptId}`;
+    let job = await executionJobs.read(jobId);
+    if (job === null) {
+      const workspace = await workspaceManager.readWorkspace(attemptId);
+      if (
+        workspace === null ||
+        workspace.attemptId !== attemptId ||
+        workspace.status !== "ready"
+      ) {
+        throw new Error("attempt-workspace-not-ready");
+      }
+      const workingDirectory = await workspaceManager.verifyWorkspaceCwd(attemptId);
+      job = await executionJobs.run({
+        jobId,
+        recipe: "capture-artifact",
+        inputVersion: request.expectedVersion,
+        workingDirectory,
+        commitMessage: `workbench: capture ${attemptId}`,
+      });
+    } else if (
+      job.recipe !== "capture-artifact" ||
+      job.inputVersion !== request.expectedVersion
+    ) {
+      throw new Error("artifact-capture-job-mismatch");
+    }
+    if (
+      job.status !== "succeeded" ||
+      job.output?.kind !== "captured-artifact"
+    ) {
+      throw new Error(`artifact-capture-failed:${job.lastError ?? job.status}`);
+    }
+    const workspace = await workspaceManager.readWorkspace(attemptId);
+    if (workspace?.status === "ready") {
+      const workingDirectory = await workspaceManager.verifyWorkspaceCwd(attemptId);
+      const head = await runGitCommand({
+        cwd: workingDirectory,
+        args: ["rev-parse", "--verify", "HEAD^{commit}"],
+      });
+      const status = await runGitCommand({
+        cwd: workingDirectory,
+        args: ["status", "--porcelain"],
+      });
+      if (
+        head.exitCode !== 0 ||
+        head.stdout.trim() !== job.output.commitSha ||
+        status.exitCode !== 0 ||
+        status.stdout.trim().length > 0
+      ) {
+        throw new Error("artifact-capture-workspace-mismatch");
+      }
+    }
+    const references: readonly ArtifactReference[] = [
+      {
+        artifactId: `artifact-${attemptId}-commit`,
+        kind: "git-commit",
+        commitSha: job.output.commitSha,
+      },
+      {
+        artifactId: `artifact-${attemptId}-capture-job`,
+        kind: "execution-job",
+        jobId,
+      },
+    ];
+    for (const reference of references) {
+      await authority.recordArtifact(reference);
+    }
+    return {
+      ...request,
+      handoff: {
+        ...request.handoff,
+        artifactIds: [
+          ...new Set([
+            ...request.handoff.artifactIds,
+            ...references.map((reference) => reference.artifactId),
+          ]),
+        ],
+      },
+    };
+  }
+
   function drainingRequest(
     actor: Extract<HostBoundToolActor, { readonly kind: "supervisor" }>,
     request: SupervisorToolRequest,
@@ -444,23 +601,138 @@ function createBackendAutoIterationService(
     actor: Extract<HostBoundToolActor, { readonly kind: "worker" }>,
     request: WorkerToolRequest,
   ): Promise<WorkerToolResponse>;
-  function drainingRequest(
+  async function drainingRequest(
     actor: HostBoundToolActor,
     request: SupervisorToolRequest | WorkerToolRequest,
   ): Promise<SupervisorToolResponse | WorkerToolResponse> {
+    let preparedRequest = request;
+    if (actor.kind === "worker" && request.kind === "submit-handoff") {
+      try {
+        preparedRequest = await captureHandoffArtifacts(request);
+      } catch (error) {
+        console.warn(
+          "[auto-iteration] handoff artifact capture rejected",
+          request.handoff.idempotencyKey.attemptId,
+          error instanceof Error ? error.message : error,
+        );
+        return {
+          kind: "rejected",
+          requestIdempotencyKey: request.requestIdempotencyKey,
+          currentVersion: request.expectedVersion,
+          operation: request.kind,
+          category: "invalid-request",
+        };
+      }
+    }
     const response =
       actor.kind === "supervisor"
-        ? authority.request(actor, request as SupervisorToolRequest)
-        : authority.request(actor, request as WorkerToolRequest);
-    return response.then((settled) => {
-      void drainPendingOutbox().catch(() => undefined);
-      return settled;
-    });
+        ? authority.request(actor, preparedRequest as SupervisorToolRequest)
+        : authority.request(actor, preparedRequest as WorkerToolRequest);
+    const settled = await response;
+    void drainPendingOutbox().catch(() => undefined);
+    return settled;
   }
 
   const drainingPort: AutoIterationCoordinatorPort = {
     request: drainingRequest,
   };
+
+  /*
+   * w338, issue #8 Lane C — the one production probe wiring: the runtimes
+   * emit capability observations through the module-level sinks, and THIS is
+   * where those observations reach the Project authority.
+   *
+   * - Claude `get_context_usage` (active probe at the validated Stop-hook
+   *   boundary) lands in `observeContextUsage`; an authoritative fraction at
+   *   or above the #8 §3 draining threshold (70%) on the ACTIVE supervisor's
+   *   own context drives the same `request_supervisor_rotation` chain the
+   *   supervisor tool drives (tenure → `successor-preparing` → real
+   *   successor cutover through the rotation outbox).
+   * - Codex `account/rateLimits/read` (w257's single start/resume read)
+   *   lands in `observeQuota`; the coordinator itself parks executing Work
+   *   Orders at `waiting-for-quota` when a read establishes exhaustion, and
+   *   the outbox drain below refuses to start new workers while blocked.
+   */
+  const supervisorRotationContextFraction = 0.7;
+
+  async function requestContextRotationForHighContext(
+    observation: ContextUsageObservation,
+  ): Promise<void> {
+    if (observation.quality !== "authoritative" || observation.fraction === null) {
+      return;
+    }
+    if (observation.fraction < supervisorRotationContextFraction) return;
+    const supervisor = authority.readAutoIterationOverview().supervisor;
+    if (supervisor === null || supervisor.status !== "active") return;
+    if (observation.sessionId !== supervisor.sessionId) return;
+    const creation = hostSessionCreationParameters.get(supervisor.sessionId);
+    if (creation === undefined) {
+      // Without host-known creation parameters (e.g. after a Project reopen)
+      // the host cannot honestly name a successor Session; the supervisor
+      // tool remains the rotation path.
+      console.warn(
+        "[auto-iteration] context rotation deferred: no host-known successor parameters",
+        supervisor.roleSlotId,
+      );
+      return;
+    }
+    const actor = {
+      kind: "supervisor" as const,
+      sessionId: supervisor.sessionId,
+      tenure: {
+        roleSlotId: supervisor.roleSlotId,
+        generation: supervisor.generation,
+      },
+    };
+    const rotationRequest: SupervisorToolRequest = {
+      kind: "request-supervisor-rotation",
+      requestIdempotencyKey: `auto-context-rotation-${supervisor.roleSlotId}-g${supervisor.generation}`,
+      expectedVersion: 1,
+      observedTenure: {
+        roleSlotId: supervisor.roleSlotId,
+        generation: supervisor.generation,
+      },
+      roleSlotId: supervisor.roleSlotId,
+      successorSession: {
+        endpointId: creation.endpointId,
+        profile: creation.profile,
+      },
+    };
+    let response = await authority.request(actor, rotationRequest);
+    if (
+      response.kind === "rejected" &&
+      response.category === "stale-version" &&
+      response.currentVersion !== null
+    ) {
+      response = await authority.request(actor, {
+        ...rotationRequest,
+        expectedVersion: response.currentVersion,
+      });
+    }
+    if (response.kind === "supervisor-rotation-requested") {
+      void drainPendingOutbox().catch(() => undefined);
+      return;
+    }
+    console.warn(
+      "[auto-iteration] context rotation not accepted",
+      response.kind === "rejected" ? response.category : response.kind,
+    );
+  }
+
+  setCapabilityProbeSinks({
+    contextUsage: async (observation) => {
+      await authority.observeContextUsage(observation);
+      await requestContextRotationForHighContext(observation);
+    },
+    quota: async (observation) => {
+      await authority.observeQuota(observation);
+      // A quota observation moves Work Orders between `executing` and
+      // `waiting-for-quota`; pure auto-iteration commits carry no channel
+      // update the drain reacts to, so the re-check is chained here (the
+      // same pattern as drainingRequest).
+      void drainPendingOutbox().catch(() => undefined);
+    },
+  });
 
   function mcpServerForSession(sessionId: string): AutoIterationMcpServer {
     const existing = mcpServersBySession.get(sessionId);
@@ -560,6 +832,7 @@ function createBackendAutoIterationService(
     readonly endpointId: DurableRuntimeEndpointId;
     readonly profile: SessionProfile;
     readonly input: string;
+    readonly executionDirectory?: string;
   }): Promise<string | undefined> {
     // w300: bind the bootstrap spec to THIS command object. The coordinator
     // carries the runtime-only field to the executor and strips it before
@@ -569,7 +842,9 @@ function createBackendAutoIterationService(
     );
     let catalog: RuntimeCatalog;
     try {
-      catalog = await adapter.inspect(projectDirectory);
+      catalog = await adapter.inspect(
+        options_.executionDirectory ?? projectDirectory,
+      );
     } catch {
       options.workbenchBindings.release(options_.idempotencyKey);
       return undefined;
@@ -600,7 +875,12 @@ function createBackendAutoIterationService(
             ? {}
             : { workbenchMcp: mcpBinding.bootstrap }),
         }),
-        Object.freeze({ endpointId: options_.endpointId }),
+        Object.freeze({
+          endpointId: options_.endpointId,
+          ...(options_.executionDirectory === undefined
+            ? {}
+            : { executionDirectory: options_.executionDirectory }),
+        }),
       );
       const project = await channel.snapshot();
       const sessionId = project.commands.find(
@@ -608,6 +888,11 @@ function createBackendAutoIterationService(
       )?.session?.sessionId;
       if (sessionId === undefined) {
         options.workbenchBindings.release(options_.idempotencyKey);
+      } else {
+        hostSessionCreationParameters.set(sessionId, {
+          endpointId: options_.endpointId,
+          profile: resolved,
+        });
       }
       return sessionId;
     } catch {
@@ -757,6 +1042,9 @@ function createBackendAutoIterationService(
     if (entry.kind === "start-attempt") {
       const payload = entry.payload as {
         readonly attemptId?: string;
+        readonly attemptNumber?: number;
+        readonly workOrderId?: string;
+        readonly baselineCommitSha?: string;
         readonly workerSession?: SessionCreationParameters;
         readonly sessionConfiguration?: {
           readonly requested?: SessionCreationParameters;
@@ -765,49 +1053,90 @@ function createBackendAutoIterationService(
       const attemptId = payload?.attemptId;
       const creation =
         payload?.workerSession ?? payload?.sessionConfiguration?.requested;
-      if (attemptId === undefined || creation === undefined) return false;
+      if (
+        attemptId === undefined ||
+        payload.attemptNumber === undefined ||
+        payload.workOrderId === undefined ||
+        payload.baselineCommitSha === undefined ||
+        creation === undefined
+      ) return false;
+      if (attemptStarts.has(attemptId)) {
+        console.warn("[auto-iteration] attempt start rejected: already running", attemptId);
+        return false;
+      }
       const overview = authority.readAutoIterationOverview();
+      // w338: quota-blocked accounts do not dispatch new workers; the entry
+      // stays pending and a later availability observation re-drains it.
+      if (overview.quotaWaiting) return false;
       const workOrder = overview.workOrders.find(
         (order) => order.currentAttemptId === attemptId,
       );
       if (workOrder === undefined || workOrder.workerSessionBound) return false;
-      const sessionId = await startSessionForAutoIteration({
-        idempotencyKey: `auto-attempt-${attemptId}`,
-        endpointId: creation.endpointId,
-        profile: creation.profile,
-        input:
-          `Workbench auto-iteration: work order ${workOrder.workOrderId} is ` +
-          `assigned to you. Use the read_work_order_status tool, do the work, ` +
-          `then submit_handoff.`,
-      });
-      if (sessionId === undefined) return false;
-      await authority.bindAttemptSession({
-        attemptId,
-        sessionId,
-        configuration: { state: "requested", requested: creation },
-      });
-      await authority.updateAttemptRuntime({
-        attemptId,
-        runtimeLifecycle: "running",
-        slotState: "owned",
-      });
-      sessionAuthority.bindSession({
-        actor: {
-          kind: "worker",
-          sessionId,
-          workOrderId: workOrder.workOrderId,
+      attemptStarts.add(attemptId);
+      try {
+        const existingWorkspace = await workspaceManager.readWorkspace(attemptId);
+        const workspace =
+          existingWorkspace ??
+          await workspaceManager.createAttemptWorkspace({
+            attemptId,
+            branch: `workbench/${payload.workOrderId}/attempt-${payload.attemptNumber}`,
+            baselineRef: payload.baselineCommitSha,
+          });
+        if (
+          workspace.attemptId !== attemptId ||
+          workspace.status !== "ready"
+        ) {
+          throw new Error("attempt-workspace-not-ready");
+        }
+        const executionDirectory = await workspaceManager.verifyWorkspaceCwd(attemptId);
+        await authority.updateAttemptRuntime({
           attemptId,
-        },
-      });
-      // w300: only now does the pipe know its Session — after the durable
-      // attempt binding AND the in-process actor binding, so the CLI's
-      // buffered MCP handshake replays against a Session that already sees
-      // its worker tools.
-      options.workbenchBindings.associate(
-        `auto-attempt-${attemptId}`,
-        sessionId,
-      );
-      return true;
+          runtimeLifecycle: "accepted",
+          slotState: "unreserved",
+          workspaceId: workspace.workspaceId,
+        });
+        const sessionId = await startSessionForAutoIteration({
+          idempotencyKey: `auto-attempt-${attemptId}`,
+          endpointId: creation.endpointId,
+          profile: creation.profile,
+          executionDirectory,
+          input:
+            `Workbench auto-iteration: work order ${workOrder.workOrderId} is ` +
+            `assigned to you. Use the read_work_order_status tool, do the work, ` +
+            `then submit_handoff.`,
+        });
+        if (sessionId === undefined) return false;
+        await authority.bindAttemptSession({
+          attemptId,
+          sessionId,
+          configuration: { state: "requested", requested: creation },
+        });
+        await authority.updateAttemptRuntime({
+          attemptId,
+          runtimeLifecycle: "running",
+          slotState: "owned",
+          workspaceId: workspace.workspaceId,
+        });
+        sessionAuthority.bindSession({
+          actor: {
+            kind: "worker",
+            sessionId,
+            workOrderId: workOrder.workOrderId,
+            attemptId,
+          },
+        });
+        // w300: only now does the pipe know its Session — after the durable
+        // attempt binding AND the in-process actor binding, so the CLI's
+        // buffered MCP handshake replays against a Session that already sees
+        // its worker tools.
+        options.workbenchBindings.associate(
+          `auto-attempt-${attemptId}`,
+          sessionId,
+        );
+        return true;
+      } finally {
+        attemptStarts.delete(attemptId);
+      }
     }
     if (entry.kind === "inbox-wakeup") {
       const payload = entry.payload as {
@@ -841,42 +1170,266 @@ function createBackendAutoIterationService(
         successorSession: payload.successorSession,
       });
     }
-    // review-disposed: the external integration action is not wired for the
-    // first loop; the durable entry stays pending and is retried idempotently.
+    const payload = entry.payload as {
+      readonly decision?: string;
+      readonly handoff?: HandoffIdempotencyKey;
+      readonly workspaceId?: string | null;
+      readonly integration?: {
+        readonly integrationCandidateId?: string;
+        readonly expectedTargetBaselineCommitSha?: string;
+        readonly orderedCommitShas?: readonly string[];
+        readonly inputVersion?: number;
+      };
+    };
+    if (payload.decision === undefined || payload.handoff === undefined) {
+      return false;
+    }
+    if (payload.integration === undefined) {
+      if (typeof payload.workspaceId === "string") {
+        const reclaimed = await workspaceManager.reclaimWorkspace(payload.workspaceId);
+        if (reclaimed.status !== "reclaimed") {
+          console.warn(
+            "[auto-iteration] attempt workspace reclaim deferred",
+            payload.workspaceId,
+            reclaimed.lastError,
+          );
+          return false;
+        }
+      }
+      await authority.completeReviewDisposition({
+        reviewDecisionId: payload.decision,
+      });
+    } else {
+      const integration = payload.integration;
+      if (
+        integration.integrationCandidateId === undefined ||
+        integration.expectedTargetBaselineCommitSha === undefined ||
+        integration.orderedCommitShas === undefined ||
+        integration.inputVersion === undefined
+      ) {
+        return false;
+      }
+      const built = await candidateBuilder.build({
+        integrationCandidateId: integration.integrationCandidateId,
+        expectedTargetBaselineCommitSha:
+          integration.expectedTargetBaselineCommitSha,
+        orderedCommitShas: integration.orderedCommitShas,
+        gateDefinitionVersion: "issue-8-m3-v1",
+        environment: `${process.platform}/${process.arch}; node ${process.version}`,
+        handoffs: [payload.handoff],
+        reviewDecisionIds: [payload.decision],
+        version: 1,
+        inputVersion: integration.inputVersion,
+      });
+      if (built.status !== "ready") {
+        console.warn(
+          "[auto-iteration] integration candidate not ready",
+          integration.integrationCandidateId,
+          built.status,
+        );
+        return false;
+      }
+      if (typeof payload.workspaceId === "string") {
+        const reclaimed = await workspaceManager.reclaimWorkspace(payload.workspaceId);
+        if (reclaimed.status !== "reclaimed") {
+          console.warn(
+            "[auto-iteration] attempt workspace reclaim deferred",
+            payload.workspaceId,
+            reclaimed.lastError,
+          );
+          return false;
+        }
+      }
+      await authority.completeReviewDisposition({
+        reviewDecisionId: payload.decision,
+        candidate: built.candidate,
+      });
+    }
+    return true;
+  }
+
+  /** Wakes the supervisor Session for a blocked integration; same arbiter path as the handoff wake. */
+  async function wakeSupervisorForBlockedIntegration(request: {
+    readonly workOrderId: string;
+    readonly integrationCandidateId: string;
+    readonly summary: string;
+  }): Promise<boolean> {
+    const supervisor = authority.readAutoIterationOverview().supervisor;
+    if (supervisor === null || supervisor.status !== "active") return false;
+    if (arbiter.busy(supervisor.sessionId)) return false;
+    if (await sessionInFlight(supervisor.sessionId)) return false;
+    const session = await sessionSummary(supervisor.sessionId);
+    if (session === undefined || !session.resumable) return false;
+    const resumeIdentity = await resumeIdentityFor(
+      supervisor.sessionId,
+      session.profile,
+    );
+    const wakeupKey = randomUUID();
+    const mcpBinding = options.workbenchBindings.reserveForSession(
+      wakeupKey,
+      supervisor.sessionId,
+    );
+    void arbiter
+      .submit(supervisor.sessionId, "auto-wakeup", async () => {
+        if (closed) {
+          options.workbenchBindings.release(wakeupKey);
+          return;
+        }
+        try {
+          await channel.act(
+            Object.freeze({
+              kind: "direct" as const,
+              commandKind: "continue" as const,
+              idempotencyKey: wakeupKey,
+              runtime: "codex" as const,
+              targetSessionId: session.sessionId,
+              profile: session.profile,
+              ...(resumeIdentity === undefined
+                ? {}
+                : { runtimeResumeIdentity: resumeIdentity }),
+              ...(mcpBinding === undefined
+                ? {}
+                : { workbenchMcp: mcpBinding.bootstrap }),
+              input:
+                `Workbench auto-iteration: integration for work order ` +
+                `${request.workOrderId} is blocked (${request.summary}). ` +
+                `Use the read_inbox tool, then decide whether to re-issue or accept.`,
+            }),
+            resumeIdentity === undefined
+              ? undefined
+              : Object.freeze({ endpointId: resumeIdentity.endpointId }),
+          );
+        } catch (error) {
+          options.workbenchBindings.release(wakeupKey);
+          console.warn(
+            "[auto-iteration] supervisor integration-blocked wakeup deferred",
+            request.workOrderId,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      })
+      .catch(() => undefined);
+    return true;
+  }
+
+  async function reclaimWorkspaceQuietly(workspaceId: string): Promise<void> {
+    try {
+      const reclaimed = await workspaceManager.reclaimWorkspace(workspaceId);
+      if (reclaimed.status !== "reclaimed") {
+        console.warn(
+          "[auto-iteration] integration workspace reclaim deferred",
+          workspaceId,
+          reclaimed.lastError,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        "[auto-iteration] integration workspace reclaim failed",
+        workspaceId,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  /**
+   * Runs at most one outstanding integration per call. Terminal outcomes are
+   * recorded in the Project transaction; deferrals stay retryable and are
+   * never dressed up as a blocked candidate.
+   */
+  async function runPendingIntegrations(): Promise<boolean> {
+    const backlog = await authority.readIntegrationBacklog();
+    for (const item of backlog) {
+      if (closed) return false;
+      const candidateId = item.candidate.integrationCandidateId;
+      let result;
+      try {
+        result = await integrationRunner.run({
+          candidate: item.candidate,
+          repositoryPath: projectDirectory,
+          targetRef: INTEGRATION_TARGET_REF,
+          localTargetBranch: integrationLocalBranch,
+          gates: integrationGatePlan,
+        });
+      } catch (error) {
+        console.warn(
+          "[auto-iteration] integration deferred",
+          candidateId,
+          error instanceof Error ? error.message : error,
+        );
+        continue;
+      }
+      if (result.status === "deferred") {
+        console.warn(
+          "[auto-iteration] integration deferred",
+          candidateId,
+          result.reason,
+        );
+        continue;
+      }
+      await authority.completeIntegration({
+        integrationCandidateId: candidateId,
+        outcome: result.outcome,
+      });
+      // The candidate workspace was retained only until gates finished.
+      await reclaimWorkspaceQuietly(candidateId);
+      await reclaimWorkspaceQuietly(`integration-${candidateId}`);
+      if (result.outcome.status === "blocked: target-moved") {
+        await wakeSupervisorForBlockedIntegration({
+          workOrderId: item.candidate.handoffs[0]?.workOrderId ?? "",
+          integrationCandidateId: candidateId,
+          summary: result.outcome.status,
+        }).catch(() => undefined);
+      }
+      return true;
+    }
     return false;
   }
 
   let draining = false;
   let drainQueued = false;
-  async function drainPendingOutbox(): Promise<void> {
-    if (closed) return;
+  let drainCompletion: Promise<void> = Promise.resolve();
+  function drainPendingOutbox(): Promise<void> {
+    if (closed) return Promise.resolve();
     if (draining) {
       drainQueued = true;
-      return;
+      return drainCompletion;
     }
     draining = true;
-    try {
-      while (!closed) {
-        drainQueued = false;
-        const entries = await authority.readPendingOutbox();
-        let progressed = false;
-        for (const entry of entries) {
-          try {
-            progressed =
-              (await handleOutboxEntry(entry)) || progressed;
-          } catch (error) {
-            console.warn(
-              "[auto-iteration] outbox entry deferred",
-              entry.kind,
-              error instanceof Error ? error.message : error,
-            );
+    drainCompletion = (async () => {
+      try {
+        while (!closed) {
+          drainQueued = false;
+          const entries = await authority.readPendingOutbox();
+          let progressed = false;
+          for (const entry of entries) {
+            try {
+              progressed =
+                (await handleOutboxEntry(entry)) || progressed;
+            } catch (error) {
+              console.warn(
+                "[auto-iteration] outbox entry deferred",
+                entry.kind,
+                error instanceof Error ? error.message : error,
+              );
+            }
           }
+          if (!progressed) {
+            try {
+              progressed = (await runPendingIntegrations()) || progressed;
+            } catch (error) {
+              console.warn(
+                "[auto-iteration] integration pass deferred",
+                error instanceof Error ? error.message : error,
+              );
+            }
+          }
+          if (!progressed && !drainQueued) return;
         }
-        if (!progressed && !drainQueued) return;
+      } finally {
+        draining = false;
       }
-    } finally {
-      draining = false;
-    }
+    })();
+    return drainCompletion;
   }
 
   // Turn-boundary trigger: a durable command update (a turn ending, a session
@@ -930,6 +1483,8 @@ function createBackendAutoIterationService(
     drainPendingOutbox,
     async close(): Promise<void> {
       closed = true;
+      await drainCompletion.catch(() => undefined);
+      setCapabilityProbeSinks(undefined);
       await updateIterator?.return?.().catch(() => undefined);
       await arbiter.close();
       options.workbenchBindings.close();
@@ -948,6 +1503,7 @@ function createBackend(
   serverLookup: {
     serverForSession(sessionId: string): AutoIterationMcpServer;
   },
+  autoIterationManagedWorkspaceRoot: string,
   annualReportCapability?: WorkbenchAnnualReportCapability,
   onAnnualReportJobActivityChange?: (delta: 1 | -1) => void,
 ): WorkbenchBackend {
@@ -994,6 +1550,7 @@ function createBackend(
           },
           adapter,
           projectDirectory,
+          managedWorkspaceRoot: autoIterationManagedWorkspaceRoot,
           workbenchBindings,
           serverLookup,
         });
@@ -1692,6 +2249,81 @@ function createBackend(
         if (!activityHandedToCompletion) onAnnualReportJobActivityChange?.(-1);
       }
     },
+    async startAutoIterationSupervisor(
+      request: Omit<WorkbenchStartAutoIterationSupervisorRequest, "projectId">,
+    ): Promise<WorkbenchStartAutoIterationSupervisorResult> {
+      if (closing || autoIteration === undefined) {
+        return autoIterationSupervisorStartFailure(
+          "auto-iteration-unavailable",
+          "Auto-iteration is unavailable in this build.",
+        );
+      }
+      if (
+        autoIteration.authority.readAutoIterationOverview().supervisor !== null
+      ) {
+        return autoIterationSupervisorStartFailure(
+          "already-active",
+          "This Project already has an auto-iteration supervisor. Open its Session to continue, or rotate from within it.",
+        );
+      }
+      const snapshot = activeSnapshot;
+      if (
+        snapshot === undefined ||
+        request.snapshotKey !== snapshot.value.publicResult.profile.snapshotKey
+      ) {
+        return autoIterationSupervisorStartFailure(
+          "invalid-profile-selection",
+          "The selected Session Profile expired. Reload the profile options and try again.",
+        );
+      }
+      const resolved = snapshot.value.resolveSelection(request);
+      if (resolved === undefined) {
+        return autoIterationSupervisorStartFailure(
+          "invalid-profile-selection",
+          "The selected endpoint, model, or intensity is no longer available. Reload the profile options and try again.",
+        );
+      }
+      if (snapshot.directStartByEndpoint[resolved.endpointIndex] !== "supported") {
+        return autoIterationSupervisorStartFailure(
+          "invalid-profile-selection",
+          "The selected endpoint cannot start because its key or runtime is unavailable. Open Settings and try again.",
+        );
+      }
+      const resolvedEndpoint =
+        snapshot.value.publicResult.profile.endpoints[resolved.endpointIndex];
+      if (resolvedEndpoint === undefined) {
+        return autoIterationSupervisorStartFailure(
+          "invalid-profile-selection",
+          "The selected endpoint, model, or intensity is no longer available. Reload the profile options and try again.",
+        );
+      }
+      const sessionId = await autoIteration.startHostSession({
+        endpointId: resolvedEndpoint.endpointId,
+        profile: resolved.profile,
+        input: AUTO_ITERATION_INITIAL_SUPERVISOR_OPENING_INPUT,
+      });
+      if (sessionId === undefined) {
+        return autoIterationSupervisorStartFailure(
+          "start-failed",
+          "The supervisor Session could not be started. Try again.",
+        );
+      }
+      try {
+        await autoIteration.bindInitialSupervisor({
+          roleSlotId: AUTO_ITERATION_SUPERVISOR_ROLE_SLOT_ID,
+          sessionId,
+        });
+      } catch {
+        // A concurrent start already bound this Project's one supervisor
+        // slot between the check above and this bind; the new Session is
+        // left running unbound, same as any other race the outbox tolerates.
+        return autoIterationSupervisorStartFailure(
+          "already-active",
+          "This Project already has an auto-iteration supervisor. Open its Session to continue, or rotate from within it.",
+        );
+      }
+      return Object.freeze({ ok: true, status: "started" });
+    },
     readAnnualReportJob(): Promise<WorkbenchAnnualReportSnapshot | null> {
       if (closing || annualReportCapability === undefined) return Promise.resolve(null);
       return annualReportCapability.readLatest(projectDirectory).catch(() => null);
@@ -1730,6 +2362,16 @@ function annualReportStartFailure(
   category: Exclude<WorkbenchAnnualReportStartResult, { readonly ok: true }>["error"]["category"],
   message: string,
 ): WorkbenchAnnualReportStartResult {
+  return Object.freeze({ ok: false, error: Object.freeze({ category, message }) });
+}
+
+function autoIterationSupervisorStartFailure(
+  category: Exclude<
+    WorkbenchStartAutoIterationSupervisorResult,
+    { readonly ok: true }
+  >["error"]["category"],
+  message: string,
+): WorkbenchStartAutoIterationSupervisorResult {
   return Object.freeze({ ok: false, error: Object.freeze({ category, message }) });
 }
 

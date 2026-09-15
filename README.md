@@ -68,8 +68,8 @@ Run the failing test and fix whatever it reports.
 
 ## Run it
 
-The quickest start: download the Windows zip from
-[Releases](https://github.com/scr0-0ge/synchronized-intellect-network/releases), extract it, and
+The quickest start: download
+[`synchronized-intellect-network-0.1.0-windows-x64.zip`](https://github.com/scr0-0ge/synchronized-intellect-network/releases/download/v0.1.0/synchronized-intellect-network-0.1.0-windows-x64.zip), extract it, and
 double-click **`Synchronized Intellect Network.exe`**. It is unsigned, so SmartScreen will ask on
 first run (**More info → Run anyway**). Agent Sessions run in a project you pick with
 **Create Project…**, and the Settings one-click CLI installs fetch a private Node runtime when none is on PATH.

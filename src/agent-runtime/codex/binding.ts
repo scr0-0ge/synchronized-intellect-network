@@ -584,7 +584,11 @@ export class CodexRuntimeBinding implements ResumableRuntimeBinding {
             yield { kind: "turn-interrupted", status: "interrupted" };
             return;
           }
-          if (turn.status !== "completed") throw new RuntimeAdapterError("turn-failed");
+          if (turn.status !== "completed") {
+            throw new RuntimeAdapterError(
+              isCodexRateLimitedTurnFailure(turn) ? "rate-limited" : "turn-failed",
+            );
+          }
 
           const finalMessage = readSegmentFinal();
 
@@ -719,6 +723,12 @@ export class CodexRuntimeBinding implements ResumableRuntimeBinding {
   }
 }
 
+/**
+ * Codex has no turn-input image path (`turn/start`/`turn/steer` accept text
+ * only). The exact-one-key check below is the deliberate rejection point for
+ * an `images`-carrying `RuntimeInput`: `send`/`steer` fail closed with
+ * `invalid-input` rather than silently sending the text and dropping images.
+ */
 function isRuntimeInput(value: RuntimeInput): value is RuntimeInput {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const keys = Object.keys(value);
@@ -732,6 +742,26 @@ function isRuntimeInput(value: RuntimeInput): value is RuntimeInput {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Real codex 0.153.4 capture (w322, `codex-api` / openai-custom provider, a
+ * fake upstream answering every request with HTTP 429): a turn that failed
+ * because the provider rate-limited the request carries
+ * `turn.error.codexErrorInfo.responseTooManyFailedAttempts.httpStatusCode ===
+ * 429`. No retry-after/reset instant appears anywhere on that wire (unlike the
+ * GLM `[1310]` quota-pause frame), so none is reported here either -- the
+ * shared `rate-limited` copy (`transcript-copy.ts`, added for the Claude side
+ * in w306) already carries the "no retry time reported" wording. A turn that
+ * failed for any other reason keeps the existing generic classification.
+ */
+function isCodexRateLimitedTurnFailure(turn: JsonObject): boolean {
+  const error = turn.error;
+  if (!isRecord(error)) return false;
+  const info = error.codexErrorInfo;
+  if (!isRecord(info)) return false;
+  const attempts = info.responseTooManyFailedAttempts;
+  return isRecord(attempts) && attempts.httpStatusCode === 429;
 }
 
 /** Reasoning-style item types report thinking; every other item runs something. */

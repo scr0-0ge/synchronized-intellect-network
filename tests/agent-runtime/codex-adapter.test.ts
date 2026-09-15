@@ -19,6 +19,8 @@ import type {
   RuntimeResume,
   RuntimeUsageObservation,
 } from "../../src/agent-runtime/index.ts";
+import { setCapabilityProbeSinks } from "../../src/coordinator/auto-iteration/capability-probe.ts";
+import type { QuotaObservation } from "../../src/coordinator/auto-iteration/contract.ts";
 import { ScriptedTransport } from "./support/scripted-transport.ts";
 
 const requestedProfile = {
@@ -3307,6 +3309,10 @@ test("a resumed binding rejects malformed input and shuts down", async () => {
     { text: "" },
     { text: "   " },
     { text: "fixed input", nativeExtra: true },
+    // Codex has no turn-input image path (w329): an images-carrying
+    // RuntimeInput -- otherwise a legal shape for the Claude Runtime -- fails
+    // closed here rather than silently sending the text and dropping images.
+    { text: "fixed input", images: [{ mediaType: "image/png", base64: "aGVsbG8=" }] },
   ]) {
     const transport = await ScriptedTransport.fromFixture(
       new URL("./fixtures/resume-success.jsonl", import.meta.url),
@@ -3326,6 +3332,11 @@ test("a resumed binding rejects malformed input and shuts down", async () => {
       );
     });
     assert.equal(transport.recordedStopCalls(), 1);
+    assert.deepEqual(
+      transport.recordedOutboundJsonl().filter((line) => JSON.parse(line).method === "turn/start"),
+      [],
+      "no turn/start request may carry an images-bearing input to the Codex CLI",
+    );
   }
 });
 
@@ -3915,6 +3926,120 @@ test("start reports the account's weekly rate-limit window through the usage sin
   assert.deepEqual(observed[0]!.windows, [
     { label: "seven-day", utilization: 0.5, resetsAt: 1_700_000_000_000 },
   ]);
+});
+
+// w338, issue #8 Lane C: the same single start read also reaches the
+// coordinator quota seam as a QuotaObservation -- never a second
+// `account/rateLimits/read`. The read count is proven by the scripted wire:
+// exactly one spare response is queued for it, so a second request would
+// starve the queue and fail the turn.
+test("the start rate-limit read hands the same reading to the quota sink", async () => {
+  const transport = new ScriptedTransport([
+    JSON.stringify({ jsonrpc: "2.0", id: 1, result: { server: "synthetic" } }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      result: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 3,
+      result: { data: [{ id: "gpt-5.6-sol", supportedReasoningEfforts: [{ reasoningEffort: "ultra" }] }] },
+    }),
+    // The ONE response the single start read may consume.
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 4,
+      result: {
+        rateLimits: {
+          primary: { usedPercent: 100, windowDurationMins: 10_080, resetsAt: 1_700_000_000 },
+          secondary: null,
+        },
+      },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 5,
+      result: {
+        thread: { id: "thread-fixed" },
+        model: "gpt-5.6-sol",
+        reasoningEffort: "ultra",
+        approvalPolicy: "never",
+        sandbox: { type: "dangerFullAccess" },
+      },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "thread/started",
+      params: { thread: { id: "thread-fixed" } },
+    }),
+    JSON.stringify({ jsonrpc: "2.0", id: 6, result: { turn: { id: "turn-fixed", status: "inProgress" } } }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "turn/started",
+      params: { threadId: "thread-fixed", turn: { id: "turn-fixed", status: "inProgress" } },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/started",
+      params: { threadId: "thread-fixed", turnId: "turn-fixed", item: { id: "item-fixed", type: "agentMessage" } },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        threadId: "thread-fixed",
+        turnId: "turn-fixed",
+        item: { id: "item-fixed", type: "agentMessage", phase: "final_answer", text: "FIXED_MARKER" },
+      },
+    }),
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "turn/completed",
+      params: { threadId: "thread-fixed", turn: { id: "turn-fixed", status: "completed" } },
+    }),
+  ]);
+  const quotaObserved: QuotaObservation[] = [];
+  setCapabilityProbeSinks({
+    quota: (observation) => {
+      quotaObserved.push(observation);
+    },
+  });
+  try {
+    const adapter = new CodexAdapter(
+      async () => transport,
+      undefined,
+      undefined,
+      undefined,
+      () => {}, // the w257 usage sink stays configured so the read happens
+      "codex",
+    );
+    const binding = await adapter.start({
+      projectDirectory: "C:\\synthetic-project",
+      profile: requestedProfile,
+    });
+    await binding.send({ text: "fixed input" });
+    const events: NormalizedRuntimeEvent[] = [];
+    for await (const event of binding.events()) events.push(event);
+    assert.equal(events.at(-1)?.kind, "turn-completed",
+      "the turn completes with exactly one scripted rateLimits response -- no second read");
+    const reads = transport.recordedOutboundJsonl().filter((line) =>
+      line.includes("account/rateLimits/read"));
+    assert.equal(reads.length, 1, "exactly one account/rateLimits/read on the wire");
+    assert.equal(quotaObserved.length, 1);
+    assert.deepEqual(quotaObserved[0], {
+      quotaPoolId: "codex-account:codex",
+      source: "codex-account:account/rateLimits/read",
+      observedAt: (quotaObserved[0] as QuotaObservation).observedAt,
+      status: "observed",
+      windows: [
+        { name: "primary", usedFraction: 1, resetsAt: 1_700_000_000_000, windowDurationMinutes: 10_080 },
+        { name: "secondary", usedFraction: null, resetsAt: null, windowDurationMinutes: null },
+      ],
+    });
+  } finally {
+    setCapabilityProbeSinks(undefined);
+  }
 });
 
 test("readCodexRateLimitObservation maps both windows and drops an unrecognized duration", () => {

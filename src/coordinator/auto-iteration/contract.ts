@@ -200,6 +200,55 @@ export interface IntegrationCandidate {
   readonly workspaceId: string;
   readonly constructionJobId: string;
   readonly version: number;
+  /**
+   * Terminal integration outcome once the host's integration job finished;
+   * absent while the candidate is still awaiting integration. Optional so
+   * every existing producer of a frozen candidate stays unchanged.
+   */
+  readonly outcome?: IntegrationOutcome;
+}
+
+/** One fixed gate executed on an integration candidate; tail is its bounded log excerpt. */
+export interface IntegrationGateRecord {
+  readonly gate: string;
+  readonly jobId: string;
+  readonly exitCode: number | null;
+  readonly passed: boolean;
+  /** Last 200 lines of the gate job's captured output; full logs stay in the job record. */
+  readonly tail: string;
+}
+
+/**
+ * Terminal result of the product-run integration of one frozen candidate
+ * (issue #8 M3): all gates green merges to the LOCAL target branch; every
+ * red path records which fixed check failed without retrying.
+ */
+export type IntegrationOutcome =
+  | {
+      readonly status: "integrated";
+      /** Merge commit now at the tip of the local target branch. */
+      readonly mergeCommitSha: string;
+      readonly gates: readonly IntegrationGateRecord[];
+    }
+  | {
+      readonly status: "blocked: merge-conflict";
+      readonly conflictFiles: readonly string[];
+    }
+  | {
+      readonly status: "blocked: gate-failed";
+      readonly gates: readonly IntegrationGateRecord[];
+    }
+  | {
+      readonly status: "blocked: target-moved";
+      readonly expectedBaselineCommitSha: string;
+      readonly observedTargetRefCommitSha: string | null;
+      readonly observedLocalBranchCommitSha: string | null;
+    };
+
+/** A frozen candidate whose integration the host still owes an outcome for. */
+export interface PendingIntegration {
+  readonly candidate: IntegrationCandidate;
+  readonly reviewDecisionId: string;
 }
 
 /** Outcome of constructing one candidate inside a managed detached worktree. */
@@ -629,11 +678,27 @@ export interface AutoIterationHostLifecycle {
   bindAttemptSession(binding: AttemptSessionBinding): Promise<ExecutionAttempt>;
   updateAttemptRuntime(mutation: AttemptRuntimeMutation): Promise<ExecutionAttempt>;
   recordArtifact(reference: ArtifactReference): Promise<void>;
+  /** Completes the durable review action, persisting its frozen candidate when required. */
+  completeReviewDisposition(disposition: {
+    readonly reviewDecisionId: string;
+    readonly candidate?: IntegrationCandidate;
+  }): Promise<void>;
   markHandoffIncluded(mutation: HandoffIncludedMutation): Promise<Extract<
     HandoffReceipt,
     { readonly level: "included-in-parent-input" }
   >>;
   readPendingOutbox(): Promise<readonly PendingAutoIterationOutboxEntry[]>;
+  /**
+   * Records the terminal integration outcome for one frozen candidate in the
+   * same Project transaction that advanced its Work Order lifecycle; the
+   * supervisor inbox is notified for `blocked: target-moved`.
+   */
+  completeIntegration(disposition: {
+    readonly integrationCandidateId: string;
+    readonly outcome: IntegrationOutcome;
+  }): Promise<void>;
+  /** Frozen candidates that still owe an integration outcome (reopen resume driver). */
+  readIntegrationBacklog(): Promise<readonly PendingIntegration[]>;
   completeSupervisorRotation(
     completion: SupervisorRotationCompletion,
   ): Promise<SupervisorTenure>;

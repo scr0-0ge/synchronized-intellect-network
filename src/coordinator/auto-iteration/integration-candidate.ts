@@ -115,20 +115,41 @@ export function createIntegrationCandidateBuilder(options: {
         orderedCommitShas.push(await resolveCommit(options.repositoryPath, commitSha));
       }
 
-      const workspace = await options.workspaceManager.createCandidateWorkspace({
-        candidateId: input.integrationCandidateId,
-        baselineRef: expectedBaseline,
-      });
+      const recordedWorkspace = await options.workspaceManager.readWorkspace(
+        input.integrationCandidateId,
+      );
+      const workspace =
+        recordedWorkspace ??
+        await options.workspaceManager.createCandidateWorkspace({
+          candidateId: input.integrationCandidateId,
+          baselineRef: expectedBaseline,
+        });
+      if (
+        workspace.candidateId !== input.integrationCandidateId ||
+        workspace.baselineCommitSha !== expectedBaseline ||
+        workspace.status !== "ready"
+      ) {
+        throw new Error("candidate workspace does not match the requested candidate");
+      }
+      await options.workspaceManager.verifyWorkspaceCwd(workspace.workspaceId);
       const constructionJobId = `${input.integrationCandidateId}-build`;
       let job;
       try {
-        job = await options.jobs.run({
-          jobId: constructionJobId,
-          recipe: "build-candidate",
-          inputVersion: input.inputVersion,
-          workingDirectory: workspace.path,
-          orderedCommitShas,
-        });
+        job = await options.jobs.read(constructionJobId);
+        if (job === null) {
+          job = await options.jobs.run({
+            jobId: constructionJobId,
+            recipe: "build-candidate",
+            inputVersion: input.inputVersion,
+            workingDirectory: workspace.path,
+            orderedCommitShas,
+          });
+        } else if (
+          job.recipe !== "build-candidate" ||
+          job.inputVersion !== input.inputVersion
+        ) {
+          throw new Error("candidate construction job does not match the requested candidate");
+        }
       } catch (error) {
         await options.workspaceManager.reclaimWorkspace(input.integrationCandidateId);
         throw error;

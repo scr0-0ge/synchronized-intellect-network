@@ -22,6 +22,7 @@ import {
   WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL,
   WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL,
   WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL,
+  WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL,
   WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   publicInvalidProfileDefaultSelection,
   publicCreateProjectResult,
@@ -49,6 +50,8 @@ import {
   type WorkbenchAnnualReportProjectRequest,
   type WorkbenchAnnualReportSnapshot,
   type WorkbenchAnnualReportStartResult,
+  type WorkbenchStartAutoIterationSupervisorRequest,
+  type WorkbenchStartAutoIterationSupervisorResult,
   type WorkbenchCreateProjectResult,
   type WorkbenchDirectSessionProfileDefaultRequest,
   type WorkbenchDirectSessionProfileDefaultResult,
@@ -97,6 +100,8 @@ import {
   sanitizeWorkbenchAnnualReportOpenResult,
   sanitizeWorkbenchAnnualReportSnapshot,
   sanitizeWorkbenchAnnualReportStartResult,
+  reconstructWorkbenchStartAutoIterationSupervisorRequest,
+  sanitizeWorkbenchStartAutoIterationSupervisorResult,
   sanitizeWorkbenchHostedProjectResult,
   createWorkbenchProjectTransferEncoder,
   sanitizeWorkbenchInterruptResult,
@@ -159,6 +164,7 @@ export interface IpcMainBoundary {
       | typeof WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL
       | typeof WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL
       | typeof WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL
+      | typeof WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL
       | typeof WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
     listener: BoundaryListener,
   ): void;
@@ -182,6 +188,7 @@ export interface IpcMainBoundary {
       | typeof WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL
       | typeof WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL
       | typeof WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL
+      | typeof WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL
       | typeof WORKBENCH_USE_PROFILE_AS_DEFAULT_CHANNEL,
   ): void;
 }
@@ -230,6 +237,9 @@ export interface ProjectViewSource extends Partial<WorkbenchUserInputBridge> {
   resolveAnnualReportOutputDirectory?(
     request: WorkbenchAnnualReportProjectRequest,
   ): Promise<string | null>;
+  startAutoIterationSupervisor?(
+    request: WorkbenchStartAutoIterationSupervisorRequest,
+  ): Promise<WorkbenchStartAutoIterationSupervisorResult>;
   interruptActiveTurn?(
     request: WorkbenchInterruptRequest,
   ): Promise<WorkbenchInterruptResult>;
@@ -956,6 +966,21 @@ export function installWorkbenchProjectViewIpc(options: {
     }
   };
 
+  const startAutoIterationSupervisorHandler: BoundaryListener = async (...values) => {
+    const sender = owningSender(values[0], options.window);
+    const request = reconstructWorkbenchStartAutoIterationSupervisorRequest(values[1]);
+    if (values.length !== 2 || disposed || !actionOpen || sender === undefined ||
+        !request.ok || options.source?.startAutoIterationSupervisor === undefined) {
+      return sanitizeWorkbenchStartAutoIterationSupervisorResult(undefined);
+    }
+    return trackAction(
+      async () => sanitizeWorkbenchStartAutoIterationSupervisorResult(
+        await options.source!.startAutoIterationSupervisor!(request.request),
+      ),
+      sanitizeWorkbenchStartAutoIterationSupervisorResult(undefined),
+    );
+  };
+
   const reloadListener: BoundaryListener = () => endActiveObservation();
   const terminalLifecycleListener: BoundaryListener = () => {
     actionOpen = false;
@@ -993,6 +1018,7 @@ export function installWorkbenchProjectViewIpc(options: {
   options.ipcMain.handle(WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL, startAnnualReportHandler);
   options.ipcMain.handle(WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL, readAnnualReportHandler);
   options.ipcMain.handle(WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL, openAnnualReportOutputHandler);
+  options.ipcMain.handle(WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL, startAutoIterationSupervisorHandler);
   options.ipcMain.handle(WORKBENCH_INTERRUPT_CHANNEL, interruptHandler);
   options.ipcMain.handle(WORKBENCH_READ_USER_INPUT_CHANNEL, readUserInputHandler);
   options.ipcMain.handle(WORKBENCH_RESPOND_USER_INPUT_CHANNEL, respondUserInputHandler);
@@ -1037,6 +1063,7 @@ export function installWorkbenchProjectViewIpc(options: {
       options.ipcMain.removeHandler(WORKBENCH_START_ANNUAL_REPORT_JOB_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_READ_ANNUAL_REPORT_JOB_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_OPEN_ANNUAL_REPORT_OUTPUT_CHANNEL);
+      options.ipcMain.removeHandler(WORKBENCH_START_AUTO_ITERATION_SUPERVISOR_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_INTERRUPT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_READ_USER_INPUT_CHANNEL);
       options.ipcMain.removeHandler(WORKBENCH_RESPOND_USER_INPUT_CHANNEL);
