@@ -2,6 +2,7 @@ import type {
   IntegrationCandidate,
   IntegrationGateRecord,
   IntegrationOutcome,
+  PublishOutcome,
 } from "./contract.ts";
 import type { ApprovedGate, ExecutionJobRecord, ExecutionJobRunner } from "./execution-job.ts";
 import { runGitCommand, type WorkspaceManager } from "./workspace-manager.ts";
@@ -33,8 +34,25 @@ export type IntegrationRunResult =
   | { readonly status: "completed"; readonly outcome: IntegrationOutcome }
   | { readonly status: "deferred"; readonly reason: string };
 
+/** Issue #8 M3 publish policy: pushing an already-`integrated` candidate's target branch. */
+export interface PublishInput {
+  readonly candidate: IntegrationCandidate;
+  readonly repositoryPath: string;
+  readonly remoteName: string;
+  readonly remoteBranch: string;
+  readonly localTargetBranch: string;
+}
+
 export interface IntegrationRunner {
   run(input: IntegrationRunInput): Promise<IntegrationRunResult>;
+  /**
+   * Fetches the remote, re-checks it against the candidate's frozen baseline
+   * (the exact target-moved check integration itself uses, against the
+   * remote instead of the local branch), and only then pushes. A push
+   * rejected as non-fast-forward (a race after the fetch-based check) is
+   * also reported as `blocked: target-moved`, not a distinct failure kind.
+   */
+  publish(input: PublishInput): Promise<PublishOutcome>;
 }
 
 export function createIntegrationRunner(options: {
@@ -335,6 +353,58 @@ export function createIntegrationRunner(options: {
           mergeCommitSha: landedCommitSha,
           gates: [...gateRecords],
         },
+      };
+    },
+
+    async publish(input) {
+      const expectedBaseline = input.candidate.baselineCommitSha;
+      await runGitCommand({
+        cwd: input.repositoryPath,
+        args: ["fetch", input.remoteName, input.remoteBranch],
+      });
+      const remoteRef = `${input.remoteName}/${input.remoteBranch}`;
+      const observedRemote = await resolveCommit(input.repositoryPath, remoteRef);
+      if (observedRemote !== expectedBaseline) {
+        return {
+          status: "blocked: target-moved",
+          expectedBaselineCommitSha: expectedBaseline,
+          observedRemoteCommitSha: observedRemote,
+        };
+      }
+      const localTip = await resolveCommit(
+        input.repositoryPath,
+        `refs/heads/${input.localTargetBranch}`,
+      );
+      if (localTip === null) {
+        return {
+          status: "blocked: target-moved",
+          expectedBaselineCommitSha: expectedBaseline,
+          observedRemoteCommitSha: observedRemote,
+        };
+      }
+      const push = await runGitCommand({
+        cwd: input.repositoryPath,
+        args: ["push", input.remoteName, `${input.localTargetBranch}:${input.remoteBranch}`],
+      });
+      if (push.exitCode !== 0) {
+        // A non-fast-forward rejection is the race the fetch-based check
+        // above cannot close by itself (someone else published in between);
+        // re-observe the remote so the reported sha is current, not stale.
+        await runGitCommand({
+          cwd: input.repositoryPath,
+          args: ["fetch", input.remoteName, input.remoteBranch],
+        });
+        const observedAfterFailure = await resolveCommit(input.repositoryPath, remoteRef);
+        return {
+          status: "blocked: target-moved",
+          expectedBaselineCommitSha: expectedBaseline,
+          observedRemoteCommitSha: observedAfterFailure,
+        };
+      }
+      return {
+        status: "published",
+        remoteCommitSha: localTip,
+        publishedAt: Date.now(),
       };
     },
   };

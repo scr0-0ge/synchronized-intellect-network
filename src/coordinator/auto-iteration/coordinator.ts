@@ -24,15 +24,26 @@ import type {
   InboxEntry,
   PendingAutoIterationOutboxEntry,
   PendingIntegration,
+  PublishCandidateAcceptedResponse,
+  PublishCandidateRequest,
+  PublishCandidateResultResponse,
+  PublishOutcome,
   QuotaObservation,
+  ReadHandoffArtifactRequest,
+  ReadHandoffArtifactResponse,
   ReadInboxRequest,
   ReadWorkOrderStatusRequest,
   ReviewDecision,
   ReviewDecisionSubmittedResponse,
+  ReviewerToolRequest,
+  ReviewerToolResponse,
+  ReviewResult,
+  ReviewSubmittedResponse,
   SessionConfigurationState,
   SessionCreationParameters,
   SubmitHandoffRequest,
   SubmitReviewDecisionRequest,
+  SubmitReviewRequest,
   SubmitWorkOrderRequest,
   SupervisorRotationCompletion,
   SupervisorRotationRequestedResponse,
@@ -42,6 +53,7 @@ import type {
   WorkerToolRequest,
   WorkerToolResponse,
   WorkOrder,
+  WorkOrderReviewPolicy,
   WorkOrderStatus,
   WorkOrderStatusResponse,
   WorkOrderSubmittedResponse,
@@ -59,6 +71,13 @@ export const HANDOFF_BODY_MAX_CODE_POINTS = 8_000;
  * (that entry is the queue) and read as `queued` until a slot frees.
  */
 export const WORKER_ATTEMPT_CONCURRENCY_LIMIT = 4;
+
+/**
+ * Issue #8 M3: at most this many rework cycles per Work Order. `attemptNumber`
+ * starts at 1 (the original delivery); a value above the limit is the count
+ * of reworks already spent, not the limit itself.
+ */
+export const REWORK_ATTEMPT_LIMIT = 2;
 
 export type {
   AttemptRuntimeMutation,
@@ -382,6 +401,31 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     });
   }
 
+  async completePublish(disposition: {
+    readonly integrationCandidateId: string;
+    readonly outcome: PublishOutcome;
+  }): Promise<void> {
+    assertNonEmpty(disposition.integrationCandidateId);
+    return this.store.transaction(() => {
+      this.store.completePublish(disposition.integrationCandidateId, disposition.outcome);
+      this.store.appendEvent(
+        disposition.outcome.status === "published"
+          ? "candidate-published"
+          : "publish-blocked",
+        disposition.integrationCandidateId,
+        { status: disposition.outcome.status },
+      );
+    });
+  }
+
+  readWorkOrder(workOrderId: string): WorkOrder | undefined {
+    return this.store.readTransaction(() => this.store.workOrder(workOrderId));
+  }
+
+  readReviewResult(handoff: HandoffIdempotencyKey): ReviewResult | undefined {
+    return this.store.readTransaction(() => this.store.reviewResult(handoff));
+  }
+
   readAutoIterationOverview(): AutoIterationOverview {
     return this.store.readTransaction(() => {
       const supervisorRole = this.store
@@ -560,6 +604,10 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     actor: Extract<HostBoundToolActor, { readonly kind: "worker" }>,
     request: WorkerToolRequest,
   ): Promise<WorkerToolResponse>;
+  request(
+    actor: Extract<HostBoundToolActor, { readonly kind: "reviewer" }>,
+    request: ReviewerToolRequest,
+  ): Promise<ReviewerToolResponse>;
   async request(
     actor: HostBoundToolActor,
     request: CoordinatorToolRequest,
@@ -579,6 +627,11 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       if (request.kind === "read-inbox") {
         return this.store.readTransaction(() => this.readInbox(actor, request));
       }
+      if (request.kind === "read-handoff-artifact") {
+        return this.store.readTransaction(() =>
+          this.readHandoffArtifact(actor, request),
+        );
+      }
       return this.store.transaction(() => this.mutate(actor, request));
     } catch (error) {
       const rejection =
@@ -597,7 +650,10 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
 
   private mutate(
     actor: HostBoundToolActor,
-    request: Exclude<CoordinatorToolRequest, ReadWorkOrderStatusRequest | ReadInboxRequest>,
+    request: Exclude<
+      CoordinatorToolRequest,
+      ReadWorkOrderStatusRequest | ReadInboxRequest | ReadHandoffArtifactRequest
+    >,
   ): CoordinatorToolResponse {
     const actorJson = canonicalJson(actor);
     const requestJson = canonicalJson(request);
@@ -626,6 +682,12 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
         break;
       case "request-supervisor-rotation":
         response = this.rotateSupervisor(assertSupervisor(actor, request), request);
+        break;
+      case "publish-candidate":
+        response = this.submitPublishCandidate(assertSupervisor(actor, request), request);
+        break;
+      case "submit-review":
+        response = this.submitReview(assertReviewer(actor), request);
         break;
     }
     this.store.insertRequest(
@@ -680,6 +742,7 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       status,
       currentAttemptId: attemptId,
       version: 1,
+      review: resolveReviewPolicy(request.workOrder.review, request.workOrder.workerSession),
     };
     const attempt: ExecutionAttempt = {
       attemptId,
@@ -819,6 +882,127 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     };
   }
 
+  /** Issue #8 M3: a Review Attempt's own verdict, write-once per Handoff. */
+  private submitReview(
+    actor: Extract<HostBoundToolActor, { readonly kind: "reviewer" }>,
+    request: SubmitReviewRequest,
+  ): ReviewSubmittedResponse | CoordinatorToolRejectedResponse {
+    validateReviewSubmissionPayload(request);
+    const key = request.review.handoff;
+    if (
+      actor.handoff.workOrderId !== key.workOrderId ||
+      actor.handoff.attemptId !== key.attemptId ||
+      actor.handoff.handoffId !== key.handoffId
+    ) {
+      throw new AutoIterationRejection("forbidden", null);
+    }
+    const workOrder = this.store.workOrder(key.workOrderId);
+    if (workOrder === undefined || this.store.handoff(key) === undefined) {
+      throw new AutoIterationRejection("not-found", null);
+    }
+    const result: ReviewResult = {
+      handoff: key,
+      verdict: request.review.verdict,
+      problems: request.review.problems.map((problem) => ({ ...problem })),
+      reviewerSessionId: actor.sessionId,
+    };
+    const existing = this.store.reviewResult(key);
+    if (existing !== undefined) {
+      if (canonicalJson(existing) !== canonicalJson(result)) {
+        throw new AutoIterationRejection("idempotency-conflict", workOrder.version);
+      }
+      return {
+        kind: "review-submitted",
+        requestIdempotencyKey: request.requestIdempotencyKey,
+        currentVersion: workOrder.version,
+        result: existing,
+      };
+    }
+    this.store.insertReviewResult(result);
+    this.store.appendEvent("review-result-recorded", key.handoffId, {
+      workOrderId: key.workOrderId,
+      verdict: result.verdict,
+    }, actor.sessionId);
+    return {
+      kind: "review-submitted",
+      requestIdempotencyKey: request.requestIdempotencyKey,
+      currentVersion: workOrder.version,
+      result,
+    };
+  }
+
+  private readHandoffArtifact(
+    actor: HostBoundToolActor,
+    request: ReadHandoffArtifactRequest,
+  ): ReadHandoffArtifactResponse | CoordinatorToolRejectedResponse {
+    if (
+      actor.kind !== "reviewer" ||
+      actor.handoff.workOrderId !== request.handoff.workOrderId ||
+      actor.handoff.attemptId !== request.handoff.attemptId ||
+      actor.handoff.handoffId !== request.handoff.handoffId
+    ) {
+      throw new AutoIterationRejection("forbidden", null);
+    }
+    const workOrder = this.store.workOrder(request.handoff.workOrderId);
+    const handoff = this.store.handoff(request.handoff);
+    if (workOrder === undefined || handoff === undefined) {
+      throw new AutoIterationRejection("not-found", null);
+    }
+    // No expectedVersion match against the Work Order here (unlike
+    // read-work-order-status): this reads one Handoff's immutable facts, not
+    // the order's own mutable state, and the reviewer has no other tool to
+    // discover the order's current version before its first call.
+    const commit = handoff.handoff.artifacts.find(
+      (artifact) => artifact.kind === "git-commit",
+    );
+    if (commit === undefined || commit.kind !== "git-commit") {
+      throw new AutoIterationRejection("invalid-request", workOrder.version);
+    }
+    return {
+      kind: "handoff-artifact",
+      requestIdempotencyKey: request.requestIdempotencyKey,
+      currentVersion: workOrder.version,
+      workOrderObjective: workOrder.objective,
+      acceptanceCriteria: workOrder.acceptanceCriteria,
+      baselineCommitSha: workOrder.baselineCommitSha,
+      commitSha: commit.commitSha,
+      // The host (backend.ts) fills this in from git after this authorized
+      // read; the coordinator has no repository access of its own.
+      diff: "",
+    };
+  }
+
+  private submitPublishCandidate(
+    actor: Extract<HostBoundToolActor, { readonly kind: "supervisor" }>,
+    request: PublishCandidateRequest,
+  ): PublishCandidateAcceptedResponse | PublishCandidateResultResponse {
+    const { role } = this.assertCurrentSupervisor(actor);
+    assertExpectedVersion(request.expectedVersion, role.version);
+    assertNonEmpty(request.integrationCandidateId);
+    const candidate = this.store.integrationCandidateById(request.integrationCandidateId);
+    if (candidate === undefined) throw new AutoIterationRejection("not-found", role.version);
+    if (candidate.publishOutcome?.status === "published") {
+      return {
+        kind: "publish-candidate-result",
+        requestIdempotencyKey: request.requestIdempotencyKey,
+        currentVersion: role.version,
+        outcome: candidate.publishOutcome,
+      };
+    }
+    if (candidate.outcome?.status !== "integrated") {
+      throw new AutoIterationRejection("not-integrated", role.version);
+    }
+    // The host performs the actual fetch/compare/push and reports back
+    // through completePublish; this response never reaches the model as-is
+    // (drainingRequest replaces it with the real publish-candidate-result).
+    return {
+      kind: "publish-candidate-accepted",
+      requestIdempotencyKey: request.requestIdempotencyKey,
+      currentVersion: role.version,
+      candidate,
+    };
+  }
+
   private submitReviewDecision(
     actor: Extract<HostBoundToolActor, { readonly kind: "supervisor" }>,
     request: SubmitReviewDecisionRequest,
@@ -842,6 +1026,28 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     ) {
       throw new AutoIterationRejection("not-found", workOrder.version);
     }
+    const isCurrentAttempt = workOrder.currentAttemptId === request.decision.handoff.attemptId;
+    // Issue #8 M3 §3: a disposition of the live Handoff (anything but
+    // `transfer`, which only reassigns responsibility) requires a recorded
+    // independent review first, unless the order's own policy opts out. A
+    // legacy order with no resolved policy reads as `none` (§ WorkOrder.review).
+    if (
+      isCurrentAttempt &&
+      request.decision.decision !== "transfer" &&
+      (workOrder.review ?? { kind: "none" as const }).kind === "independent" &&
+      this.store.reviewResult(request.decision.handoff) === undefined
+    ) {
+      throw new AutoIterationRejection("review-required", workOrder.version);
+    }
+    if (request.decision.decision === "rework") {
+      const previousAttempt = this.store.attempt(request.decision.handoff.attemptId);
+      if (
+        previousAttempt !== undefined &&
+        previousAttempt.attemptNumber > REWORK_ATTEMPT_LIMIT
+      ) {
+        throw new AutoIterationRejection("rework-limit-reached", workOrder.version);
+      }
+    }
 
     const decisionBase = {
       reviewDecisionId: `review-${this.createId()}`,
@@ -861,7 +1067,6 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
         : { ...decisionBase, decision: request.decision.decision };
     this.store.insertReview(decision);
 
-    const isCurrentAttempt = workOrder.currentAttemptId === request.decision.handoff.attemptId;
     let updatedWorkOrder = workOrder;
     if (isCurrentAttempt && decision.decision !== "transfer") {
       if (decision.decision === "approve") {
@@ -895,6 +1100,16 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
           version: 1,
         };
         this.store.insertAttempt(nextAttempt);
+        // Issue #8 M3 §3: the rework kickoff carries the independent
+        // review's problems verbatim (not the supervisor's own `reason`)
+        // when one was recorded for the reworked Handoff.
+        const reworkReview = this.store.reviewResult(request.decision.handoff);
+        const reworkFeedback =
+          reworkReview !== undefined && reworkReview.problems.length > 0
+            ? reworkReview.problems
+                .map((problem) => `[${problem.code}] ${problem.message}`)
+                .join("\n")
+            : undefined;
         this.store.insertOutbox(
           `outbox-${this.createId()}`,
           "start-attempt",
@@ -905,6 +1120,7 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
             workOrderId: workOrder.workOrderId,
             baselineCommitSha: workOrder.baselineCommitSha,
             sessionConfiguration: nextAttempt.sessionConfiguration,
+            ...(reworkFeedback === undefined ? {} : { reworkFeedback }),
           },
         );
         updatedWorkOrder = {
@@ -1067,7 +1283,13 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     if (workOrder === undefined) throw new AutoIterationRejection("not-found", null);
     if (actor.kind === "supervisor") {
       this.assertCurrentSupervisor(actor);
-    } else if (actor.workOrderId !== workOrder.workOrderId) {
+    } else if (actor.kind === "worker") {
+      if (actor.workOrderId !== workOrder.workOrderId) {
+        throw new AutoIterationRejection("forbidden", workOrder.version);
+      }
+    } else {
+      // Issue #8 M3: a Review Attempt never gets this tool (§3.6 — it would
+      // carry every Handoff's `body`, i.e. the worker's own reasoning).
       throw new AutoIterationRejection("forbidden", workOrder.version);
     }
     assertExpectedVersion(request.expectedVersion, workOrder.version);
@@ -1081,6 +1303,7 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
       reviews: this.store.reviews(workOrder.workOrderId),
       candidates: this.store.candidates(workOrder.workOrderId),
       receipts: this.store.receipts(workOrder.workOrderId),
+      independentReviews: this.store.reviewResultsForWorkOrder(workOrder.workOrderId),
     };
   }
 
@@ -1090,7 +1313,7 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
     let workOrderId: string | undefined;
     if (actor.kind === "supervisor") {
       this.assertCurrentSupervisor(actor);
-    } else {
+    } else if (actor.kind === "worker") {
       const workOrder = this.store.workOrder(actor.workOrderId);
       if (
         workOrder === undefined ||
@@ -1100,6 +1323,8 @@ export class AutoIterationCoordinator implements AutoIterationProjectAuthority {
         throw new AutoIterationRejection("forbidden", role.version);
       }
       workOrderId = actor.workOrderId;
+    } else {
+      throw new AutoIterationRejection("forbidden", role.version);
     }
     assertExpectedVersion(request.expectedVersion, role.version);
     return {
@@ -1160,6 +1385,46 @@ function assertWorker(
   return actor;
 }
 
+function assertReviewer(
+  actor: HostBoundToolActor,
+): Extract<HostBoundToolActor, { readonly kind: "reviewer" }> {
+  if (actor.kind !== "reviewer") throw new AutoIterationRejection("forbidden", null);
+  return actor;
+}
+
+/**
+ * Issue #8 §3: default to a differing endpoint/model when an obvious
+ * complement exists (the two desktop CLIs this product wraps); otherwise
+ * keep the worker's own endpoint and let `sameEndpointAsWorker` say so.
+ */
+function defaultDifferentEndpoint(
+  workerEndpointId: DurableRuntimeEndpointId,
+): DurableRuntimeEndpointId {
+  if (workerEndpointId === "codex-desktop") return "claude-code-desktop";
+  if (workerEndpointId === "claude-code-desktop") return "codex-desktop";
+  return workerEndpointId;
+}
+
+function resolveReviewPolicy(
+  review: "none" | SessionCreationParameters | undefined,
+  workerSession: SessionCreationParameters,
+): WorkOrderReviewPolicy {
+  if (review === "none") return { kind: "none" };
+  if (review !== undefined) {
+    return {
+      kind: "independent",
+      reviewerSession: review,
+      sameEndpointAsWorker: review.endpointId === workerSession.endpointId,
+    };
+  }
+  const endpointId = defaultDifferentEndpoint(workerSession.endpointId);
+  return {
+    kind: "independent",
+    reviewerSession: { endpointId, profile: workerSession.profile },
+    sameEndpointAsWorker: endpointId === workerSession.endpointId,
+  };
+}
+
 function validateRequestMetadata(request: CoordinatorToolRequest): void {
   assertNonEmpty(request.requestIdempotencyKey);
   if (!Number.isSafeInteger(request.expectedVersion) || request.expectedVersion < 1) {
@@ -1198,6 +1463,12 @@ function validateWorkOrderSubmission(request: SubmitWorkOrderRequest): void {
     assertBoundedText(path, 4_096);
   }
   validateSessionParameters(request.workOrder.workerSession);
+  if (
+    request.workOrder.review !== undefined &&
+    request.workOrder.review !== "none"
+  ) {
+    validateSessionParameters(request.workOrder.review);
+  }
 }
 
 function validateSessionParameters(
@@ -1230,6 +1501,20 @@ function validateReviewSubmission(request: SubmitReviewDecisionRequest): void {
   }
   if (request.decision.decision === "transfer") {
     assertNonEmpty(request.decision.targetRoleSlotId);
+  }
+}
+
+function validateReviewSubmissionPayload(request: SubmitReviewRequest): void {
+  validateHandoffKey(request.review.handoff);
+  if (request.review.verdict !== "agree" && request.review.verdict !== "disagree") {
+    throw new AutoIterationRejection("invalid-request", null);
+  }
+  if (!Array.isArray(request.review.problems)) {
+    throw new AutoIterationRejection("invalid-request", null);
+  }
+  for (const problem of request.review.problems) {
+    assertBoundedText(problem.code, 200);
+    assertBoundedText(problem.message, 4_000);
   }
 }
 

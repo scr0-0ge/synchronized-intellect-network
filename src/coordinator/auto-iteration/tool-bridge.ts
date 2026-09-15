@@ -11,6 +11,8 @@ import type {
   HandoffIdempotencyKey,
   HostBoundToolActor,
   ReviewDecisionSubmission,
+  ReviewerToolRequest,
+  ReviewSubmission,
   RoleGenerationReference,
   SessionCreationParameters,
   SupervisorToolRequest,
@@ -172,12 +174,22 @@ function readCompletionCondition(
   return Object.freeze({ gitIntegration: value.gitIntegration });
 }
 
+/** `undefined` (absent) means "use the default policy"; `null` means malformed. */
+function readWorkOrderReview(
+  value: unknown,
+): "none" | SessionCreationParameters | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === "none") return "none";
+  return readSessionCreation(value);
+}
+
 function readWorkOrderSubmission(value: unknown): WorkOrderSubmission | null {
   if (!isRecord(value)) return null;
   const acceptanceCriteria = readStringArray(value.acceptanceCriteria);
   const territory = readTerritory(value.territory);
   const completionCondition = readCompletionCondition(value.completionCondition);
   const workerSession = readSessionCreation(value.workerSession);
+  const review = readWorkOrderReview(value.review);
   if (
     !isNonEmptyString(value.objective) ||
     acceptanceCriteria === null ||
@@ -185,7 +197,8 @@ function readWorkOrderSubmission(value: unknown): WorkOrderSubmission | null {
     territory === null ||
     !isNonEmptyString(value.responsibleRoleSlotId) ||
     completionCondition === null ||
-    workerSession === null
+    workerSession === null ||
+    review === null
   ) {
     return null;
   }
@@ -197,6 +210,7 @@ function readWorkOrderSubmission(value: unknown): WorkOrderSubmission | null {
     responsibleRoleSlotId: value.responsibleRoleSlotId,
     completionCondition,
     workerSession,
+    ...(review === undefined ? {} : { review }),
   });
 }
 
@@ -249,6 +263,32 @@ function readReviewDecision(value: unknown): ReviewDecisionSubmission | null {
     handoffVersion: value.handoffVersion,
     reason: value.reason,
   });
+}
+
+function readReviewProblems(value: unknown): readonly { code: string; message: string }[] | null {
+  if (!Array.isArray(value)) return null;
+  const problems: { code: string; message: string }[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || !isNonEmptyString(entry.code) || !isNonEmptyString(entry.message)) {
+      return null;
+    }
+    problems.push({ code: entry.code, message: entry.message });
+  }
+  return Object.freeze(problems);
+}
+
+function readReviewSubmission(value: unknown): ReviewSubmission | null {
+  if (!isRecord(value)) return null;
+  const handoff = readHandoffKey(value.handoff);
+  const problems = readReviewProblems(value.problems);
+  if (
+    handoff === null ||
+    (value.verdict !== "agree" && value.verdict !== "disagree") ||
+    problems === null
+  ) {
+    return null;
+  }
+  return Object.freeze({ handoff, verdict: value.verdict, problems });
 }
 
 function parseRequest(
@@ -316,6 +356,26 @@ function parseRequest(
             successorSession,
           })
         : null;
+    }
+    case "publish-candidate":
+      return isNonEmptyString(input.integrationCandidateId)
+        ? Object.freeze({
+            kind: operation,
+            ...metadata,
+            integrationCandidateId: input.integrationCandidateId,
+          })
+        : null;
+    case "read-handoff-artifact": {
+      const handoff = readHandoffKey(input.handoff);
+      return handoff === null
+        ? null
+        : Object.freeze({ kind: operation, ...metadata, handoff });
+    }
+    case "submit-review": {
+      const review = readReviewSubmission(input.review);
+      return review === null
+        ? null
+        : Object.freeze({ kind: operation, ...metadata, review });
     }
   }
 }
@@ -387,7 +447,10 @@ async function callPort(
   if (actor.kind === "supervisor") {
     return port.request(actor, request as SupervisorToolRequest);
   }
-  return port.request(actor, request as WorkerToolRequest);
+  if (actor.kind === "worker") {
+    return port.request(actor, request as WorkerToolRequest);
+  }
+  return port.request(actor, request as ReviewerToolRequest);
 }
 
 export function createAutoIterationToolBridge(

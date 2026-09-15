@@ -41,6 +41,7 @@ import { EmptyState } from "./states.tsx";
 import { CommandWithoutSession } from "./composer.tsx";
 import {
   transcriptCopy,
+  retryProgressCopy,
   transcriptFailureBodyCopy,
   turnRecoveryBodyCopy,
   turnStateCopy,
@@ -1310,6 +1311,17 @@ function rawTimelineEventDetail(
 }
 
 function progressActivityDetail(event: ProgressTimelineEvent): string {
+  // w355: a retrying row carries the api_retry facts in its tool payload and
+  // names the attempt, the wait and the status. A payload without usable
+  // numbers keeps the plain activity note.
+  if (event.activity === "retrying" && event.tool !== undefined) {
+    const detail = event.tool.parameter === undefined
+      ? ""
+      : event.tool.parameter.value;
+    return detail === ""
+      ? transcriptCopy.progressActivity.retrying
+      : retryProgressCopy(event.tool.name, detail);
+  }
   if (event.activity !== "tool" || event.tool === undefined) {
     return transcriptCopy.progressActivity[event.activity];
   }

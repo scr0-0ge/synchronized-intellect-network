@@ -103,6 +103,9 @@ async function createFrozenCandidateFixture(
       responsibleRoleSlotId: supervisor.tenure.roleSlotId,
       completionCondition: { gitIntegration: "required" },
       workerSession: { endpointId: "codex-desktop", profile },
+      // This fixture exercises integration-outcome recording, not issue #8
+      // M3 review gating; opt out so submit-review-decision isn't refused.
+      review: "none",
     },
   };
   const submitted = await authority.request(supervisor, request);

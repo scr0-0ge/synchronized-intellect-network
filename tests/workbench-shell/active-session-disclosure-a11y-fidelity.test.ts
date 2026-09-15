@@ -282,6 +282,29 @@ test("raw third detail is exact for every runtime event and only streams agent t
       "completed",
     );
     assert.equal(rawTimelineEventDetail({ kind: "failed" }, false), "");
+    // w355: a retrying row's tool payload becomes the per-attempt sentence;
+    // a payload without usable numbers keeps the plain activity note.
+    assert.equal(
+      rawTimelineEventDetail({
+        kind: "progress",
+        activity: "retrying",
+        tool: {
+          type: "unknown",
+          sourceType: "api_retry",
+          name: "429",
+          parameter: { kind: "command", value: "4/10 · 8s", truncated: false },
+        },
+      }, false),
+      "Endpoint rate-limited; retry 4/10 · 8s",
+    );
+    assert.equal(
+      rawTimelineEventDetail({
+        kind: "progress",
+        activity: "retrying",
+        tool: { type: "unknown", sourceType: "api_retry", name: "unknown" },
+      }, false),
+      "retrying the provider request",
+    );
   });
 });
 

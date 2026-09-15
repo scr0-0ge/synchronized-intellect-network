@@ -5,6 +5,8 @@ import type {
   AutoIterationCoordinatorPort,
   CoordinatorToolRequest,
   HostBoundToolActor,
+  ReviewerToolRequest,
+  ReviewerToolResponse,
   SupervisorToolRequest,
   SupervisorToolResponse,
   WorkerToolRequest,
@@ -19,7 +21,7 @@ class FakeCoordinatorPort implements AutoIterationCoordinatorPort {
     request: CoordinatorToolRequest;
   }> = [];
 
-  response: SupervisorToolResponse | WorkerToolResponse = {
+  response: SupervisorToolResponse | WorkerToolResponse | ReviewerToolResponse = {
     kind: "inbox-read",
     requestIdempotencyKey: "request-1",
     currentVersion: 8,
@@ -35,9 +37,13 @@ class FakeCoordinatorPort implements AutoIterationCoordinatorPort {
     request: WorkerToolRequest,
   ): Promise<WorkerToolResponse>;
   async request(
+    actor: Extract<HostBoundToolActor, { readonly kind: "reviewer" }>,
+    request: ReviewerToolRequest,
+  ): Promise<ReviewerToolResponse>;
+  async request(
     actor: HostBoundToolActor,
     request: CoordinatorToolRequest,
-  ): Promise<SupervisorToolResponse | WorkerToolResponse> {
+  ): Promise<SupervisorToolResponse | WorkerToolResponse | ReviewerToolResponse> {
     this.calls.push(structuredClone({ actor, request }));
     return structuredClone(this.response);
   }

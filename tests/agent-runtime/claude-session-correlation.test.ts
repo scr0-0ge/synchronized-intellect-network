@@ -216,22 +216,54 @@ test("api_retry carrying a 429 keeps the existing behavior: the CLI's own retry 
 // with api_error_status 429. The only field difference between the two CLI
 // versions is 2.1.270's additive `result_index` on the result frame, which
 // this classification never reads.
+//
+// w355: each captured api_retry frame yields its own retrying progress row
+// whose payload changes with the attempt (attempt/max, backoff seconds,
+// error_status), so the user watches the retry budget drain instead of one
+// static note for ~3 minutes. Rounded whole seconds per captured frame.
+const retryingProgressEvent = (attempt: number, delaySeconds: number) => ({
+  kind: "progress" as const,
+  activity: "retrying" as const,
+  tool: {
+    type: "unknown" as const,
+    sourceType: "api_retry",
+    name: "429",
+    parameter: {
+      kind: "command" as const,
+      value: `${attempt}/10 · ${delaySeconds}s`,
+      truncated: false,
+    },
+  },
+});
+const capturedRetryDelaySeconds = {
+  "2.1.267": [1, 1, 2, 4, 8, 17, 38, 34, 35, 36],
+  "2.1.270": [1, 1, 2, 4, 9, 19, 38, 33, 38, 33],
+} as const;
 for (const version of ["2.1.267", "2.1.270"] as const) {
   test(`real Claude ${version} stdout after a 429-exhausted retry budget classifies as rate-limited, not turn-failed`, async t => {
     const replay = await replayCapture({ name: "429", version, expectedModel: "glm-5.3[1m]" });
     t.diagnostic(JSON.stringify({ events: replay.events }));
     // The full sequence is the measured answer to "what does the user see":
-    // one status update, one retrying indicator (yieldableProgress dedupes
-    // the other 9 identical api_retry frames -- this is not a per-attempt
-    // counter), an item that never produced text, then the failure.
+    // one status update, one retrying row per captured api_retry frame with
+    // attempt-counting content (w355), an item that never produced text,
+    // then the failure.
     assert.deepEqual(replay.events, [
       { kind: "session-started" },
       { kind: "turn-started" },
       { kind: "progress", activity: "status" },
-      { kind: "progress", activity: "retrying" },
+      ...capturedRetryDelaySeconds[version].map((seconds, index) =>
+        retryingProgressEvent(index + 1, seconds)),
       { kind: "item-started", itemType: "agent-message" },
       { kind: "failed", category: "rate-limited" },
     ]);
+    const retrying = replay.events.filter((event): event is Extract<NormalizedRuntimeEvent, { kind: "progress" }> =>
+      event.kind === "progress" && event.activity === "retrying");
+    assert.equal(retrying.length, 10);
+    assert.equal(
+      new Set(retrying.map(event => JSON.stringify(event.tool))).size,
+      10,
+      "each of the 10 captured api_retry frames carries distinct content",
+    );
   });
 }
 for (const interrupt of ["missing-queue", "nonempty-queue", "error", "malformed-body"] as const) {

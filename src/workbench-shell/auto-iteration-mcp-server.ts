@@ -65,6 +65,9 @@ const operationByToolName = Object.freeze({
   read_inbox: "read-inbox",
   submit_review_decision: "submit-review-decision",
   request_supervisor_rotation: "request-supervisor-rotation",
+  publish_candidate: "publish-candidate",
+  read_handoff_artifact: "read-handoff-artifact",
+  submit_review: "submit-review",
 } as const satisfies Readonly<Record<string, AutoIterationToolOperation>>);
 
 type McpToolName = keyof typeof operationByToolName;
@@ -202,6 +205,13 @@ const toolDefinitions = Object.freeze({
               additionalProperties: false,
             },
             workerSession: sessionCreationSchema,
+            review: {
+              description:
+                "Optional. \"none\" skips independent review (submit_review_decision is " +
+                "never gated). Omit for the default independent reviewer Session (a " +
+                "different endpoint/model than workerSession when an obvious complement " +
+                "exists). Pass {endpointId, profile} to pick the reviewer explicitly.",
+            },
           },
           required: [
             "objective",
@@ -291,6 +301,55 @@ const toolDefinitions = Object.freeze({
         successorSession: sessionCreationSchema,
       },
       ["roleSlotId", "successorSession"],
+    ),
+  }),
+  publish_candidate: Object.freeze({
+    name: "publish_candidate",
+    description:
+      "Push an already-integrated candidate's target branch to its remote. " +
+      "Re-checks the remote HEAD first; a moved remote is reported as blocked, not retried automatically.",
+    inputSchema: inputSchema(
+      { integrationCandidateId: { type: "string", minLength: 1 } },
+      ["integrationCandidateId"],
+    ),
+  }),
+  read_handoff_artifact: Object.freeze({
+    name: "read_handoff_artifact",
+    description:
+      "Independent Review Attempt only. Reads the diff and original Work Order text " +
+      "for one Handoff; never includes the worker's own Handoff body/reasoning.",
+    inputSchema: inputSchema({ handoff: handoffKeySchema }, ["handoff"]),
+  }),
+  submit_review: Object.freeze({
+    name: "submit_review",
+    description:
+      "Independent Review Attempt only. Submit a verdict (agree/disagree) and concrete " +
+      "problems for one Handoff. Report anything you cannot substantiate with code \"cannot-verify\".",
+    inputSchema: inputSchema(
+      {
+        review: {
+          type: "object",
+          properties: {
+            handoff: handoffKeySchema,
+            verdict: { type: "string", enum: ["agree", "disagree"] },
+            problems: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  code: { type: "string", minLength: 1 },
+                  message: { type: "string", minLength: 1 },
+                },
+                required: ["code", "message"],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ["handoff", "verdict", "problems"],
+          additionalProperties: false,
+        },
+      },
+      ["review"],
     ),
   }),
 } as const satisfies Readonly<Record<McpToolName, McpToolDefinition>>);

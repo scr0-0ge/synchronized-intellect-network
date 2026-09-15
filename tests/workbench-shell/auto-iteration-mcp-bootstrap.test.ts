@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import type {
   AutoIterationCoordinatorPort,
   HostBoundToolActor,
+  ReviewerToolRequest,
+  ReviewerToolResponse,
   SupervisorToolRequest,
   SupervisorToolResponse,
   WorkerToolRequest,
@@ -56,9 +58,13 @@ class RecordingPort implements AutoIterationCoordinatorPort {
     request: WorkerToolRequest,
   ): Promise<WorkerToolResponse>;
   async request(
+    actor: Extract<HostBoundToolActor, { readonly kind: "reviewer" }>,
+    request: ReviewerToolRequest,
+  ): Promise<ReviewerToolResponse>;
+  async request(
     _actor: HostBoundToolActor,
-    request: SupervisorToolRequest | WorkerToolRequest,
-  ): Promise<SupervisorToolResponse | WorkerToolResponse> {
+    request: SupervisorToolRequest | WorkerToolRequest | ReviewerToolRequest,
+  ): Promise<SupervisorToolResponse | WorkerToolResponse | ReviewerToolResponse> {
     this.calls.push(request.kind);
     return {
       kind: "inbox-read",

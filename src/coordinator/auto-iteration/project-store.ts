@@ -10,8 +10,10 @@ import type {
   IntegrationCandidate,
   InboxEntry,
   PendingAutoIterationOutboxEntry,
+  PublishOutcome,
   QuotaObservation,
   ReviewDecision,
+  ReviewResult,
   RoleSlot,
   SupervisorTenure,
   WorkOrder,
@@ -351,7 +353,11 @@ export class AutoIterationProjectStore {
         workOrder.responsibleRoleSlotId,
         workOrder.issuedBy.roleSlotId,
         workOrder.issuedBy.generation,
-        JSON.stringify(workOrder.completionCondition),
+        // Issue #8 M3: the review policy rides in the same column as the
+        // completion condition (no schema bump). A row written before this
+        // change simply has no `review` key; hydrateWorkOrder reads that as
+        // `undefined`, not a parse failure.
+        JSON.stringify({ ...workOrder.completionCondition, review: workOrder.review }),
         workOrder.status,
         workOrder.currentAttemptId,
         workOrder.version,
@@ -463,6 +469,54 @@ export class AutoIterationProjectStore {
          VALUES (?, ?, ?)`,
       )
       .run(reference.artifactId, this.projectId, JSON.stringify(reference));
+  }
+
+  /**
+   * Issue #8 M3: an independent Review Attempt's result, keyed to one
+   * Handoff. Reuses the artifacts table under a namespaced id (no schema
+   * bump); its stored shape is not an `ArtifactReference` — that union stays
+   * host-computed facts only, never model-authored content.
+   */
+  reviewResult(handoff: HandoffIdempotencyKey): ReviewResult | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT reference_json FROM auto_iteration_artifacts
+          WHERE project_id = ? AND artifact_id = ?`,
+      )
+      .get(this.projectId, reviewResultArtifactId(handoff)) as
+      | { reference_json: string }
+      | undefined;
+    return row === undefined
+      ? undefined
+      : (JSON.parse(row.reference_json) as ReviewResult);
+  }
+
+  insertReviewResult(result: ReviewResult): void {
+    this.database
+      .prepare(
+        `INSERT INTO auto_iteration_artifacts (artifact_id, project_id, reference_json)
+         VALUES (?, ?, ?)`,
+      )
+      .run(
+        reviewResultArtifactId(result.handoff),
+        this.projectId,
+        JSON.stringify(result),
+      );
+  }
+
+  /** Every independent review recorded for this Work Order's Handoffs, in rowid order. */
+  reviewResultsForWorkOrder(workOrderId: string): readonly ReviewResult[] {
+    const rows = this.database
+      .prepare(
+        `SELECT reference_json FROM auto_iteration_artifacts
+          WHERE project_id = ? AND artifact_id LIKE ? ESCAPE '\\'
+          ORDER BY rowid`,
+      )
+      .all(
+        this.projectId,
+        `${likeEscape(reviewResultArtifactIdPrefix(workOrderId))}%`,
+      ) as unknown as { reference_json: string }[];
+    return rows.map((row) => JSON.parse(row.reference_json) as ReviewResult);
   }
 
   handoff(key: HandoffIdempotencyKey): StoredHandoff | undefined {
@@ -747,6 +801,7 @@ export class AutoIterationProjectStore {
       const payload = JSON.parse(row.payload_json) as {
         readonly candidate?: IntegrationCandidate;
         readonly integrationOutcome?: IntegrationCandidate["outcome"];
+        readonly publishOutcome?: PublishOutcome;
       };
       if (
         payload.candidate !== undefined &&
@@ -754,17 +809,97 @@ export class AutoIterationProjectStore {
           (handoff) => handoff.workOrderId === workOrderId,
         )
       ) {
-        candidates.push(
-          payload.integrationOutcome === undefined
-            ? structuredClone(payload.candidate)
-            : {
-                ...structuredClone(payload.candidate),
-                outcome: structuredClone(payload.integrationOutcome),
-              },
-        );
+        candidates.push({
+          ...structuredClone(payload.candidate),
+          ...(payload.integrationOutcome === undefined
+            ? {}
+            : { outcome: structuredClone(payload.integrationOutcome) }),
+          ...(payload.publishOutcome === undefined
+            ? {}
+            : { publishOutcome: structuredClone(payload.publishOutcome) }),
+        });
       }
     }
     return candidates;
+  }
+
+  /** The completed review-disposed row carrying this frozen candidate, if any. */
+  private candidateOutboxRow(
+    integrationCandidateId: string,
+  ): (OutboxRow & { dedupe_key: string }) | undefined {
+    return this.database
+      .prepare(
+        `SELECT outbox_entry_id, dedupe_key, payload_json, state, version
+           FROM auto_iteration_outbox
+          WHERE project_id = ? AND kind = 'review-disposed'
+            AND json_extract(payload_json, '$.candidate.integrationCandidateId') = ?`,
+      )
+      .get(this.projectId, integrationCandidateId) as
+      | (OutboxRow & { dedupe_key: string })
+      | undefined;
+  }
+
+  /** A frozen, `completed` candidate by id, with its recorded outcomes merged in. */
+  integrationCandidateById(
+    integrationCandidateId: string,
+  ): IntegrationCandidate | undefined {
+    const row = this.candidateOutboxRow(integrationCandidateId);
+    if (row === undefined || row.state !== "completed") return undefined;
+    const payload = JSON.parse(row.payload_json) as {
+      readonly candidate?: IntegrationCandidate;
+      readonly integrationOutcome?: IntegrationCandidate["outcome"];
+      readonly publishOutcome?: PublishOutcome;
+    };
+    if (payload.candidate === undefined) return undefined;
+    return {
+      ...structuredClone(payload.candidate),
+      ...(payload.integrationOutcome === undefined
+        ? {}
+        : { outcome: structuredClone(payload.integrationOutcome) }),
+      ...(payload.publishOutcome === undefined
+        ? {}
+        : { publishOutcome: structuredClone(payload.publishOutcome) }),
+    };
+  }
+
+  /**
+   * Records a publish attempt's outcome next to the integration outcome in
+   * the same completed review-disposed payload. `published` is terminal
+   * (idempotent for the same outcome, refused for a different one); a prior
+   * `blocked: target-moved` may be replaced by a fresh attempt's outcome.
+   */
+  completePublish(integrationCandidateId: string, outcome: PublishOutcome): void {
+    const row = this.candidateOutboxRow(integrationCandidateId);
+    if (row === undefined || row.state !== "completed") {
+      throw new Error("integration-candidate-outbox-not-found");
+    }
+    const payload = JSON.parse(row.payload_json) as {
+      readonly candidate?: IntegrationCandidate;
+      readonly publishOutcome?: PublishOutcome;
+    };
+    if (payload.candidate === undefined) {
+      throw new Error("integration-candidate-outbox-not-found");
+    }
+    if (payload.publishOutcome?.status === "published") {
+      if (JSON.stringify(payload.publishOutcome) !== JSON.stringify(outcome)) {
+        throw new Error("publish-outcome-conflict");
+      }
+      return;
+    }
+    const changed = this.database
+      .prepare(
+        `UPDATE auto_iteration_outbox
+            SET payload_json = ?, version = version + 1
+          WHERE outbox_entry_id = ? AND version = ?`,
+      )
+      .run(
+        JSON.stringify({ ...payload, publishOutcome: structuredClone(outcome) }),
+        row.outbox_entry_id,
+        row.version,
+      );
+    if (Number(changed.changes) !== 1) {
+      throw new Error("publish-outcome-version-conflict");
+    }
   }
 
   /**
@@ -777,16 +912,7 @@ export class AutoIterationProjectStore {
     integrationCandidateId: string,
     outcome: IntegrationCandidate["outcome"],
   ): { applied: boolean; workOrderId: string; reviewDecisionId: string } {
-    const row = this.database
-      .prepare(
-        `SELECT outbox_entry_id, dedupe_key, payload_json, state, version
-           FROM auto_iteration_outbox
-          WHERE project_id = ? AND kind = 'review-disposed'
-            AND json_extract(payload_json, '$.candidate.integrationCandidateId') = ?`,
-      )
-      .get(this.projectId, integrationCandidateId) as
-      | (OutboxRow & { dedupe_key: string })
-      | undefined;
+    const row = this.candidateOutboxRow(integrationCandidateId);
     if (row === undefined || row.state !== "completed") {
       throw new Error("integration-candidate-outbox-not-found");
     }
@@ -1039,6 +1165,10 @@ function hydrateTenure(row: TenureRow): SupervisorTenure {
 }
 
 function hydrateWorkOrder(row: WorkOrderRow): WorkOrder {
+  const stored = JSON.parse(row.completion_condition_json) as WorkOrder["completionCondition"] & {
+    readonly review?: WorkOrder["review"];
+  };
+  const { review, ...completionCondition } = stored;
   return {
     workOrderId: row.work_order_id,
     objective: row.objective,
@@ -1050,12 +1180,11 @@ function hydrateWorkOrder(row: WorkOrderRow): WorkOrder {
       roleSlotId: row.issued_by_role_slot_id,
       generation: Number(row.issued_by_generation),
     },
-    completionCondition: JSON.parse(
-      row.completion_condition_json,
-    ) as WorkOrder["completionCondition"],
+    completionCondition: completionCondition as WorkOrder["completionCondition"],
     status: row.status,
     currentAttemptId: row.current_attempt_id,
     version: Number(row.version),
+    ...(review === undefined ? {} : { review }),
   };
 }
 
@@ -1142,6 +1271,19 @@ function hydrateReceipt(row: ReceiptRow): HandoffReceipt {
     return { ...base, level: "included-in-parent-input", parentCommandId: row.detail_id ?? "" };
   }
   return { ...base, level: "disposed", reviewDecisionId: row.detail_id ?? "" };
+}
+
+/** Namespaced so a LIKE prefix scan (reviewResultsForWorkOrder) never collides with other artifact ids. */
+function reviewResultArtifactIdPrefix(workOrderId: string): string {
+  return `review-result-${workOrderId}-`;
+}
+
+function reviewResultArtifactId(handoff: HandoffIdempotencyKey): string {
+  return `${reviewResultArtifactIdPrefix(handoff.workOrderId)}${handoff.attemptId}-${handoff.handoffId}`;
+}
+
+function likeEscape(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
 }
 
 function hydrateReview(row: ReviewRow): ReviewDecision {
