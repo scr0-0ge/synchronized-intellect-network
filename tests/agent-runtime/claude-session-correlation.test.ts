@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { ClaudeRuntimeBinding } from "../../src/agent-runtime/claude/session.ts";
-import type { NormalizedRuntimeEvent } from "../../src/agent-runtime/index.ts";
+import type { NormalizedRuntimeEvent, SessionProfile } from "../../src/agent-runtime/index.ts";
 import { claudeDiagnosticFilePath } from "../../src/agent-runtime/claude/diagnostics.ts";
 
 const profile = Object.freeze({ model: "sonnet", effortLevel: "low", executionMode: "single-agent", accessMode: "full-access" });
@@ -209,6 +209,31 @@ test("api_retry carrying a 429 keeps the existing behavior: the CLI's own retry 
   assert.equal(replay.events.some(event => event.kind === "progress" && event.activity === "retrying"), true);
 });
 
+// w306: real Claude CLI (2.1.267 and 2.1.270) against a fake HTTP 429, same
+// production transport (probe-429-capture.ts). The CLI exhausts its own
+// retry budget (system/api_retry x10, ~178s wire time in the live capture)
+// then settles on the same terminal result shape as the 401 fixture above,
+// with api_error_status 429. The only field difference between the two CLI
+// versions is 2.1.270's additive `result_index` on the result frame, which
+// this classification never reads.
+for (const version of ["2.1.267", "2.1.270"] as const) {
+  test(`real Claude ${version} stdout after a 429-exhausted retry budget classifies as rate-limited, not turn-failed`, async t => {
+    const replay = await replayCapture({ name: "429", version, expectedModel: "glm-5.3[1m]" });
+    t.diagnostic(JSON.stringify({ events: replay.events }));
+    // The full sequence is the measured answer to "what does the user see":
+    // one status update, one retrying indicator (yieldableProgress dedupes
+    // the other 9 identical api_retry frames -- this is not a per-attempt
+    // counter), an item that never produced text, then the failure.
+    assert.deepEqual(replay.events, [
+      { kind: "session-started" },
+      { kind: "turn-started" },
+      { kind: "progress", activity: "status" },
+      { kind: "progress", activity: "retrying" },
+      { kind: "item-started", itemType: "agent-message" },
+      { kind: "failed", category: "rate-limited" },
+    ]);
+  });
+}
 for (const interrupt of ["missing-queue", "nonempty-queue", "error", "malformed-body"] as const) {
   test(`a matching interrupt id still rejects ${interrupt}`, async () => {
     const replay = await replayCapture({ interrupt });
@@ -219,9 +244,94 @@ for (const interrupt of ["missing-queue", "nonempty-queue", "error", "malformed-
   });
 }
 
+const w289Profile = Object.freeze({ model: "glm-5.3[1m]", effortLevel: "default", executionMode: "single-agent" as const, accessMode: "full-access" as const });
+const w289ExpectedModel = "glm-5.3[1m]";
+
+test("real Claude 2.1.270 new session completes on the current wire shape (w289)", async t => {
+  const replay = await replayCapture({
+    name: "new-session", version: "2.1.270",
+    prompt: "W289 new-session probe: say hi",
+    stopHookCallbackId: "stop-32802d9f-18ff-4e63-943a-2434f32a3b35",
+    profile: w289Profile, expectedModel: w289ExpectedModel,
+  });
+  t.diagnostic(JSON.stringify({ events: replay.events }));
+  assert.equal(replay.events.at(-1)?.kind, "turn-completed");
+  assert.deepEqual(replay.events.filter(event => event.kind === "agent-message"), [{ kind: "agent-message", text: "W289_OK" }]);
+});
+
+test("real Claude 2.1.270 thinking + a real tool call + Stop hook completes (w289)", async t => {
+  const replay = await replayCapture({
+    name: "tool-call", version: "2.1.270",
+    prompt: "W289_TOOL_CALL probe: run the echo tool",
+    stopHookCallbackId: "stop-2ceaca74-1748-45c0-a955-a7b60e2114d6",
+    profile: w289Profile, expectedModel: w289ExpectedModel,
+  });
+  t.diagnostic(JSON.stringify({ events: replay.events }));
+  assert.equal(replay.events.at(-1)?.kind, "turn-completed");
+  assert.ok(replay.events.some(event => event.kind === "progress" && event.activity === "tool" && event.tool?.name === "Bash"),
+    "the Bash tool_use block surfaces as tool progress");
+  assert.deepEqual(replay.events.filter(event => event.kind === "agent-message"), [{ kind: "agent-message", text: "W289_TOOL_FOLLOWUP_OK" }]);
+});
+
+test("real Claude 2.1.270 interrupt confirms mid-turn on the current wire shape (w289)", async t => {
+  const replay = await replayCapture({
+    name: "interrupt", version: "2.1.270", interrupt: "valid", interruptAt: "turn-started",
+    prompt: "W289_SLOW probe: think slowly",
+    profile: w289Profile, expectedModel: w289ExpectedModel,
+  });
+  t.diagnostic(JSON.stringify({ events: replay.events }));
+  assert.deepEqual(replay.events.at(-1), { kind: "turn-interrupted", status: "interrupted" });
+  assert.equal(await replay.interruption, "confirmed");
+});
+
+test("real Claude 2.1.270 same-id resume completes on the current wire shape (w289)", async t => {
+  const replay = await replayCapture({
+    name: "resume", version: "2.1.270",
+    prompt: "W289 resume leg2: second turn, same session id",
+    stopHookCallbackId: "stop-1d1f20c7-427c-490a-8dc0-7085449fd3be",
+    profile: w289Profile, expectedModel: w289ExpectedModel,
+    expectedSessionIdentity: "478e4ebb-3e51-4865-87a4-b328e55b4d1c",
+  });
+  t.diagnostic(JSON.stringify({ events: replay.events }));
+  assert.equal(replay.events.at(-1)?.kind, "turn-completed");
+  assert.equal(replay.identity, "478e4ebb-3e51-4865-87a4-b328e55b4d1c");
+});
+
+test("real Claude 2.1.270 upstream 401 classifies as authentication-required on its own captured wire (w289)", async t => {
+  const replay = await replayCapture({
+    name: "401", version: "2.1.270",
+    prompt: "W289 401 probe: say hi",
+    profile: w289Profile, expectedModel: w289ExpectedModel,
+  });
+  t.diagnostic(JSON.stringify({ events: replay.events }));
+  assert.deepEqual(replay.events.at(-1), { kind: "failed", category: "authentication-required" });
+});
+
+test("real Claude 2.1.270 upstream 429 classifies as rate-limited on its captured wire (w289)", async t => {
+  const replay = await replayCapture({
+    name: "429", version: "2.1.270",
+    prompt: "W289 429 probe: say hi",
+    profile: w289Profile, expectedModel: w289ExpectedModel,
+  });
+  t.diagnostic(JSON.stringify({ events: replay.events }));
+  assert.deepEqual(replay.events.at(-1), { kind: "failed", category: "rate-limited" });
+});
+
 type InterruptCase = "valid" | "foreign-only" | "missing-queue" | "nonempty-queue" | "error" | "malformed-body";
-async function replayCapture(options: { name?: string; edit?: (lines: string[]) => string[]; interrupt?: InterruptCase } = {}) {
-  let lines = (await readFile(new URL(`./fixtures/claude-2.1.267-${options.name ?? "text"}.jsonl`, import.meta.url), "utf8")).trimEnd().split(/\r?\n/u);
+async function replayCapture(options: {
+  name?: string;
+  version?: "2.1.267" | "2.1.270";
+  edit?: (lines: string[]) => string[];
+  interrupt?: InterruptCase;
+  interruptAt?: "turn-started" | "item-started";
+  prompt?: string;
+  profile?: SessionProfile;
+  expectedModel?: string;
+  expectedSessionIdentity?: string;
+  stopHookCallbackId?: string;
+} = {}) {
+  const version = options.version ?? "2.1.267";
+  let lines = (await readFile(new URL(`./fixtures/claude-${version}-${options.name ?? "text"}.jsonl`, import.meta.url), "utf8")).trimEnd().split(/\r?\n/u);
   if (options.edit) lines = options.edit(lines);
   // initialize/get_settings are consumed before the binding is constructed.
   // Replay the subsequent stdout bytes unchanged, not hand-authored vendor frames.
@@ -257,20 +367,21 @@ async function replayCapture(options: { name?: string; edit?: (lines: string[]) 
       async receive() { return injected.shift() ?? lines[cursor++] ?? null; },
       async stop() { stops += 1; },
     },
-    profile,
+    profile: options.profile ?? profile,
     opaqueSessionReference: "w176-replay",
-    expectedModel: "claude-sonnet-5",
-    stopHookCallbackId: "w176-stop",
+    expectedModel: options.expectedModel ?? "claude-sonnet-5",
+    expectedSessionIdentity: options.expectedSessionIdentity,
+    stopHookCallbackId: options.stopHookCallbackId ?? "w176-stop",
     observeSessionIdentity(value) { identity = value; },
     permissionMode: options.name === "permission" ? "manual" : "bypassPermissions",
     async requestToolPermission() { permissionRequests += 1; return { behavior: "deny", message: "Offline probe denies write." }; },
     ultracodeConfirmed: false,
   });
-  await binding.send({ text: input });
+  await binding.send({ text: options.prompt ?? input });
   const events: NormalizedRuntimeEvent[] = [];
   for await (const event of binding.events()) {
     events.push(event);
-    if (event.kind === "item-started" && options.interrupt) {
+    if (event.kind === (options.interruptAt ?? "item-started") && options.interrupt) {
       interruption = binding.interrupt().then(() => "confirmed", error => error.category);
     }
   }

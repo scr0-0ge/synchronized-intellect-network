@@ -602,6 +602,7 @@ export const WORKBENCH_RUNTIME_FAILURE_CATEGORIES = Object.freeze([
   "invalid-input",
   "protocol-invalid",
   "protocol-rejected",
+  "rate-limited",
   "runtime-shutdown",
   "runtime-not-located",
   "runtime-unavailable",

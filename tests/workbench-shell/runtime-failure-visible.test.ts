@@ -150,15 +150,19 @@ async function publicView(t: TestContext, channel: ProjectChannel, root: string)
 }
 
 test("the real captured failed turn keeps its admitted reason through durable readback and the renderer boundary", async t => {
+  // failedProject() replays the real captured GLM [1310] wire through a
+  // binding built without the GLM endpoint URL, so the quota-paused gate
+  // (which requires that exact URL) cannot recognize it as that specific
+  // safe pause; it falls through to the generic 429 classification (w306).
   const { channel, open, root } = await failedProject(t);
   const recorded = await channel.snapshot();
   assert.equal(recorded.commands[0]?.status, "failed");
-  assert.deepEqual(recorded.commands[0]?.session?.events.at(-1), { kind: "failed", category: "turn-failed" });
+  assert.deepEqual(recorded.commands[0]?.session?.events.at(-1), { kind: "failed", category: "rate-limited" });
   await channel.close();
   const reopened = await open();
   registerTestClosable(t, reopened);
   const result = await publicView(t, reopened, root);
-  assert.deepEqual(result.view.commands[0]?.session?.timeline.at(-1), { kind: "failed", category: "turn-failed" });
+  assert.deepEqual(result.view.commands[0]?.session?.timeline.at(-1), { kind: "failed", category: "rate-limited" });
   assert.doesNotMatch(JSON.stringify(result), /API Error:|1310|redacted-request-id/);
 });
 
@@ -185,7 +189,7 @@ test("real transcript explains an observed failure and does not invent a missing
       return block.replace(/<[^>]*>/gu, "");
     };
     await t.test("captured turn failure", () => {
-      assert.match(failureText(command), /The runtime reported that this turn failed/u);
+      assert.match(failureText(command), /provider endpoint is rate-limited/u);
     });
     await t.test("authentication is named, not softened", () => {
       assert.match(failureText(withTimeline(command, [{ kind: "failed", category: "authentication-required" }])), /Authentication is required.*Settings/u);
@@ -201,6 +205,7 @@ test("real transcript explains an observed failure and does not invent a missing
       "invalid-input": [/invalid input or operation/u, /输入或操作不符合/u],
       "protocol-invalid": [/unrecognized protocol message/u, /无法识别的协议消息/u],
       "protocol-rejected": [/runtime refused the request/u, /运行时拒绝了请求/u],
+      "rate-limited": [/provider endpoint is rate-limited/u, /该端点正被限流/u],
       "runtime-shutdown": [/shutdown could not be confirmed/u, /无法确认它已退出/u],
       "runtime-not-located": [/CLI executable could not be found/u, /未找到 CLI 可执行文件/u],
       "runtime-unavailable": [/runtime is unavailable/u, /运行时不可用/u],

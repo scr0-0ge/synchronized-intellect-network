@@ -877,6 +877,9 @@ export class ClaudeRuntimeBinding implements ControllableRuntimeBinding {
             if (isAuthenticationFailureResult(message)) {
               throw new RuntimeAdapterError("authentication-required");
             }
+            if (isRateLimitedFailureResult(message)) {
+              throw new RuntimeAdapterError("rate-limited");
+            }
             throw new RuntimeAdapterError("turn-failed");
           }
           let context: RuntimeContextUsage | undefined;
@@ -1214,6 +1217,25 @@ function isAuthenticationFailureResult(message: Record<string, unknown>): boolea
   if (message.api_error_status === 401) return true;
   return typeof message.result === "string" &&
     /not logged in|please run \/login|authentication_failed/iu.test(message.result);
+}
+
+/**
+ * A 429 the CLI's own retry budget could not clear (w306 evidence: real
+ * Claude CLI 2.1.267 and 2.1.270 against a fake HTTP 429, same production
+ * transport). The CLI retries internally (system/api_retry, ~10 attempts,
+ * ~178s wire time) then settles on the same result shape as the 401 case
+ * above with `api_error_status: 429`. Status-code only -- unlike 401's
+ * "Not logged in", the CLI's 429 text ("Number of request tokens has
+ * exceeded your rate limit.") names no vendor-stable phrase worth matching.
+ * This runs after the GLM `[1310]` quota-exhausted check earlier in the
+ * result branch, which already returns on its own stricter, narrower match;
+ * that path is unchanged and unaffected by this one.
+ */
+function isRateLimitedFailureResult(message: Record<string, unknown>): boolean {
+  return message.subtype === "success" &&
+    message.is_error === true &&
+    message.terminal_reason === "api_error" &&
+    message.api_error_status === 429;
 }
 
 /** GLM's 429 text names no timezone; only a literal UTC reading is parsed, never guessed. */

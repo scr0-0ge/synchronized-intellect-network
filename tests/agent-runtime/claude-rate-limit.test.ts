@@ -72,12 +72,18 @@ test("Claude rate telemetry still requires the active Session identity even when
 });
 
 test("Claude captured GLM 1310 terminal ends once, without waiting or fabricating recovery", async () => {
+  // This replay omits the GLM endpoint URL context (see `replay()` below), so
+  // the stricter quota-paused gate cannot recognize the captured [1310] text
+  // as that specific safe pause -- it falls through to the generic 429
+  // classification (w306). It still fails closed on the first pass, without
+  // waiting or inventing a resumable state; that remains true whichever of
+  // the two non-quota-paused failure categories names it.
   const { events, binding, transport } = await replay(fixture.glmQuotaFrames);
   assert.deepEqual(events, [
     { kind: "session-started" },
     { kind: "turn-started" },
     { kind: "item-started", itemType: "agent-message" },
-    { kind: "failed", category: "turn-failed" },
+    { kind: "failed", category: "rate-limited" },
   ]);
   assert.equal(binding.effectiveProfile(), undefined); // No Stop hook in this wire.
   assert.equal(binding.interruptAvailability(), "unavailable");

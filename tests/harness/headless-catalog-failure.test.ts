@@ -16,6 +16,7 @@ const runtimeFailureCategoryCoverage = {
   "invalid-input": true,
   "protocol-invalid": true,
   "protocol-rejected": true,
+  "rate-limited": true,
   "runtime-shutdown": true,
   "runtime-not-located": true,
   "runtime-unavailable": true,
