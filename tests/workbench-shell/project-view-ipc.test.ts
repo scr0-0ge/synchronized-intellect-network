@@ -2508,7 +2508,7 @@ function validResult(cursor: number): WorkbenchHostedProjectResult {
   return {
     ok: true,
     view: {
-      project: { label: "Atlas Fieldnotes" },
+      project: { label: "Atlas Fieldnotes", packagedBootstrap: false },
       observation: { cursor, live: true },
       commands: [],
       initialSelectionKey: null,

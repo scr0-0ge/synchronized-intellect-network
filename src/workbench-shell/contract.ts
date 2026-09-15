@@ -807,6 +807,8 @@ export interface WorkbenchSessionProfileProjection {
 export interface WorkbenchProjectView {
   readonly project: {
     readonly label: string;
+    /** True only for the packaged first-run Home project, which cannot run Sessions. */
+    readonly packagedBootstrap: boolean;
   };
   readonly observation: {
     readonly cursor: number;

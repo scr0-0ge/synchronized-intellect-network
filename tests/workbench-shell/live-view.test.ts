@@ -340,7 +340,7 @@ test("live view emits one current sanitized full Project view first", async (t) 
   assert.deepEqual(result, {
     ok: true,
     view: {
-      project: { label: basename(projectDirectory) },
+      project: { label: basename(projectDirectory), packagedBootstrap: false },
       observation: { cursor: 7, live: true },
       commands: [
         {
@@ -2002,7 +2002,7 @@ test("live view ends malformed cursor observation with one fixed failure", async
     {
       ok: true,
       view: {
-        project: { label: "Cursor Project" },
+        project: { label: "Cursor Project", packagedBootstrap: false },
         observation: { cursor: 1, live: true },
         commands: [],
         initialSelectionKey: null,
@@ -2051,7 +2051,7 @@ test("unexpected channel completion revokes the live view with fixed failure", a
     {
       ok: true,
       view: {
-        project: { label: "Closing Channel Project" },
+        project: { label: "Closing Channel Project", packagedBootstrap: false },
         observation: { cursor: 0, live: true },
         commands: [],
         initialSelectionKey: null,

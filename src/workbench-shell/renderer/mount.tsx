@@ -2338,7 +2338,7 @@ const ResolvedWorkbench: Component<{
   const liveView = () =>
     emptyProjectRegistry()
       ? Object.freeze({
-          project: Object.freeze({ label: shellCopy.appTitle }),
+          project: Object.freeze({ label: shellCopy.appTitle, packagedBootstrap: false }),
           observation: Object.freeze({ cursor: 0, live: true as const }),
           commands: Object.freeze([]),
           initialSelectionKey: null,

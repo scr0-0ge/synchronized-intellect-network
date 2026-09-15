@@ -226,6 +226,7 @@ const noLaunchAdapter: ResumableAgentRuntimeAdapter = Object.freeze({
 export async function createWorkbenchBackend(options: {
   readonly projectDirectory: string;
   readonly databasePath: string;
+  readonly packagedBootstrap?: boolean;
   readonly adapter?: AgentRuntimeAdapter;
   readonly preferencePath?: string;
   readonly preferenceStore?: DirectSessionProfilePreferenceStore;
@@ -254,6 +255,7 @@ export async function createWorkbenchBackend(options: {
     const liveView = createWorkbenchLiveView({
       channel,
       projectDirectory: options.projectDirectory,
+      ...(options.packagedBootstrap === true ? { packagedBootstrap: true } : {}),
     });
     return createBackend(
       liveView,

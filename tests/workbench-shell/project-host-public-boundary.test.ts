@@ -26,6 +26,7 @@ test("the hosted Project public boundary reconstructs path-free snapshots and re
     view: {
       project: {
         label: "Shared Name",
+        packagedBootstrap: false,
       },
       observation: { cursor: 1, live: true },
       commands: [],
@@ -226,7 +227,7 @@ test("the hosted Project boundary preserves exact user text and fails closed on 
   const hostedResult = (event: unknown): unknown => ({
     ok: true,
     view: {
-      project: { label: "Shared Name" },
+      project: { label: "Shared Name", packagedBootstrap: false },
       observation: { cursor: 2, live: true },
       commands: [
         {

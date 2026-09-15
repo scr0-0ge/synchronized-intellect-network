@@ -87,9 +87,17 @@ export function createWorkbenchDeepseekEndpointKeySource(
 
 function resolveDeepseekProbeBaseUrl(
   environment: NodeJS.ProcessEnv,
+  savedOverrideBaseUrl: string,
 ): string {
+  // Same URL source the sessions use (w309): the saved Anthropic-face base
+  // URL wins when present, then the env override, then the contract default;
+  // the trailing `/anthropic` segment is stripped from whichever resolved so
+  // the platform-face `/models` probe appends cleanly.
   const explicit =
-    environment[DEEPSEEK_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar];
+    typeof savedOverrideBaseUrl === "string" &&
+    savedOverrideBaseUrl.trim().length > 0
+      ? savedOverrideBaseUrl
+      : environment[DEEPSEEK_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar];
   const resolved =
     typeof explicit === "string" && explicit.trim().length > 0
       ? explicit

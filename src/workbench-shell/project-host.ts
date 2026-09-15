@@ -144,6 +144,7 @@ export type WorkbenchProjectBackendFactory = (options: {
   readonly projectDirectory: string;
   readonly databasePath: string;
   readonly preferencePath: string;
+  readonly packagedBootstrap?: boolean;
   readonly adapter?: AgentRuntimeAdapter;
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
 }) => Promise<WorkbenchBackend>;
@@ -224,6 +225,7 @@ export type { WorkbenchProjectRemovalResult } from "./contract.ts";
 export async function createWorkbenchProjectHost(options: {
   readonly dataDirectory: string;
   readonly fallbackProjectDirectory: string;
+  readonly packagedBootstrapProjectDirectory?: string;
   readonly startupProjectDirectory?: string;
   readonly adapter?: AgentRuntimeAdapter;
   readonly preferencePath?: string;
@@ -235,6 +237,10 @@ export async function createWorkbenchProjectHost(options: {
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
 }): Promise<WorkbenchProjectHost> {
   const dataDirectory = canonicalDirectory(options.dataDirectory);
+  const packagedBootstrapProjectDirectory =
+    options.packagedBootstrapProjectDirectory === undefined
+      ? undefined
+      : canonicalDirectory(options.packagedBootstrapProjectDirectory);
   const paths = registryPaths(dataDirectory);
   const backendFactory = options.backendFactory ?? defaultBackendFactory;
   const availabilityProbe = boundedProjectAvailabilityProbe(
@@ -261,6 +267,7 @@ export async function createWorkbenchProjectHost(options: {
       atomicReplace,
       adapter: options.adapter,
       authGeneration: options.authGeneration,
+      packagedBootstrapProjectDirectory,
       historyHides,
       preferencePath,
       teardownBlocked: false,
@@ -292,6 +299,7 @@ export async function createWorkbenchProjectHost(options: {
         options.adapter,
         backendFactory,
         options.authGeneration,
+        packagedBootstrapProjectDirectory,
       ).catch(() => undefined);
       if (candidate !== undefined) {
         if (
@@ -339,6 +347,7 @@ export async function createWorkbenchProjectHost(options: {
           options.adapter,
           backendFactory,
           options.authGeneration,
+          packagedBootstrapProjectDirectory,
         ).catch(() => undefined);
         if (backend !== undefined) {
           active = {
@@ -369,6 +378,7 @@ export async function createWorkbenchProjectHost(options: {
           options.adapter,
           backendFactory,
           options.authGeneration,
+          packagedBootstrapProjectDirectory,
         ).catch(() => undefined);
         if (backend !== undefined) {
           if (
@@ -422,6 +432,7 @@ export async function createWorkbenchProjectHost(options: {
         options.adapter,
         backendFactory,
         options.authGeneration,
+        packagedBootstrapProjectDirectory,
       ).catch(() => undefined);
       if (restored !== undefined) {
         active = {
@@ -442,6 +453,7 @@ export async function createWorkbenchProjectHost(options: {
     atomicReplace,
     adapter: options.adapter,
     authGeneration: options.authGeneration,
+    packagedBootstrapProjectDirectory,
     historyHides,
     preferencePath,
     teardownBlocked: bootstrapTeardownBlocked,
@@ -457,6 +469,7 @@ function createHostController(options: {
   readonly atomicReplace: WorkbenchProjectRegistryAtomicReplace;
   readonly adapter?: AgentRuntimeAdapter;
   readonly authGeneration?: WorkLedgerAuthGenerationModule;
+  readonly packagedBootstrapProjectDirectory?: string;
   readonly historyHides: ProjectHistoryHideStore;
   readonly preferencePath: string;
   readonly teardownBlocked: boolean;
@@ -611,7 +624,15 @@ function createHostController(options: {
           {
             ok: true,
             view: {
-              project: { label: deriveProjectLabel(selected.canonicalDirectory) },
+              project: {
+                label: deriveProjectLabel(selected.canonicalDirectory),
+                packagedBootstrap:
+                  options.packagedBootstrapProjectDirectory !== undefined &&
+                  sameDirectory(
+                    selected.canonicalDirectory,
+                    options.packagedBootstrapProjectDirectory,
+                  ),
+              },
               observation: { cursor: 0, live: true },
               commands: [],
               initialSelectionKey: null,
@@ -695,6 +716,7 @@ function createHostController(options: {
       options.adapter,
       options.backendFactory,
       options.authGeneration,
+      options.packagedBootstrapProjectDirectory,
     ).catch(() => undefined);
     if (restored === undefined || closed) {
       await restored?.close().catch(() => undefined);
@@ -764,6 +786,7 @@ function createHostController(options: {
           options.adapter,
           options.backendFactory,
           options.authGeneration,
+          options.packagedBootstrapProjectDirectory,
         ).catch(() => undefined);
         if (candidate === undefined) {
           await reopenPriorProject(priorRecord);
@@ -2093,6 +2116,7 @@ async function openBackend(
   adapter: AgentRuntimeAdapter | undefined,
   backendFactory: WorkbenchProjectBackendFactory,
   authGeneration?: WorkLedgerAuthGenerationModule,
+  packagedBootstrapProjectDirectory?: string,
 ): Promise<WorkbenchBackend> {
   const ledgerDirectory = join(dataDirectory, ledgerDirectoryName);
   await mkdir(ledgerDirectory, { recursive: true });
@@ -2100,6 +2124,10 @@ async function openBackend(
     projectDirectory: record.canonicalDirectory,
     databasePath: join(ledgerDirectory, `${record.ledgerSlot}.sqlite`),
     preferencePath,
+    ...(packagedBootstrapProjectDirectory !== undefined &&
+    sameDirectory(record.canonicalDirectory, packagedBootstrapProjectDirectory)
+      ? { packagedBootstrap: true }
+      : {}),
     ...(adapter === undefined ? {} : { adapter }),
     ...(authGeneration === undefined ? {} : { authGeneration }),
   });

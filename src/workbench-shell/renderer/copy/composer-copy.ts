@@ -67,11 +67,9 @@ const englishCopy = {
     endpointOptionsLabel: "Endpoint options",
     selectableNote:
       "Only endpoints with a Catalog ready status can be selected.",
-    /* w283: the bootstrap Home project (`bootstrap-runtime-adapter.ts`)
-       never inspects any endpoint by design, so `selectableNote` above would
-       promise a catalog read that never comes. `projectRunsNoAgentSessions`
-       in `composer.tsx` detects that uniform not-inspected shape and swaps
-       in this sentence instead. */
+    /* The packaged bootstrap Home project never runs Agent Sessions, so this
+       note must not promise a catalog read. Its projected bootstrap flag is
+       available before the picker is opened. */
     noSessionsHereNote:
       "This Project doesn't run Agent Sessions, so no endpoint here can be selected.",
     workIntensityOptionsLabel: "Work Intensity options",

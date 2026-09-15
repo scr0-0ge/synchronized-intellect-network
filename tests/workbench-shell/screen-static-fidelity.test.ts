@@ -12,10 +12,7 @@ import type {
   WorkbenchHostedProjectView,
 } from "../../src/workbench-shell/contract.ts";
 import { publicRuntimeEndpointDiscovery } from "../../src/workbench-shell/contract.ts";
-import {
-  initialRendererState,
-  type WorkbenchDirectProfileState,
-} from "../../src/workbench-shell/renderer/view-model.ts";
+import { initialRendererState } from "../../src/workbench-shell/renderer/view-model.ts";
 import { createViteSsrTestServer } from "../helpers/vite-server.ts";
 import {
   emptyVisualFixture,
@@ -588,45 +585,28 @@ test("screens 01-03, 05 and 06 retain the remaining exact static fidelity contra
   });
 });
 
-/*
- * w283: the packaged bootstrap Home project (`bootstrap-runtime-adapter.ts`)
- * registers itself the same way an ordinary empty Project does, but its
- * decorated adapter refuses every inspect/start/resume by design. Before
- * this fix, the empty-Project screen, the composer's status note and the
- * endpoint picker's empty state all kept the copy written for a Project that
- * *can* start a Session, even once a completed catalog load proved this one
- * never will. `projectRunsNoAgentSessions` (composer.tsx) recognizes that
- * proof from the uniform not-inspected catalog shape
- * `discoverRuntimeEndpointComposition` never produces on its own
- * (`runtime-endpoint-composition.test.ts`'s "a blocked project reports both
- * fixed endpoints as not inspected" pins the exact shape), without a new
- * field on the wire.
- */
-const bootstrapBlockedProfile: WorkbenchDirectProfileState = Object.freeze({
-  ...initialRendererState.profile,
-  phase: "unavailable",
-  result: Object.freeze({
-    ok: false,
-    endpointDiscovery: publicRuntimeEndpointDiscovery([
-      { endpointId: "codex-desktop", category: "not-inspected" },
-      { endpointId: "claude-code-desktop", category: "not-inspected" },
-    ]),
-    error: Object.freeze({
-      category: "profile-unavailable",
-      message:
-        "Codex Session Profile options are unavailable. Keep your draft and try again.",
-    }),
+const packagedBootstrapView: WorkbenchHostedProjectView = Object.freeze({
+  ...emptyVisualFixture,
+  project: Object.freeze({
+    label: "Workbench Home",
+    packagedBootstrap: true,
   }),
-  feedback:
-    "Codex Session Profile options are unavailable. Keep your draft and try again.",
 });
 
-test("the packaged bootstrap Home Project shows honest copy once its uniform not-inspected catalog resolves (w283)", async () => {
+const ordinaryWorkbenchHomeView: WorkbenchHostedProjectView = Object.freeze({
+  ...emptyVisualFixture,
+  project: Object.freeze({
+    label: "Workbench Home",
+    packagedBootstrap: false,
+  }),
+});
+
+test("the packaged bootstrap Home Project shows honest copy on its first renderer frame (w310)", async () => {
   await withStaticFidelityModule(async (module) => {
     const emptyHtml = clean(renderToString(() =>
       module.EmptyProjectState({
         ...directComposerProps(emptyVisualFixture, undefined),
-        profile: bootstrapBlockedProfile,
+        view: packagedBootstrapView,
         onProviders: noOp,
       }),
     ));
@@ -646,7 +626,7 @@ test("the packaged bootstrap Home Project shows honest copy once its uniform not
     const composer = clean(renderToString(() =>
       module.DirectInputComposer({
         ...directComposerProps(emptyVisualFixture, undefined),
-        profile: bootstrapBlockedProfile,
+        view: packagedBootstrapView,
         onProviders: noOp,
       }),
     ));
@@ -659,7 +639,8 @@ test("the packaged bootstrap Home Project shows honest copy once its uniform not
     const popover = clean(renderToString(() =>
       module.ProfilePopover({
         kind: "endpoint",
-        profile: bootstrapBlockedProfile,
+        profile: initialRendererState.profile,
+        packagedBootstrap: true,
         endpoints: [],
         selectedEndpoint: undefined,
         models: [],
@@ -680,6 +661,19 @@ test("the packaged bootstrap Home Project shows honest copy once its uniform not
     assert.doesNotMatch(
       plainText(popover),
       /Only endpoints with a Catalog ready status can be selected\./u,
+    );
+
+    const ordinaryHtml = clean(renderToString(() =>
+      module.EmptyProjectState({
+        ...directComposerProps(emptyVisualFixture, undefined),
+        view: ordinaryWorkbenchHomeView,
+        onProviders: noOp,
+      }),
+    ));
+    assert.match(plainText(ordinaryHtml), /Start the first Agent Session/u);
+    assert.doesNotMatch(
+      plainText(ordinaryHtml),
+      /This Project doesn't run Agent Sessions/u,
     );
   });
 });

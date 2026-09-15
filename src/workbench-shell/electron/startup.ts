@@ -21,6 +21,8 @@ export interface WorkbenchStartupFileSystem {
 export interface WorkbenchProjectHostStartupOptions {
   readonly dataDirectory: string;
   readonly fallbackProjectDirectory: string;
+  /** The packaged Home directory; absent for every ordinary launch. */
+  readonly packagedBootstrapProjectDirectory?: string;
   readonly startupProjectDirectory?: string;
   readonly preferencePath: string;
 }
@@ -88,6 +90,7 @@ export async function initializeWorkbenchProjectHost<T>(options: {
     return options.createProjectHost({
       dataDirectory,
       fallbackProjectDirectory,
+      packagedBootstrapProjectDirectory: fallbackProjectDirectory,
       preferencePath,
     });
   }

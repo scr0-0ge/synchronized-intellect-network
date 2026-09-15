@@ -90,13 +90,15 @@ test("the observed packaged bootstrap and its blocked profile request close the 
     },
   });
   registerTestClosable(t, host);
-  const firstView = new Promise<void>((resolve) => {
+  const firstView = new Promise<boolean>((resolve) => {
     host.observeProject((result) => {
-      if (result.ok) resolve();
+      if (result.ok && "view" in result) {
+        resolve(result.view.project.packagedBootstrap);
+      }
     });
   });
 
-  await within(firstView, 2_000);
+  assert.equal(await within(firstView, 2_000), true);
   const profileResult = await host.loadDirectSessionProfile({
     kind: "catalog-default",
   });

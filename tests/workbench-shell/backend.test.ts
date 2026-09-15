@@ -3331,7 +3331,7 @@ test("production backend observes the real ProjectChannel with zero act or runti
   assert.deepEqual(result, {
     ok: true,
     view: {
-      project: { label: "Observation Project" },
+      project: { label: "Observation Project", packagedBootstrap: false },
       observation: { cursor: 0, live: true },
       commands: [],
       initialSelectionKey: null,

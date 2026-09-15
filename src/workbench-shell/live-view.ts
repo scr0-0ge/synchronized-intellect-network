@@ -152,9 +152,11 @@ export interface WorkbenchLiveView {
 export function createWorkbenchLiveView(options: {
   readonly channel: ProjectChannel;
   readonly projectDirectory: string;
+  readonly packagedBootstrap?: boolean;
 }): WorkbenchLiveView {
   const projectDirectory = resolve(options.projectDirectory);
   const projectLabel = deriveProjectLabel(projectDirectory);
+  const packagedBootstrap = options.packagedBootstrap === true;
   const sessionOrdinals = new Map<string, number>();
   const observations = new Set<ObservationState>();
   const continuationStops = new Map<string, WorkbenchContinuationStop>();
@@ -781,7 +783,7 @@ export function createWorkbenchLiveView(options: {
       commands.find((command) => command.session !== undefined) ??
       commands[0];
     return deepFreeze({
-      project: { label: projectLabel },
+      project: { label: projectLabel, packagedBootstrap },
       observation: { cursor: snapshot.cursor, live: true },
       commands,
       initialSelectionKey: initialSelection?.key ?? null,

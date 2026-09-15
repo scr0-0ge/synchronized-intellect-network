@@ -1433,7 +1433,7 @@ test("preload replacement isolates old disposers and retains a sanitized failure
   ipc.emit({
     ok: true,
     view: {
-      project: { label: "C:\\private\\project" },
+      project: { label: "C:\\private\\project", packagedBootstrap: false },
       observation: { cursor: 1, live: true },
       commands: [],
       initialSelectionKey: null,
@@ -1463,7 +1463,7 @@ function validResult(): WorkbenchHostedProjectResult {
   return {
     ok: true,
     view: {
-      project: { label: "Atlas Fieldnotes" },
+      project: { label: "Atlas Fieldnotes", packagedBootstrap: false },
       observation: { cursor: 2, live: true },
       commands: [
         {

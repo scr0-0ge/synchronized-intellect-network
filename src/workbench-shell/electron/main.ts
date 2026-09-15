@@ -52,14 +52,12 @@ import {
 } from "../kimi-platform-key.ts";
 import {
   createWorkbenchClaudeApiEndpointKeySource,
-  CLAUDE_API_ENDPOINT_ENV_CONTRACT,
   CLAUDE_API_ENDPOINT_KEY_SUBJECT,
 } from "../claude-api-endpoint-key.ts";
 import {
   createWorkbenchCodexApiEndpointKeySource,
   CODEX_API_ENDPOINT_KEY_SUBJECT,
 } from "../codex-api-endpoint-key.ts";
-import { CODEX_API_ENDPOINT_ENV_CONTRACT } from "../../agent-runtime/codex/endpoint-env-factory.ts";
 import {
   createEndpointCatalogFreshnessService,
   type EndpointCatalogFreshnessService,
@@ -687,18 +685,22 @@ function startPrimaryWorkbench(): void {
         ? { cliHomeBaseDirectory: dirname(electronUserDataDirectory) }
         : {}),
   });
-  // Ordinary Windows launches anchor conversations to physical Roaming even
-  // when Electron's Known Folders are redirected. Discover the same siblings.
+  // An isolated --user-data-dir is its own profile, not a sibling of the
+  // owner's Roaming profiles, so it has no historical recovery sources.
   const recoveryUserDataDirectory = dirname(projectHostDataDirectory);
   const recovery = createHistoricalRecoveryLibrary({
     dataDirectory: join(electronUserDataDirectory, "history-recovery-v1"),
-    sourceDiscovery: createDeferredProductionHistoryRecoverySourceDiscovery({
-      readAppDataDirectory: () =>
-        process.platform === "win32" && explicitUserDataDirectory === undefined
-          ? dirname(recoveryUserDataDirectory)
-          : app.getPath("appData"),
-      currentUserDataDirectory: recoveryUserDataDirectory,
-    }),
+    sourceDiscovery:
+      explicitUserDataDirectory === undefined
+        ? createDeferredProductionHistoryRecoverySourceDiscovery({
+            readAppDataDirectory: () => dirname(recoveryUserDataDirectory),
+            currentUserDataDirectory: recoveryUserDataDirectory,
+          })
+        : Object.freeze({
+            async discover() {
+              return Object.freeze([]);
+            },
+          }),
     exportChooser: Object.freeze({
       async choose(options: {
         readonly suggestedName: string;
@@ -917,17 +919,29 @@ function startPrimaryWorkbench(): void {
             safeStorage,
             storePath: endpointSecretStorePath,
           });
+        // Every key source's "Check connection" probe resolves its base URL
+        // from the same source the sessions use (w309): the saved override
+        // mirror below (hydrated from the preference store and updated on
+        // every save), then the endpoint's env contract, then the contract
+        // default. The getter is lazy — the mirror is filled in after this
+        // point — and an override that fails URL validation surfaces as the
+        // probe's `invalid-base-url` failure instead of a silent default.
+        // kimi-platform has no saved base URL surface; its probe already
+        // matches the session source (env contract, then default).
         glmEndpointKeySource = createWorkbenchGlmEndpointKeySource({
           store: glmEndpointSecretEnvelopeStore,
           environment: process.env,
+          resolveBaseUrlOverride: () => baseUrlOverrides["glm-coding-plan"],
         });
         kimiEndpointKeySource = createWorkbenchKimiEndpointKeySource({
           store: kimiEndpointSecretEnvelopeStore,
           environment: process.env,
+          resolveBaseUrlOverride: () => baseUrlOverrides["kimi-code"],
         });
         deepseekEndpointKeySource = createWorkbenchDeepseekEndpointKeySource({
           store: deepseekEndpointSecretEnvelopeStore,
           environment: process.env,
+          resolveBaseUrlOverride: () => baseUrlOverrides["deepseek-api"],
         });
         kimiPlatformEndpointKeySource = createWorkbenchKimiPlatformKeySource({
           store: kimiPlatformEndpointSecretEnvelopeStore,
@@ -936,25 +950,12 @@ function startPrimaryWorkbench(): void {
         claudeApiEndpointKeySource = createWorkbenchClaudeApiEndpointKeySource({
           store: claudeApiEndpointSecretEnvelopeStore,
           environment: process.env,
-          // "Test connection" honors the saved override (w245) over the
-          // env-var / contract default, same precedence the codex-api probe
-          // and prepareEndpoint use.
-          probeBaseUrl: (environment) =>
-            baseUrlOverrides["claude-api"].trim().length > 0
-              ? baseUrlOverrides["claude-api"]
-              : (environment[CLAUDE_API_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar]
-                  ?.trim() || CLAUDE_API_ENDPOINT_ENV_CONTRACT.defaultBaseUrl),
+          resolveBaseUrlOverride: () => baseUrlOverrides["claude-api"],
         });
         codexApiEndpointKeySource = createWorkbenchCodexApiEndpointKeySource({
           store: codexApiEndpointSecretEnvelopeStore,
           environment: process.env,
-          // "Test connection" honors the saved override (w223) over the
-          // env-var / contract default, same precedence prepareEndpoint uses.
-          probeBaseUrl: (environment) =>
-            baseUrlOverrides["codex-api"].trim().length > 0
-              ? baseUrlOverrides["codex-api"]
-              : (environment[CODEX_API_ENDPOINT_ENV_CONTRACT.baseUrlEnvVar]
-                  ?.trim() || CODEX_API_ENDPOINT_ENV_CONTRACT.defaultBaseUrl),
+          resolveBaseUrlOverride: () => baseUrlOverrides["codex-api"],
         });
         // Catalog freshness (ticket 14 / WO16 Part 3): zero-inference
         // /models pulls over the same key sources; enrollment persists

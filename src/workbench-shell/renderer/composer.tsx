@@ -202,24 +202,10 @@ export function preventFileDropNavigation(event: DragEvent): void {
   if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
 }
 
-/**
- * True once a completed catalog load shows every known endpoint as
- * `not-inspected` — a shape a real inspection attempt never produces
- * (`discoverRuntimeEndpointComposition` always resolves each endpoint to
- * `catalog-ready` or a specific failure category). Only the packaged
- * bootstrap Home project's decorated adapter skips inspection outright and
- * returns this uniform placeholder, so it identifies that Project without a
- * new field on the wire.
- */
 export function projectRunsNoAgentSessions(
-  profile: WorkbenchDirectProfileState,
+  view: WorkbenchHostedProjectView,
 ): boolean {
-  const statuses = profile.result?.endpointDiscovery.statuses;
-  return (
-    statuses !== undefined &&
-    statuses.length > 0 &&
-    statuses.every((status) => status.category === "not-inspected")
-  );
+  return view.project.packagedBootstrap;
 }
 
 export const CommandWithoutSession: Component<{
@@ -617,16 +603,14 @@ export const DirectInputComposer: Component<{
     if (dispose) onCleanup(dispose);
   });
   const currentUsageObservation = (): RuntimeUsageObservation | undefined => {
-    const rowKey = usageEndpointRowKey(commandRuntimeFamily(props.selected));
-    if (rowKey === undefined) return undefined;
-    const result = usageResult();
-    if (!result.ok) return undefined;
-    if (rowKey === "claude") {
-      return result.observation === null
-        ? undefined
-        : subscriptionUsageToUsageObservation("claude", result.observation);
-    }
-    return result.usage[rowKey];
+    const requested = recordedRequestedProfile(props.selected);
+    return usageObservationForEndpoint(
+      usageEndpointRowKey(
+        commandRuntimeFamily(props.selected),
+        requested?.endpointLabel,
+      ),
+      usageResult(),
+    );
   };
   const closePopover = (restoreFocus: boolean): void => {
     const trigger = openPopover()?.trigger;
@@ -848,6 +832,7 @@ export const DirectInputComposer: Component<{
                       kind={popover().kind}
                       anchor={popover().trigger}
                       profile={props.profile}
+                      packagedBootstrap={projectRunsNoAgentSessions(props.view)}
                       endpoints={endpoints()}
                       selectedEndpoint={selectedEndpoint()}
                       models={models()}
@@ -897,7 +882,7 @@ export const DirectInputComposer: Component<{
           {activeTurn()
             ? `${steerTitle()} · ${interruptTitle()}`
             : presentationText(props.profile.defaultPreference.feedback) ??
-              (projectRunsNoAgentSessions(props.profile)
+              (projectRunsNoAgentSessions(props.view)
                 ? composerFeedbackCopy.bootstrapProjectUnavailable
                 : presentationText(props.profile.feedback) ??
                   (props.profile.phase === "idle"
@@ -1257,6 +1242,7 @@ const ProfilePopover: Component<{
   readonly kind: ProfilePopoverKind;
   readonly anchor?: HTMLButtonElement;
   readonly profile: WorkbenchDirectProfileState;
+  readonly packagedBootstrap: boolean;
   readonly endpoints: readonly WorkbenchRuntimeEndpointOption[];
   readonly selectedEndpoint: WorkbenchRuntimeEndpointOption | undefined;
   readonly models: readonly WorkbenchModelOption[];
@@ -1687,7 +1673,7 @@ const ProfilePopover: Component<{
                     </For>
                   </div>
                   <p class="picker-note">
-                    {projectRunsNoAgentSessions(props.profile)
+                    {props.packagedBootstrap
                       ? pickerCopy.noSessionsHereNote
                       : pickerCopy.selectableNote}
                   </p>
@@ -1866,31 +1852,51 @@ const FixedModeChip: Component<{
 );
 
 /**
- * Runtime-family label -> Settings Usage card row key (w257). The label
- * (`commandRuntimeFamily`) is the durable, always-available identity for the
- * *selected command* -- unlike the profile picker's `selectedEndpoint()`,
- * which stays empty until the catalog is loaded (lazily, on first open) and
- * so cannot identify a freshly-selected, untouched existing session. The
- * label text itself is a locale-invariant brand name (identical in every
- * `runtime-profile-copy.ts` dictionary), so switching on it directly is safe.
+ * Recorded endpoint labels -> the literal key used by the usage store. The
+ * renderer's durable session projection exposes the family and endpoint
+ * labels, but not a separate endpoint id. Together they remain available
+ * before the lazily-loaded profile picker has a selected endpoint, and they
+ * distinguish every endpoint sharing a provider family.
  */
-function usageEndpointRowKey(
+export function usageEndpointRowKey(
   runtimeFamilyLabel: string,
+  endpointLabel: string | undefined,
 ): UsageEndpointRowKey | undefined {
-  switch (runtimeFamilyLabel) {
-    case "Codex":
+  switch (`${runtimeFamilyLabel}\u0000${endpointLabel ?? ""}`) {
+    case "Codex\u0000Subscription":
       return "codex";
-    case "Claude":
+    case "Codex\u0000API":
+      return "codex-api";
+    // Only the Claude Code desktop endpoint has the subscription snapshot;
+    // Claude API reads its own usage-observations slot instead.
+    case "Claude\u0000Subscription":
       return "claude";
-    case "GLM":
+    case "Claude\u0000API":
+      return "claude-api";
+    case "GLM\u0000GLM Coding Plan":
       return "glm";
-    case "DeepSeek":
+    case "DeepSeek\u0000DeepSeek API":
       return "deepseek";
-    case "Kimi":
+    case "Kimi\u0000Code":
       return "kimi";
+    case "Kimi\u0000Platform":
+      return "kimi-platform";
     default:
       return undefined;
   }
+}
+
+export function usageObservationForEndpoint(
+  endpointKey: UsageEndpointRowKey | undefined,
+  result: WorkbenchSubscriptionUsageResult,
+): RuntimeUsageObservation | undefined {
+  if (endpointKey === undefined || !result.ok) return undefined;
+  if (endpointKey === "claude") {
+    return result.observation === null
+      ? undefined
+      : subscriptionUsageToUsageObservation("claude", result.observation);
+  }
+  return result.usage[endpointKey];
 }
 
 function compactTokenCount(value: number): string {

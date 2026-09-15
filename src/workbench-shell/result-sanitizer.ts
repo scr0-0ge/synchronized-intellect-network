@@ -3620,14 +3620,17 @@ function sanitizeView(
   ];
   if (
     !isStrictDataRecord(value, expectedViewKeys) ||
-    !isStrictDataRecord(value.project, ["label"]) ||
+    !isStrictDataRecord(value.project, ["label", "packagedBootstrap"]) ||
     !isStrictDataRecord(value.observation, ["cursor", "live"]) ||
     !Array.isArray(value.commands)
   ) {
     throw new Error("invalid-view");
   }
   const projectLabel = requireString(value.project.label);
-  if (!isSafeProjectLabel(projectLabel)) {
+  if (
+    !isSafeProjectLabel(projectLabel) ||
+    typeof value.project.packagedBootstrap !== "boolean"
+  ) {
     throw new Error("invalid-project-label");
   }
   const cursor = requireCursor(value.observation.cursor);
@@ -3658,7 +3661,10 @@ function sanitizeView(
     throw new Error("invalid-selection");
   }
   return deepFreeze({
-    project: { label: projectLabel },
+    project: {
+      label: projectLabel,
+      packagedBootstrap: value.project.packagedBootstrap,
+    },
     observation: { cursor, live: true },
     commands,
     initialSelectionKey,

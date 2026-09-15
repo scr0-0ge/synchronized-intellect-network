@@ -80,7 +80,7 @@ function result(
   return sanitizeWorkbenchHostedProjectResult({
     ok: true,
     view: {
-      project: { label: "Atlas Fieldnotes" },
+      project: { label: "Atlas Fieldnotes", packagedBootstrap: false },
       observation: { cursor: turns.length, live: true },
       commands: [
         {

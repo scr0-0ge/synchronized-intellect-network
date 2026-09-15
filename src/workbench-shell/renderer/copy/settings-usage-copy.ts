@@ -17,6 +17,9 @@ const englishCopy = {
     glm: "GLM",
     deepseek: "DeepSeek",
     kimi: "Kimi",
+    "kimi-platform": "Kimi · Platform",
+    "claude-api": "Claude · API",
+    "codex-api": "Codex · API",
   },
   windowLabel: {
     "five-hour": "5-hour window",
@@ -41,6 +44,9 @@ const simplifiedChineseCopy = {
     glm: "GLM",
     deepseek: "DeepSeek",
     kimi: "Kimi",
+    "kimi-platform": "Kimi · 平台",
+    "claude-api": "Claude · API",
+    "codex-api": "Codex · API",
   },
   windowLabel: {
     "five-hour": "5 小时窗口",

@@ -61,7 +61,7 @@ async function glmObservationFromFixture() {
   return observation;
 }
 
-test("all four real Claude captures plus the real GLM 429 parse render as five rows in both languages", async () => {
+test("all four real Claude captures plus the real GLM 429 parse render as eight rows in both languages", async () => {
   const server = await createViteSsrTestServer({ configFile: false, appType: "custom", logLevel: "silent",
     plugins: [solid({ ssr: true })], root: fileURLToPath(new URL("../..", import.meta.url)),
     server: { middlewareMode: true } });
